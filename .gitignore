@@ -1,6 +1,9 @@
-data/
-dist/
-deploy/node_modules/
-deploy/probe.mjs
+classifier/data/
+classifier/dist/
+classifier/deploy/node_modules/
+
 __pycache__/
 *.pyc
+.scrypted-cred
+node_modules/
+audio-eval/data/
