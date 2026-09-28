@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import aiohttp
 import asyncio
 import logging
 from collections.abc import Callable
@@ -9,10 +10,17 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import KestrelApiError, KestrelClient
-from .const import CONF_POLL_TIMEOUT, DEFAULT_POLL_TIMEOUT, DOMAIN, KNOWN_CAMERA_SLUGS
+from .const import (
+    BIRDNET_GO_INTERNAL_URL,
+    CONF_POLL_TIMEOUT,
+    DEFAULT_POLL_TIMEOUT,
+    DOMAIN,
+    KNOWN_CAMERA_SLUGS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 CameraCallback = Callable[[list[dict[str, Any]]], None]
@@ -39,6 +47,7 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._camera_data: dict[str, dict[str, Any]] = {}
         self._camera_callbacks: set[CameraCallback] = set()
         self._poll_task: asyncio.Task[None] | None = None
+        self._species_map_task: asyncio.Task[None] | None = None
         self._poll_timeout = int(entry.options.get(CONF_POLL_TIMEOUT, DEFAULT_POLL_TIMEOUT))
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -58,17 +67,53 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._poll_task = self.hass.async_create_task(
                 self._async_poll_events(), "kestrel event long poll"
             )
+        if self._species_map_task is None:
+            self._species_map_task = self.hass.async_create_task(
+                self._async_load_species_map(), "kestrel birdnet species map"
+            )
+
+    async def _async_load_species_map(self) -> None:
+        """Fetch BirdNET-Go's common<->scientific name map once, best-effort.
+
+        Powers referenceImage/referenceImageInfoUrl signing for species with no
+        own photo (see websocket_api._sign_media_paths). BirdNET-Go being
+        unreachable, or not yet up, just means those fields stay absent until
+        the next entry reload -- never load-bearing for anything else.
+        """
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.get(
+                f"{BIRDNET_GO_INTERNAL_URL}/api/v2/species/all",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    return
+                payload = await response.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, OSError, ValueError):
+            return
+        species = payload.get("species") if isinstance(payload, dict) else None
+        if not isinstance(species, list):
+            return
+        mapping = {
+            str(item["commonName"]).strip().lower(): str(item["scientificName"])
+            for item in species
+            if isinstance(item, dict) and item.get("commonName") and item.get("scientificName")
+        }
+        if mapping:
+            self.hass.data.setdefault(DOMAIN, {})["birdnet_species_map"] = mapping
 
     async def async_stop(self) -> None:
         """Stop polling cleanly on unload and Home Assistant shutdown."""
-        if self._poll_task is None:
-            return
-        self._poll_task.cancel()
-        try:
-            await self._poll_task
-        except asyncio.CancelledError:
-            pass
-        self._poll_task = None
+        for attr in ("_poll_task", "_species_map_task"):
+            task = getattr(self, attr)
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            setattr(self, attr, None)
 
     @callback
     def async_register_camera_callback(self, add_cameras: CameraCallback) -> Callable[[], None]:

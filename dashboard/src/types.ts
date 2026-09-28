@@ -54,6 +54,8 @@ export interface Species {
   photo?: string | null;
   image?: string | null;
   photo_url?: string | null;
+  referenceImage?: string | null;
+  referenceImageInfoUrl?: string | null;
 }
 
 export interface Health {

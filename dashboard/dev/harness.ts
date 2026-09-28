@@ -27,8 +27,10 @@ let settings: Settings = { mutedSpecies: [], heardNotify: "new_only" };
 const hours = Array.from({ length: 24 }, (_, hour) => hour >= 7 && hour <= 11 ? 3 : hour >= 17 && hour <= 20 ? 2 : 0);
 const species: Species[] = [
   { species: "Northern Cardinal", grp: "bird", seen: true, heard: true, first: new Date(now - 2_000_000).toISOString(), last: new Date(now - 18_000).toISOString(), count30d: 12, hasPhoto: true, photo_url: media, cameras: { "88": 8, "104": 3, "103": 1 }, hours, newThisYear: true },
-  { species: "Eastern Gray Squirrel", grp: "mammal", seen: true, heard: false, first: new Date(now - 4_000_000).toISOString(), last: new Date(now - 30_000).toISOString(), count30d: 7, hasPhoto: true, photo_url: media, cameras: { "104": 5, "88": 2 }, hours: hours.map((n, i) => i < 8 ? n : 0), newThisYear: false },
-  { species: "Common Raccoon", grp: "mammal", seen: true, heard: true, first: new Date(now - 9_000_000).toISOString(), last: new Date(now - 86_000_000).toISOString(), count30d: 3, hasPhoto: false, cameras: { "88": 2, "103": 1 }, hours: hours.map((n, i) => i > 19 ? n + 2 : 0), newThisYear: false },
+  { species: "Eastern Gray Squirrel", grp: "mammal", seen: true, heard: false, first: new Date(now - 4_000_000).toISOString(), last: new Date(now - 30_000).toISOString(), count30d: 1, hasPhoto: true, photo_url: media, cameras: { "104": 5, "88": 2 }, hours: hours.map((n, i) => i < 8 ? n : 0), newThisYear: false },
+  { species: "Common Raccoon", grp: "mammal", seen: true, heard: true, first: new Date(now - 9_000_000).toISOString(), last: new Date(now - 86_000_000).toISOString(), count30d: 3, hasPhoto: false, referenceImage: media, cameras: { "88": 2, "103": 1 }, hours: hours.map((n, i) => i > 19 ? n + 2 : 0), newThisYear: false },
+  { species: "Eastern Screech-Owl", grp: "bird", seen: false, heard: true, first: new Date(now - 1_000_000).toISOString(), last: new Date(now - 500_000).toISOString(), count30d: 2, hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 20 ? 1 : 0), newThisYear: true },
+  { species: "Great Horned Owl", grp: "bird", seen: false, heard: true, first: new Date(now - 1_200_000).toISOString(), last: new Date(now - 600_000).toISOString(), count30d: 6, hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 19 ? 1 : 0), newThisYear: true },
 ];
 const health: Health = { detector: { name: "EVA Wildlife", provider: "ONNX", avgMs: 38, checksToday: 124 }, gpu: { usedMiB: 3900, totalMiB: 23040, util: 22 }, cameras: [{ id: 88, checksToday: 80, emptyChecksToday: 11, visitsToday: 4 }, { id: 103, checksToday: 26, emptyChecksToday: 5, visitsToday: 2 }, { id: 104, checksToday: 18, emptyChecksToday: 2, visitsToday: 1 }], storage: { dbMB: 41.4, mediaMB: 98.2, budgetMB: 300 }, birdnet: { online: true, lastHeardAt: new Date(now - 11 * 60_000).toISOString() }, corrections: { total: 18, sinceRetrain: 4 } };
 const subscribers = new Set<(message: { type: "event"; event: { type: "visit_new" | "visit_updated" | "camera"; data: unknown } }) => void>();
@@ -51,7 +53,7 @@ const fakeHass: HomeAssistant = {
     let result: unknown;
     if (type === "kestrel/cameras") result = cameras;
     else if (type === "kestrel/visits") result = { items: [visit], next: null };
-    else if (type === "kestrel/visit") result = message.visit_id === "fixture-heard-1" ? { ...visit, id: "fixture-heard-1", kind: "heard", audio: "/dev/fixtures/call.mp3", heard: null } : visit;
+    else if (type === "kestrel/visit") result = message.visit_id === "fixture-heard-1" ? { ...visit, id: "fixture-heard-1", kind: "heard", species: "Common Raccoon", snapshot: null, crop: null, clip: { state: "none" }, audio: "/dev/fixtures/call.mp3", heard: null } : visit;
     else if (type === "kestrel/visit/correct") {
       previousVisit = visit;
       const target = String(message.species ?? "unknown");

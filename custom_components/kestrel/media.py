@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -57,6 +58,25 @@ class KestrelMediaView(HomeAssistantView):
                 aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
             )
 
+        if kind in ("species_ref", "species_ref_info"):
+            # Static reference photo/attribution from BirdNET-Go's image cache
+            # (wikimedia/avicommons), keyed by scientific name -- long cache, these
+            # never change once fetched.
+            name = quote(media_id, safe="")
+            url = (
+                f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/image/{name}"
+                if kind == "species_ref"
+                else f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/species-image/info?name={name}"
+            )
+            return await self._stream(
+                request,
+                async_get_clientsession(self._hass),
+                url,
+                headers,
+                aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+                cache_control="public, max-age=2592000",
+            )
+
         coordinator: KestrelCoordinator | None = self._hass.data.get(DOMAIN, {}).get("coordinator")
         if coordinator is None:
             return web.Response(status=503, text="Kestrel is not connected")
@@ -75,6 +95,8 @@ class KestrelMediaView(HomeAssistantView):
         url: str,
         headers: dict[str, str],
         timeout: aiohttp.ClientTimeout,
+        *,
+        cache_control: str = "private, max-age=300",
     ) -> web.StreamResponse:
         try:
             async with session.get(
@@ -93,7 +115,7 @@ class KestrelMediaView(HomeAssistantView):
                     for name in _FORWARD_HEADERS
                     if name in upstream.headers
                 }
-                downstream_headers["Cache-Control"] = "private, max-age=300"
+                downstream_headers["Cache-Control"] = cache_control
                 response = web.StreamResponse(status=upstream.status, headers=downstream_headers)
                 await response.prepare(request)
                 async for chunk in upstream.content.iter_chunked(64 * 1024):

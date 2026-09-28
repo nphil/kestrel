@@ -1,10 +1,11 @@
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import KestrelMark from "../../../assets/kestrel-icon-128.png";
-import { api, asArray, asVisit, cameraSnapshotUrl, extractLabels, navigate, routeView, speciesArray, speciesFromDetail, speciesPhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
-import { ago, clamp, clockTime, dateTime, formatMiB, timestamp } from "../format.ts";
+import { api, asArray, asVisit, cameraSnapshotUrl, extractLabels, navigate, routeView, speciesArray, speciesFromDetail, speciesPhoto, speciesReferencePhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
+import { ago, clamp, clockTime, dateTime, formatMiB, pluralize, timestamp } from "../format.ts";
 import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
 import type { Camera, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, SpeciesDetail, Visit } from "../types.ts";
 import "./kestrel-lazy-image.ts";
+import "./kestrel-lazy-audio.ts";
 
 type ToastState = { message: string; actionLabel?: string; action?: () => void; duration?: number };
 type PendingUndo = { visitId: string; before?: Visit | null };
@@ -47,6 +48,7 @@ export class KestrelCameras extends LitElement {
     _audioByVisit: { state: true },
     _audioLoading: { state: true },
     _audioUrl: { state: true },
+    _visitReferencePhoto: { state: true },
     _heardConfirmed: { state: true },
   };
 
@@ -79,6 +81,7 @@ export class KestrelCameras extends LitElement {
   declare _audioByVisit: Map<string, string>;
   declare _audioLoading: string | null;
   declare _audioUrl: string | null;
+  declare _visitReferencePhoto: string | null;
   declare _heardConfirmed: boolean;
   declare narrow: boolean;
 
@@ -127,6 +130,7 @@ export class KestrelCameras extends LitElement {
     this._audioByVisit = new Map();
     this._audioLoading = null;
     this._audioUrl = null;
+    this._visitReferencePhoto = null;
     this._heardConfirmed = false;
     this.narrow = false;
   }
@@ -246,11 +250,13 @@ export class KestrelCameras extends LitElement {
       this._speciesDetail = null;
       this._pickerOpen = false;
       this._audioUrl = null;
+      this._visitReferencePhoto = null;
     }
     if (visitId !== oldVisitId) {
       this._visit = null;
       this._heardConfirmed = false;
       this._audioUrl = null;
+      this._visitReferencePhoto = null;
     }
     if (load && (view !== oldView || visitId !== oldVisitId)) void this._loadForView();
   }
@@ -345,6 +351,13 @@ export class KestrelCameras extends LitElement {
     if (!visit) throw new Error("Visit response was empty");
     this._visit = visit;
     this._audioUrl = visitAudio(visit);
+    this._visitReferencePhoto = null;
+    if (visit.kind === "heard" && !visitSnapshot(visit) && this._hass) {
+      try {
+        const detail = await api.speciesDetail(this._hass, visit.species);
+        if (this._isActive(generation) && id === this._visitId) this._visitReferencePhoto = speciesReferencePhoto(detail);
+      } catch { /* fall back to the heard-only hero */ }
+    }
     this._syncClipTimer();
   }
 
@@ -725,7 +738,14 @@ export class KestrelCameras extends LitElement {
     const progress = pending ? this._progress : 0;
     return html`<article class="visit-view">
       <section class="visit-hero sheet">
-        ${visit.clip?.state === "ready" && clip ? html`<video class="visit-video" src=${clip} controls autoplay muted playsinline preload="metadata" aria-label=${`${visit.species} visit clip`}></video>` : html`<kestrel-lazy-image class="visit-image" .src=${photo ?? ""} alt=${`${visit.species} at ${visit.camera.name}`} wide></kestrel-lazy-image>`}
+        ${visit.clip?.state === "ready" && clip
+          ? html`<video class="visit-video" src=${clip} controls autoplay muted playsinline preload="metadata" aria-label=${`${visit.species} visit clip`}></video>`
+          : photo
+            ? html`<kestrel-lazy-image class="visit-image" .src=${photo} alt=${`${visit.species} at ${visit.camera.name}`} wide></kestrel-lazy-image>`
+            : visit.kind === "heard"
+              ? html`<kestrel-lazy-image class="visit-image" .src=${this._visitReferencePhoto ?? ""} alt=${`${visit.species} reference photo`} wide><div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div></kestrel-lazy-image>`
+              : html`<kestrel-lazy-image class="visit-image" .src=${""} alt=${visit.species || "Unidentified animal"} wide></kestrel-lazy-image>`}
+        ${visit.kind === "heard" && !photo && this._visitReferencePhoto ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
         ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">The recording is still being finalized. This view updates when it's ready.</p></div>` : nothing}
         ${visit.clip?.state === "none" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
         ${visit.clip?.state === "deleted" ? html`<p class="media-note">This clip is no longer available.</p>` : nothing}
@@ -735,8 +755,9 @@ export class KestrelCameras extends LitElement {
         <div class="visit-title-row"><div><h1>${visit.species || "Unidentified animal"}</h1><p class="muted">${visit.camera.name} · ${dateTime(visit.startedAt)}</p></div><span class="score">${Math.round((visit.score ?? 0) * 100)}<small>%</small></span></div>
         <div class="visit-tags"><span class="status-chip"><i class="status-dot ${visit.kind === "heard" ? "info" : "ok"}"></i>${visit.kind === "heard" ? "Heard" : visit.grp === "bird" ? "Bird" : visit.grp === "mammal" ? "Mammal" : "Wildlife"}</span><span class="status-chip">${this._statusLabel(visit.status)}</span>${visit.firstEver ? html`<span class="status-chip new-tag">First visit</span>` : nothing}</div>
         <div class="visit-actions"><button class="pill primary" type="button" ?disabled=${confirmed || this._saving} @click=${() => this._confirmVisit()}>${confirmed ? "✓ Confirmed" : "✓ That's right"}</button><button class="pill secondary" type="button" ?disabled=${this._saving} @click=${this._openWrongPicker}>Wrong?</button></div>
+        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? html`<kestrel-lazy-audio .src=${this._audioUrl} label=${`Call recording of ${visit.species}`}></kestrel-lazy-audio>` : html`<span class="muted">No recording is available for this visit.</span>`}</section>` : nothing}
         ${heard ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Also heard: ${heard.species}</strong><span class="muted">Sound recorded near this visit</span></div><button class="pill secondary" type="button" ?disabled=${this._saving || this._heardConfirmed} @click=${() => this._confirmVisit(visit.id, true)}>${this._heardConfirmed ? "✓ Also heard" : "✓ Also heard"}</button>
-          ${this._audioUrl ? html`<audio controls preload="none" src=${this._audioUrl} aria-label=${`Call recording of ${heard.species}`}></audio>` : html`<button class="text-button" type="button" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} @click=${() => this._loadCallAudio(heard.visitId)}>${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"}</button>`}
+          ${this._audioUrl ? html`<kestrel-lazy-audio .src=${this._audioUrl} label=${`Call recording of ${heard.species}`}></kestrel-lazy-audio>` : html`<button class="text-button" type="button" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} @click=${() => this._loadCallAudio(heard.visitId)}>${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"}</button>`}
         </section>` : nothing}
       </div>
       ${this._pickerOpen ? this._renderCorrectionSheet(visit) : nothing}
@@ -746,6 +767,19 @@ export class KestrelCameras extends LitElement {
   private _statusLabel(status: Visit["status"]): string {
     const labels: Record<Visit["status"], string> = { auto: "Model guess", learned: "Learned", corrected: "Corrected", confirmed: "Confirmed", not_animal: "Not an animal", unknown: "Not sure" };
     return labels[status] ?? "Visit";
+  }
+
+  private _seenHeardLabel(species: Species): { icon: string; label: string } {
+    if (species.seen && species.heard) return { icon: "mdi:eye-outline", label: "Seen & heard" };
+    if (species.heard) return { icon: "mdi:waveform", label: "Heard" };
+    return { icon: "mdi:eye-outline", label: "Seen" };
+  }
+
+  private _photoFor(species: Species, detail?: unknown): { url: string | null; isReference: boolean } {
+    const own = speciesPhoto(species, detail);
+    if (own) return { url: own, isReference: false };
+    const reference = speciesReferencePhoto(detail, species);
+    return { url: reference, isReference: reference !== null };
   }
 
   private _renderCorrectionSheet(visit: Visit) {
@@ -778,10 +812,16 @@ export class KestrelCameras extends LitElement {
 
   private _renderSpeciesTile(species: Species) {
     const detail = this._selectedSpecies === species.species ? this._speciesDetail : null;
+    const photo = this._photoFor(species, detail);
+    const mark = this._seenHeardLabel(species);
     return html`<button class="species-tile" type="button" @click=${() => this._openSpecies(species.species)} aria-label=${`View ${species.species}`}>
-      <kestrel-lazy-image .src=${speciesPhoto(species, detail) ?? ""} alt=${species.species} square></kestrel-lazy-image>
-      <span class="species-name">${species.species}</span><span class="species-marks">${species.seen ? html`<span><ha-icon .icon=${"mdi:eye-outline"}></ha-icon>Seen</span>` : nothing}${species.heard ? html`<span><ha-icon .icon=${"mdi:waveform"}></ha-icon>Heard</span>` : nothing}${species.newThisYear ? html`<span class="new-tag">New this year</span>` : nothing}</span>
-      <span class="caption">${species.count30d} visits in 30 days</span>
+      <div class="species-photo">
+        <kestrel-lazy-image .src=${photo.url ?? ""} alt=${species.species} square>${species.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div>` : nothing}</kestrel-lazy-image>
+        ${photo.isReference ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
+      </div>
+      <span class="species-name">${species.species}</span>
+      <span class="species-marks"><span><ha-icon .icon=${mark.icon}></ha-icon>${mark.label}</span>${species.newThisYear ? html`<span class="new-tag">New this year</span>` : nothing}</span>
+      <span class="caption">${pluralize(species.count30d, "visit")} in 30 days</span>
     </button>`;
   }
 
@@ -791,18 +831,18 @@ export class KestrelCameras extends LitElement {
     const item = this._species.find((species) => species.species === speciesName);
     if (!item) return nothing;
     const detail = this._speciesDetail ? speciesFromDetail(this._speciesDetail, item) : item;
-    const photo = speciesPhoto(detail, this._speciesDetail);
+    const photo = this._photoFor(detail, this._speciesDetail);
     const max = Math.max(1, ...detail.hours.map((hour) => Number(hour) || 0));
     const cameras = Object.entries(detail.cameras ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 8);
     const muted = this._settings?.mutedSpecies.includes(detail.species) ?? false;
     const recent = this._speciesVisits.slice(0, 24);
     return html`<div class="scrim" @click=${this._closeSpecies}><section class="species-sheet sheet" role="dialog" aria-modal="true" aria-labelledby="species-title" @click=${(event: Event) => event.stopPropagation()}>
       <div class="sheet-handle" aria-hidden="true"></div><div class="sheet-head"><div><h2 id="species-title">${detail.species}</h2><p class="muted">${detail.grp === "bird" ? "Bird" : detail.grp === "mammal" ? "Mammal" : "Wildlife"}${detail.first ? ` · First seen ${dateTime(detail.first)}` : ""}</p></div><button class="icon-button" type="button" aria-label="Close" @click=${this._closeSpecies}><ha-icon .icon=${"mdi:close"}></ha-icon></button></div>
-      <div class="species-detail-hero"><kestrel-lazy-image .src=${photo ?? ""} alt=${detail.species} wide></kestrel-lazy-image><div class="species-count"><strong>${detail.count30d}</strong><span>visits in the last 30 days</span></div></div>
+      <div class="species-detail-hero"><div class="species-photo"><kestrel-lazy-image .src=${photo.url ?? ""} alt=${detail.species} wide>${detail.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div>` : nothing}</kestrel-lazy-image>${photo.isReference ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}</div><div class="species-count"><strong>${detail.count30d}</strong><span>${detail.count30d === 1 ? "visit" : "visits"} in the last 30 days</span></div></div>
       <section class="detail-section"><h3>When it visits</h3><div class="hours-chart" role="img" aria-label="Visits by hour of day">${Array.from({ length: 24 }, (_, hour) => html`<span class="hour-bar" style=${`--bar-height:${clamp(((Number(detail.hours[hour]) || 0) / max) * 100, 4, 100)}%`} title=${`${hour}:00 — ${detail.hours[hour] ?? 0} visits`}></span>`)}</div><div class="hours-labels"><span>12 am</span><span>6 am</span><span>12 pm</span><span>6 pm</span><span>12 am</span></div></section>
       <section class="detail-section"><h3>Cameras</h3>${cameras.length ? html`<ul class="simple-list">${cameras.map(([id, count]) => html`<li><span>${this._cameraName(id)}</span><strong>${count}</strong></li>`)}</ul>` : html`<p class="muted">No camera breakdown is available yet.</p>`}</section>
       <section class="detail-section"><h3>Recent visits</h3>${recent.length ? html`<ul class="visit-list">${recent.map((visit) => html`<li><button type="button" class="visit-row" @click=${() => this._openVisit(visit.id)}><span><strong>${visit.kind === "heard" ? "Heard" : visit.camera.name}</strong><small>${dateTime(visit.startedAt)}</small></span><ha-icon .icon=${"mdi:chevron-right"}></ha-icon></button></li>`)}</ul>${this._visitsNext ? html`<button class="text-button" type="button" @click=${() => this._loadMoreSpeciesVisits()}>Show more visits</button>` : nothing}` : html`<p class="muted">No recent visits found.</p>`}</section>
-      ${detail.heard || this._speciesCalls.length ? html`<section class="detail-section"><h3>Calls</h3>${this._speciesCalls.length ? html`<ul class="call-list">${this._speciesCalls.map((call) => html`<li><span>${this._cameraName(call.camera.id)} · ${ago(call.startedAt)}</span>${this._audioByVisit.has(call.id) ? html`<audio controls preload="none" src=${this._audioByVisit.get(call.id)} aria-label=${`${detail.species} call`}></audio>` : html`<button class="text-button" type="button" ?disabled=${this._audioLoading === call.id} @click=${() => this._loadCallAudio(call.id)}>${this._audioLoading === call.id ? "Loading…" : call.heard?.hasAudio || visitAudio(call) ? "Play call" : "Load call"}</button>`}</li>`)}</ul>` : html`<p class="muted">No call recordings are linked to these visits.</p>`}</section>` : nothing}
+      ${detail.heard || this._speciesCalls.length ? html`<section class="detail-section"><h3>Calls</h3>${this._speciesCalls.length ? html`<ul class="call-list">${this._speciesCalls.map((call) => html`<li><span>${this._cameraName(call.camera.id)} · ${ago(call.startedAt)}</span>${this._audioByVisit.has(call.id) ? html`<kestrel-lazy-audio .src=${this._audioByVisit.get(call.id)} label=${`${detail.species} call`}></kestrel-lazy-audio>` : html`<button class="text-button" type="button" ?disabled=${this._audioLoading === call.id} @click=${() => this._loadCallAudio(call.id)}>${this._audioLoading === call.id ? "Loading…" : call.heard?.hasAudio || visitAudio(call) ? "Play call" : "Load call"}</button>`}</li>`)}</ul>` : html`<p class="muted">No call recordings are linked to these visits.</p>`}</section>` : nothing}
       <div class="sheet-footer"><button class="pill secondary" type="button" @click=${() => this._toggleMute(item)}>${muted ? "Unmute notifications" : "Mute notifications"}</button><span class="caption">${muted ? "Muted for wildlife alerts" : "Wildlife alerts are enabled"}</span></div>
     </section></div>`;
   }
@@ -904,7 +944,7 @@ export class KestrelCameras extends LitElement {
     .error-state p { margin: var(--lu-space-1) 0 var(--lu-space-3); color: var(--lu-ink-2); font-size: var(--lu-type-label); }
     .pill { width: max-content; }
     .visit-view { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, .8fr); align-items: start; gap: var(--lu-space-5); max-width: 1440px; margin: 0 auto; }
-    .visit-hero { min-width: 0; overflow: hidden; padding: var(--lu-space-2); }
+    .visit-hero { position: relative; min-width: 0; overflow: hidden; padding: var(--lu-space-2); }
     kestrel-lazy-image.visit-image { display: block; width: 100%; aspect-ratio: 16 / 10; border-radius: var(--lu-radius-tile); }
     .visit-video { display: block; width: 100%; max-height: 68vh; aspect-ratio: 16 / 10; border-radius: var(--lu-radius-tile); background: var(--lu-tile); object-fit: contain; }
     .clip-progress { display: grid; gap: var(--lu-space-2); padding: var(--lu-space-4) var(--lu-space-2) var(--lu-space-2); }
@@ -940,14 +980,17 @@ export class KestrelCameras extends LitElement {
     .no-match { padding: var(--lu-space-4); }
     .special-choices { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); margin-top: var(--lu-space-4); }
     .wildlife-view, .insights-view { display: grid; gap: var(--lu-space-5); max-width: 1440px; margin: 0 auto; }
-    .species-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--lu-space-4); }
+    .species-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--lu-space-4); }
     .species-tile { display: grid; align-content: start; min-width: 0; gap: var(--lu-space-2); padding: 0 0 var(--lu-space-3); border: 0; border-radius: var(--lu-radius-card); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; }
     .species-tile:hover { background: var(--lu-tile); }
     .species-tile kestrel-lazy-image { display: block; width: 100%; }
+    .species-photo { position: relative; }
+    .heard-hero { display: grid; width: 100%; height: 100%; place-items: center; }
+    .heard-hero ha-icon { width: 40px; height: 40px; color: var(--lu-ink-3); }
     .species-name { padding: var(--lu-space-1) var(--lu-space-2) 0; overflow-wrap: anywhere; font-size: var(--lu-type-label); font-weight: 600; }
-    .species-marks { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); padding: 0 var(--lu-space-2); color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
-    .species-marks span { display: inline-flex; align-items: center; gap: 3px; }
-    .species-marks ha-icon { width: 15px; height: 15px; }
+    .species-marks { display: flex; flex-wrap: wrap; gap: var(--lu-space-3); padding: 0 var(--lu-space-2); color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
+    .species-marks span { display: inline-flex; align-items: center; gap: 5px; }
+    .species-marks ha-icon { width: 16px; height: 16px; }
     .species-tile .caption { padding: 0 var(--lu-space-2); }
     .show-more { margin: var(--lu-space-2) auto 0; }
     .species-detail-hero { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(110px,.6fr); align-items: center; gap: var(--lu-space-4); margin-bottom: var(--lu-space-5); }
@@ -968,7 +1011,7 @@ export class KestrelCameras extends LitElement {
     .visit-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
     .visit-row small { color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
     .call-list li { display: flex; min-height: var(--lu-target); align-items: center; justify-content: space-between; gap: var(--lu-space-2); border-bottom: 1px solid var(--lu-edge); color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
-    .call-list audio { width: min(100%, 280px); }
+    .call-list kestrel-lazy-audio { width: min(100%, 280px); }
     .sheet-footer { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-3); margin-top: var(--lu-space-5); padding-top: var(--lu-space-4); border-top: 1px solid var(--lu-edge); }
     .review-section, .noisy-section { padding: var(--lu-space-5); }
     .empty-inline { padding: var(--lu-space-3) 0; color: var(--lu-ink-2); font-size: var(--lu-type-label); }
@@ -1000,7 +1043,6 @@ export class KestrelCameras extends LitElement {
       .open-scrypted { min-height: 48px; padding: 0 var(--lu-space-2); font-size: var(--lu-type-caption); }
       .visit-view { grid-template-columns: 1fr; gap: var(--lu-space-4); }
       .focused-stream { min-height: 240px; }
-      .species-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--lu-space-3); }
       .health-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
       .scrim { padding: 0; }
       .correction-sheet, .species-sheet { width: 100%; max-height: min(90vh, 860px); padding: var(--lu-space-4); padding-bottom: calc(var(--lu-space-5) + env(safe-area-inset-bottom)); border-radius: var(--lu-radius-sheet) var(--lu-radius-sheet) 0 0; }

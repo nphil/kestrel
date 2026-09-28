@@ -97,6 +97,13 @@ export function speciesPhoto(species: Species, detail?: unknown): string | null 
   return mediaUrl(typeof direct === "string" ? direct : species.photo_url ?? species.photo ?? species.image ?? null);
 }
 
+export function speciesReferencePhoto(detail: unknown, species?: Species): string | null {
+  const item = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
+  const nested = item.species && typeof item.species === "object" ? item.species as Record<string, unknown> : item;
+  const direct = nested.referenceImage;
+  return mediaUrl(typeof direct === "string" ? direct : species?.referenceImage ?? null);
+}
+
 export function cameraSnapshotUrl(id: string | number): string | null {
   return mediaUrl(`media/camera/${id}.jpg`);
 }

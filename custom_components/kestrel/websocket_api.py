@@ -55,10 +55,24 @@ def _sign_media_paths(
             for key, item in value.items()
         }
         species = result.get("species")
-        if result.get("hasPhoto") is True and isinstance(species, str) and species:
+        has_photo = result.get("hasPhoto")
+        if has_photo is True and isinstance(species, str) and species:
             result["photo_url"] = _signed_media_url(
                 hass, "species", species + ".jpg", refresh_token_id
             )
+        elif has_photo is False and isinstance(species, str) and species:
+            scientific_name = (
+                hass.data.get(DOMAIN, {})
+                .get("birdnet_species_map", {})
+                .get(species.strip().lower())
+            )
+            if scientific_name:
+                result["referenceImage"] = _signed_media_url(
+                    hass, "species_ref", scientific_name, refresh_token_id
+                )
+                result["referenceImageInfoUrl"] = _signed_media_url(
+                    hass, "species_ref_info", scientific_name, refresh_token_id
+                )
         audio = result.get("audio")
         if isinstance(audio, dict):
             detection_id = audio.get("birdnetDetectionId")

@@ -1,5 +1,5 @@
 import { LitElement, css, html } from "lit";
-import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
+import { TOKENS_CSS } from "../styles/tokens.ts";
 
 export class KestrelLazyImage extends LitElement {
   static properties = {
@@ -57,8 +57,8 @@ export class KestrelLazyImage extends LitElement {
 
   private _onError(): void { this._failed = true; }
 
-  static styles = [TOKENS_CSS, COMMON_CSS, css`
-    :host { width: 100%; aspect-ratio: 4 / 3; overflow: hidden; border-radius: var(--lu-radius-tile); background: var(--lu-tile); }
+  static styles = [TOKENS_CSS, css`
+    :host { display: block; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; border-radius: var(--lu-radius-tile); background: var(--lu-tile); }
     :host([square]) { aspect-ratio: 1; }
     :host([wide]) { aspect-ratio: 16 / 10; }
     .frame { display: grid; width: 100%; height: 100%; min-height: 0; place-items: center; overflow: hidden; color: var(--lu-ink-3); }
@@ -69,8 +69,9 @@ export class KestrelLazyImage extends LitElement {
   render() {
     const source = this._visible && this.src && !this._failed ? this.src : "";
     return html`<div class="frame">
-      ${source ? html`<img src=${source} alt=${this.alt} loading="lazy" decoding="async" @error=${this._onError}>` : html`<ha-icon .icon=${this._failed ? "mdi:image-broken-variant" : "mdi:image-outline"} aria-hidden="true"></ha-icon>`}
-      <slot name="empty"></slot>
+      ${source
+        ? html`<img src=${source} alt=${this.alt} loading="lazy" decoding="async" @error=${this._onError}>`
+        : html`<slot name="empty"><ha-icon .icon=${this._failed ? "mdi:image-broken-variant" : "mdi:image-outline"} aria-hidden="true"></ha-icon></slot>`}
     </div>`;
   }
 }
