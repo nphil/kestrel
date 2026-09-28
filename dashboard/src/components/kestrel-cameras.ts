@@ -18,6 +18,7 @@ const SCRYPTED_URL = "https://192.168.1.69:10443";
 export class KestrelCameras extends LitElement {
   static properties = {
     hass: { attribute: false },
+    narrow: { type: Boolean },
     _config: { state: true },
     _view: { state: true },
     _visitId: { state: true },
@@ -79,6 +80,7 @@ export class KestrelCameras extends LitElement {
   declare _audioLoading: string | null;
   declare _audioUrl: string | null;
   declare _heardConfirmed: boolean;
+  declare narrow: boolean;
 
   private _hass?: HomeAssistant;
   private _connection?: HomeAssistant["connection"];
@@ -124,6 +126,7 @@ export class KestrelCameras extends LitElement {
     this._audioLoading = null;
     this._audioUrl = null;
     this._heardConfirmed = false;
+    this.narrow = false;
   }
 
   get hass(): HomeAssistant { return this._hass as HomeAssistant; }
@@ -599,6 +602,10 @@ export class KestrelCameras extends LitElement {
   private _openVisit(id: string): void { navigate("visit", `?v=${encodeURIComponent(id)}`); }
   private _returnLive(): void { this._selectedCamera = null; this._goTo("live"); }
 
+  private _onMenu(): void {
+    this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
+  }
+
   private _statusKind(health: Camera["health"]): string {
     return health === "ok" ? "ok" : health === "unstable" ? "warn" : "danger";
   }
@@ -617,7 +624,7 @@ export class KestrelCameras extends LitElement {
   private _renderHeader() {
     const title = this._view === "live" ? "Live cameras" : this._view === "wildlife" ? "Wildlife" : this._view === "insights" ? "AI check-up" : "Visit";
     return html`<header class="topbar">
-      ${this._view === "visit" ? html`<button class="back-button" type="button" aria-label="Back to live cameras" @click=${this._returnLive}><ha-icon .icon=${"mdi:arrow-left"}></ha-icon></button>` : nothing}
+      ${this._view === "visit" ? html`<button class="back-button" type="button" aria-label="Back to live cameras" @click=${this._returnLive}><ha-icon .icon=${"mdi:arrow-left"}></ha-icon></button>` : this.narrow ? html`<button class="icon-button menu-button" type="button" aria-label="Show sidebar" @click=${this._onMenu}><ha-icon .icon=${"mdi:menu"}></ha-icon></button>` : nothing}
       <img class="brand" src=${KestrelMark} alt="Kestrel mark" width="32" height="32">
       <div class="title-stack"><strong>Kestrel</strong><span>${title}</span></div>
       ${this._view === "live" ? html`<a class="open-scrypted" href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a>` : nothing}
@@ -773,7 +780,7 @@ export class KestrelCameras extends LitElement {
       <div class="section-heading"><div><h1>AI check-up</h1><p class="muted">A quick look at the wildlife system's health.</p></div><button class="icon-button" type="button" aria-label="Refresh check-up" @click=${() => this._loadForView()}><ha-icon .icon=${"mdi:refresh"}></ha-icon></button></div>
       <section class="review-section sheet"><div class="section-heading compact"><div><h2>Needs a look</h2><p class="muted">Visits that may need a correction.</p></div><span class="count-badge">${this._review.length}</span></div>${this._review.length ? html`<ul class="visit-list">${this._review.slice(0, 12).map((visit) => html`<li><button class="visit-row" type="button" @click=${() => this._openVisit(visit.id)}><kestrel-lazy-image class="review-thumb" .src=${visitSnapshot(visit) ?? ""} .alt=${visit.species} square></kestrel-lazy-image><span class="review-copy"><strong>${visit.species || "Unidentified animal"}</strong><small>${visit.camera.name} · ${ago(visit.startedAt)}</small></span><ha-icon .icon=${"mdi:chevron-right"}></ha-icon></button></li>`)}</ul>` : html`<p class="empty-inline">Nothing needs a review right now.</p>`}</section>
       <section class="health-grid">
-        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:brain"}></ha-icon><span>Wildlife detector</span></div><strong>${health?.detector.name ?? "Not available"}</strong><p>${health ? `${health.detector.provider} · ${health.detector.avgMs} ms average` : "Waiting for health data"}</p><small>${health?.detector.checksToday ?? 0} checks today</small></article>
+        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:brain"}></ha-icon><span>Wildlife detector</span></div><strong>${health?.detector.name ?? "Not available"}</strong><p>${health ? (health.detector.avgMs === null ? health.detector.provider : `${health.detector.provider} · ${health.detector.avgMs} ms average`) : "Waiting for health data"}</p><small>${health?.detector.checksToday ?? 0} checks today</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:expansion-card"}></ha-icon><span>GPU memory</span></div><strong>${health ? `${formatMiB(health.gpu.usedMiB)} / ${formatMiB(health.gpu.totalMiB)}` : "Not available"}</strong><div class="meter"><span style=${`width:${gpuPercent}%`}></span></div><small>${health?.gpu.util ?? 0}% GPU use</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:database"}></ha-icon><span>Wildlife storage</span></div><strong>${health ? `${storage.toFixed(1)} / ${health.storage.budgetMB} MB` : "Not available"}</strong><div class="meter"><span style=${`width:${storagePercent}%`}></span></div><small>${health ? `${health.storage.dbMB.toFixed(1)} MB database · ${health.storage.mediaMB.toFixed(1)} MB photos and clips` : "Waiting for health data"}</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:check-decagram"}></ha-icon><span>Corrections</span></div><strong>${health?.corrections.sinceRetrain ?? 0}</strong><p>since the last model retrain</p><small>${health?.corrections.total ?? 0} all-time corrections</small></article>
@@ -978,13 +985,12 @@ export class KestrelCameras extends LitElement {
     else if (this._view === "visit") view = this._renderVisit();
     else if (this._view === "wildlife") view = this._renderWildlife();
     else view = this._renderInsights();
-    return html`<ha-card>
-      <div class="app" aria-busy=${this._loading ? "true" : "false"}>
-        ${this._renderHeader()}${this._renderNav()}<main>
-          ${this._renderLoadError()}${view}
-        </main>${this._renderToast()}
-      </div>
-    </ha-card>`;
+    const shell = html`<div class="app" aria-busy=${this._loading ? "true" : "false"}>
+      ${this._renderHeader()}${this._renderNav()}<main>
+        ${this._renderLoadError()}${view}
+      </main>${this._renderToast()}
+    </div>`;
+    return this.localName === "kestrel-panel" ? shell : html`<ha-card>${shell}</ha-card>`;
   }
 }
 
@@ -996,3 +1002,9 @@ cardRegistry.customCards = cardRegistry.customCards ?? [];
 cardRegistry.customCards.push({ type: "kestrel-cameras", name: "Kestrel Cameras", description: "Camera views and wildlife visits." });
 
 declare global { interface HTMLElementTagNameMap { "kestrel-cameras": KestrelCameras; } }
+
+export class KestrelPanel extends KestrelCameras {}
+
+customElements.define("kestrel-panel", KestrelPanel);
+
+declare global { interface HTMLElementTagNameMap { "kestrel-panel": KestrelPanel; } }

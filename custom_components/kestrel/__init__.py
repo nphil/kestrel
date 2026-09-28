@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 
-from homeassistant.components import frontend
+from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
@@ -16,7 +16,17 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .client import KestrelClient
-from .const import CONF_API_KEY, CONF_URL, DOMAIN, INTEGRATION_VERSION, STATIC_PATH
+from .const import (
+    CONF_API_KEY,
+    CONF_URL,
+    DOMAIN,
+    INTEGRATION_VERSION,
+    PANEL_COMPONENT_NAME,
+    PANEL_SIDEBAR_ICON,
+    PANEL_SIDEBAR_TITLE,
+    PANEL_URL_PATH,
+    STATIC_PATH,
+)
 from .coordinator import KestrelCoordinator
 from .media import async_register_media_view
 from .websocket_api import async_setup_websocket_api
@@ -41,10 +51,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             lambda: sorted(frontend_dir.glob("kestrel.*.js"))
         )
         if bundles:
-            frontend.add_extra_js_url(
-                hass,
-                f"{STATIC_PATH}/{bundles[0].name}?v={INTEGRATION_VERSION}",
-            )
+            module_url = f"{STATIC_PATH}/{bundles[0].name}?v={INTEGRATION_VERSION}"
+            frontend.add_extra_js_url(hass, module_url)
+            domain_data["frontend_module_url"] = module_url
         else:
             _LOGGER.warning("Kestrel frontend bundle was not found in %s", frontend_dir)
     return True
@@ -60,7 +69,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     coordinator = KestrelCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
-    hass.data.setdefault(DOMAIN, {})["coordinator"] = coordinator
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    domain_data["coordinator"] = coordinator
+
+    module_url = domain_data.get("frontend_module_url")
+    if module_url and not domain_data.get("panel_registered"):
+        await panel_custom.async_register_panel(
+            hass,
+            frontend_url_path=PANEL_URL_PATH,
+            webcomponent_name=PANEL_COMPONENT_NAME,
+            sidebar_title=PANEL_SIDEBAR_TITLE,
+            sidebar_icon=PANEL_SIDEBAR_ICON,
+            module_url=module_url,
+            embed_iframe=False,
+            require_admin=False,
+        )
+        domain_data["panel_registered"] = True
+    elif not module_url:
+        _LOGGER.warning(
+            "Kestrel frontend bundle is unavailable; sidebar panel was not registered"
+        )
 
     async def stop_on_shutdown(event: object) -> None:
         await coordinator.async_stop()
@@ -80,6 +108,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
         domain_data = hass.data.get(DOMAIN, {})
         if domain_data.get("coordinator") is coordinator:
             domain_data.pop("coordinator", None)
+        if domain_data.pop("panel_registered", False):
+            frontend.async_remove_panel(hass, PANEL_URL_PATH)
     return unloaded
 
 

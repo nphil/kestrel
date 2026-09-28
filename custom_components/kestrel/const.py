@@ -12,10 +12,16 @@ DEFAULT_POLL_TIMEOUT = 25
 MIN_POLL_TIMEOUT = 1
 MAX_POLL_TIMEOUT = 25
 
-INTEGRATION_VERSION = "1.0.1"
-STATIC_PATH = "/kestrel"
+INTEGRATION_VERSION = "1.0.2"
+STATIC_PATH = "/kestrel-static"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera"})
 MEDIA_URL_TTL_HOURS = 12
+
+# Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).
+PANEL_URL_PATH = "kestrel"
+PANEL_COMPONENT_NAME = "kestrel-panel"
+PANEL_SIDEBAR_TITLE = "Cameras"
+PANEL_SIDEBAR_ICON = "mdi:cctv"
 
 # Preserve stable, readable entity IDs for the original wildlife cameras. New
 # wildlife cameras use a slug derived from the plugin's camera name.

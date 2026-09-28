@@ -57,7 +57,7 @@ export interface Species {
 }
 
 export interface Health {
-  detector: { name: string; provider: string; avgMs: number; checksToday: number };
+  detector: { name: string; provider: string; avgMs: number | null; checksToday: number };
   gpu: { usedMiB: number; totalMiB: number; util: number };
   cameras: Array<{ id: string | number; checksToday: number; emptyChecksToday: number; visitsToday: number }>;
   storage: { dbMB: number; mediaMB: number; budgetMB: number };
