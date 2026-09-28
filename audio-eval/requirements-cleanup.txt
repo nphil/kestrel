@@ -1,0 +1,11 @@
+# Extra, heavier dependencies for the one-time cleanup-method comparison
+# (cleanup_prepare.py / cleanup_score.py): MixIT needs graph-mode TensorFlow,
+# separate from the lightweight requirements.txt used for routine dataset
+# rebuilds. Install into its own venv, e.g.:
+#   python3 -m venv /tmp/kestrel-mixit-venv
+#   /tmp/kestrel-mixit-venv/bin/pip install -r audio-eval/requirements-cleanup.txt
+tensorflow-cpu==2.12.1
+numpy<1.24
+noisereduce==3.0.3
+soundfile
+webrtcvad-wheels

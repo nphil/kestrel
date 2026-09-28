@@ -1,0 +1,2 @@
+# Speech detection for rejecting spoken segments from camera ambience.
+webrtcvad-wheels>=2.0.14
