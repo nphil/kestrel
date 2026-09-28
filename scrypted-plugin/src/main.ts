@@ -116,6 +116,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private cameras = new Map<string, { id: string; name: string; nvrCardId: string | null }>();
     private pending = new Map<string, PendingDetection>();
     private detectorSessions = new Map<string, DetectorSession>();
+    private onlineListeners = new Map<string, { removeListener(): void }>();
     private cameraRuntime = new Map<string, CameraRuntime>();
     private eventWaiters = new Set<() => void>();
     private clipTimer?: NodeJS.Timeout;
@@ -148,6 +149,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         }
         await this.copyBrokerCredentials();
         await this.reconfigure();
+        this.setupOnlineListeners();
         this.connectBirdnet();
         this.startTimers();
         await this.refreshCameraStatus();
@@ -222,6 +224,43 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.cameras = cameras;
         await this.refreshCameraStatus();
         this.publishEvent('camera', await this.cameraList());
+    }
+
+    private allVideoCameras(): Map<string, { id: string; name: string; nvrCardId: string | null }> {
+        const state = sdk.systemManager.getSystemState();
+        const cameras = new Map<string, { id: string; name: string; nvrCardId: string | null }>();
+        for (const id of Object.keys(state)) {
+            const interfaces = systemDeviceValue<string[]>(id, 'interfaces');
+            if (!interfaces?.includes(ScryptedInterface.VideoCamera)) continue;
+            const device = sdk.systemManager.getDeviceById(id) as unknown as DeviceWithSettings;
+            if (!device) continue;
+            const nvrCardId = device.mixins?.includes('130') ? id : null;
+            cameras.set(id, { id, name: device.name || `Camera ${id}`, nvrCardId });
+        }
+        return cameras;
+    }
+
+    private setupOnlineListeners(): void {
+        for (const listener of this.onlineListeners.values()) listener.removeListener();
+        this.onlineListeners.clear();
+        for (const id of this.allVideoCameras().keys()) {
+            const runtime = this.runtime(id);
+            runtime.wasOnline = systemDeviceValue<boolean>(id, 'online') !== false;
+            const listener = sdk.systemManager.listenDevice(id, ScryptedInterface.Online, () => this.handleOnlineChange(id));
+            this.onlineListeners.set(id, listener);
+        }
+    }
+
+    private handleOnlineChange(cameraId: string): void {
+        const online = systemDeviceValue<boolean>(cameraId, 'online') !== false;
+        const runtime = this.runtime(cameraId);
+        if (runtime.wasOnline === true && !online) runtime.drops.push(Date.now());
+        runtime.wasOnline = online;
+    }
+
+    private cameraHealth(cameraId: string, online: boolean): 'ok' | 'unstable' | 'offline' {
+        if (!online) return 'offline';
+        return this.runtime(cameraId).drops.length >= 3 ? 'unstable' : 'ok';
     }
 
     private runtime(cameraId: string): CameraRuntime {
@@ -428,13 +467,12 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
 
     private async cameraList(): Promise<CameraInfo[]> {
         const items: CameraInfo[] = [];
-        for (const camera of this.cameras.values()) {
+        for (const camera of this.allVideoCameras().values()) {
             const online = systemDeviceValue<boolean>(camera.id, 'online') !== false;
             const runtime = this.runtime(camera.id);
             const latest = this.db.listVisits({ camera: camera.id, limit: 1 }).items[0];
-            const drops1h = runtime.drops.length;
-            const health = !online ? 'offline' : runtime.lastErrorAt && Date.now() - runtime.lastErrorAt < 10 * 60_000 ? 'unstable' : 'ok';
-            items.push({ id: camera.id, name: camera.name, nvrCardId: camera.nvrCardId, online, health, drops1h, wildlife: true,
+            items.push({ id: camera.id, name: camera.name, nvrCardId: camera.nvrCardId, online, health: this.cameraHealth(camera.id, online),
+                drops1h: runtime.drops.length, wildlife: this.cameras.has(camera.id),
                 lastDetection: latest ? { species: latest.species, at: latest.startedAt, visitId: latest.id } : null });
         }
         return items;
@@ -442,12 +480,10 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
 
     private async refreshCameraStatus(): Promise<void> {
         const statuses: unknown[] = [];
-        for (const camera of this.cameras.values()) {
-            const online = systemDeviceValue<boolean>(camera.id, 'online') !== false;
+        for (const camera of this.allVideoCameras().values()) {
+            this.handleOnlineChange(camera.id);
             const runtime = this.runtime(camera.id);
-            if (runtime.wasOnline === true && !online) runtime.drops.push(Date.now());
-            runtime.wasOnline = online;
-            statuses.push({ id: camera.id, online, health: !online ? 'offline' : runtime.lastErrorAt && Date.now() - runtime.lastErrorAt < 10 * 60_000 ? 'unstable' : 'ok' });
+            statuses.push({ id: camera.id, online: runtime.wasOnline !== false, health: this.cameraHealth(camera.id, runtime.wasOnline !== false) });
         }
         this.publishEvent('camera', statuses);
     }
@@ -495,14 +531,17 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const nested = message.detection && typeof message.detection === 'object' ? message.detection as BrokerMessage : {};
         const speciesValue = message.commonName ?? message.CommonName ?? message.species ?? message.Species ?? nested.commonName ?? nested.CommonName ?? nested.species;
         if (typeof speciesValue !== 'string' || !speciesValue.trim()) return;
+        const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime ?? message.time ?? message.Time;
+        const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
+        const startedAt = parsedTime && Number.isFinite(parsedTime) ? normalizedTime(parsedTime) : Date.now();
+        // A real, parseable BirdNET-Go detection was received on the topic -- mark it heard even if the
+        // source doesn't map to a watched camera below, so health.birdnet reflects real broker traffic.
+        this.db.setSetting('birdnetLastHeardAt', String(startedAt));
         const sourceValue = message.sourceName ?? message.SourceName ?? message.source ?? message.Source ?? message.camera ?? message.Camera ?? nested.source ?? nested.Source;
         const cameraId = this.cameraForBirdnetSource(String(sourceValue ?? ''));
         if (!cameraId) return;
         const camera = this.cameras.get(cameraId);
         if (!camera) return;
-        const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime ?? message.time ?? message.Time;
-        const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
-        const startedAt = parsedTime && Number.isFinite(parsedTime) ? normalizedTime(parsedTime) : Date.now();
         const confidence = asNumber(message.confidence ?? message.Confidence ?? message.score ?? nested.confidence);
         const score = confidence === undefined ? null : confidence > 1 ? confidence / 100 : confidence;
         const species = speciesValue.trim();
@@ -517,7 +556,6 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         visit.notify = !visit.muted && this.db.getSetting('heardNotify', 'new_only') !== 'never' && firstEver;
         this.db.saveVisit(visit, { audioFile });
         await this.linkRelatedVisit(visit);
-        this.db.setSetting('birdnetLastHeardAt', String(startedAt));
         this.publishEvent('visit_new', this.db.getVisit(id) ?? visit);
     }
 
@@ -710,18 +748,17 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const lastHeardAt = Number(this.db.getSetting('birdnetLastHeardAt', '0')) || null;
         const stats = this.db.correctionStats();
         const now = Date.now();
-        const cameras = await this.cameraList();
+        const counterItems = [...this.cameras.keys()].map(id => ({ id, ...this.db.cameraDailyStats(id, now) }));
         const gpu = this.gpuStats();
         const mediaMB = await this.directorySize(this.mediaDirs?.root ?? this.baseDir) / (1024 * 1024);
         const databaseFiles = await Promise.all([this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`].map(file => stat(file).catch(() => undefined)));
         const dbMB = databaseFiles.reduce((total, file) => total + (file?.size ?? 0), 0) / (1024 * 1024);
-        const counterItems = cameras.map(camera => ({ id: camera.id, ...this.db.cameraDailyStats(camera.id, now) }));
         return {
             detector: { name: detector.name || 'Wildlife Classifier', provider: provider ? String(provider) : 'ONNX', avgMs: this.averageDetectorMs(), checksToday: counterItems.reduce((sum, item) => sum + item.checksToday, 0) },
             gpu,
             cameras: counterItems,
             storage: { dbMB: Number(dbMB.toFixed(2)), mediaMB: Number(mediaMB.toFixed(2)), budgetMB: 300 },
-            birdnet: { online: !!this.client?.connected, lastHeardAt },
+            birdnet: lastHeardAt === null ? null : { online: now - lastHeardAt <= 30 * 60_000, lastHeardAt },
             corrections: { total: stats.total, sinceRetrain: stats.sinceRetrain },
         };
     }
@@ -968,6 +1005,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         ++this.brokerGeneration;
         for (const listener of this.cameraListeners.values()) listener.removeListener();
         this.cameraListeners.clear();
+        for (const listener of this.onlineListeners.values()) listener.removeListener();
+        this.onlineListeners.clear();
         for (const pending of this.pending.values()) clearTimeout(pending.timer);
         this.pending.clear();
         for (const session of this.detectorSessions.values()) clearTimeout(session.timer);
