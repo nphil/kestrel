@@ -25,6 +25,8 @@ const CLIP_POLL_MS = 5_000;
 const MEDIA_BUDGET_BYTES = 300 * 1024 * 1024;
 const MAX_LONG_POLLS = 100;
 const DETECTOR_SESSION_IDLE_MS = 3_000;
+const USUAL_SUGGESTIONS_WINDOW_MS = 30 * 24 * 60 * 60_000;
+const USUAL_SUGGESTIONS_LIMIT = 5;
 const SETTINGS: Setting[] = [
     { key: CAMERA_SETTING, title: 'Wildlife cameras', description: 'Select Scrypted cameras for animal detections and BirdNET matching.', type: 'device', deviceFilter: 'VideoCamera', multiple: true },
     { key: 'cooldownMinutes', title: 'Species cooldown (minutes)', description: 'Minimum interval between visits for the same species on one camera.', type: 'number', value: DEFAULT_COOLDOWN_MINUTES },
@@ -540,15 +542,19 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const suggestions: Visit['suggestions'] = [];
         if (modelLabel && modelLabel !== species && modelLabel !== 'Unidentified animal')
             suggestions.push({ species: modelLabel, why: 'model' });
-        const counts = new Map<string, number>();
-        for (const visit of this.db.listVisits({ camera: cameraId, limit: 50 }).items) {
-            if (visit.species === species || visit.status === 'not_animal' || visit.status === 'unknown' || visit.species === 'Unidentified animal') continue;
-            counts.set(visit.species, (counts.get(visit.species) ?? 0) + 1);
-        }
-        const usual = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
-        for (const [name] of usual)
-            if (!suggestions.some(item => item.species === name)) suggestions.push({ species: name, why: 'usual' });
+        for (const item of this.usualSuggestions(cameraId, species))
+            if (!suggestions.some(existing => existing.species === item.species)) suggestions.push(item);
         return suggestions;
+    }
+
+    // Species most often recorded (seen or heard) at this camera in the last 30 days, excluding
+    // this species itself and anything that isn't a confirmed/auto animal ID. Shared by seen
+    // visits (via suggestionsFor above) and heard visits (onBirdnetMessage) so both get the same
+    // "usual suspects" list; computed once at ingest, not on every GET.
+    private usualSuggestions(cameraId: string, species: string): Visit['suggestions'] {
+        const since = Date.now() - USUAL_SUGGESTIONS_WINDOW_MS;
+        return this.db.usualSpeciesAtCamera(cameraId, species, since, USUAL_SUGGESTIONS_LIMIT)
+            .map(name => ({ species: name, why: 'usual' as const }));
     }
 
 
@@ -677,7 +683,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             id, camera: { id: camera.id, name: camera.name }, kind: 'heard', startedAt, species, grp, status: 'auto', score,
             snapshot: null, crop: null, clip: { state: 'none', expectedReadyAt: null }, heard: null,
             audio: birdnetDetectionId !== null || birdnetClip !== null ? { birdnetDetectionId, birdnetClip } : null,
-            suggestions: [],
+            suggestions: this.usualSuggestions(cameraId, species),
             firstEver, muted: this.mutedSpecies().includes(species), notify: false,
         };
         visit.notify = !visit.muted && this.db.getSetting('heardNotify', 'new_only') !== 'never' && firstEver;

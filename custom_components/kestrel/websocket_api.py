@@ -67,7 +67,7 @@ def _sign_media_paths(
                 .get("birdnet_species_map", {})
                 .get(species.strip().lower())
             )
-            if scientific_name and birdnet_availability.image_available_now(hass, scientific_name) is True:
+            if scientific_name and birdnet_availability.image_available_now(hass, scientific_name) is not False:
                 result["referenceImage"] = _signed_media_url(
                     hass, "species_ref", scientific_name, refresh_token_id
                 )
@@ -80,7 +80,7 @@ def _sign_media_paths(
             result["audio"] = (
                 _signed_media_url(hass, "birdnet_audio", str(detection_id), refresh_token_id)
                 if detection_id is not None
-                and birdnet_availability.audio_available_now(hass, str(detection_id)) is True
+                and birdnet_availability.audio_available_now(hass, str(detection_id)) is not False
                 else None
             )
         heard = result.get("heard")
@@ -88,7 +88,7 @@ def _sign_media_paths(
             heard_detection_id = heard.get("birdnetDetectionId")
             if heard_detection_id is not None and birdnet_availability.audio_available_now(
                 hass, str(heard_detection_id)
-            ) is True:
+            ) is not False:
                 heard["audio_url"] = _signed_media_url(
                     hass, "birdnet_audio", str(heard_detection_id), refresh_token_id
                 )

@@ -41,7 +41,7 @@ export class KestrelLazyAudio extends LitElement {
   render() {
     if (!this.src) return nothing;
     if (this._failed) {
-      return html`<p class="fallback"><ha-icon .icon=${"mdi:volume-off"} aria-hidden="true"></ha-icon>Can't play this format here.</p>`;
+      return html`<p class="fallback"><ha-icon .icon=${"mdi:volume-off"} aria-hidden="true"></ha-icon>Couldn't load this recording.</p>`;
     }
     return html`<audio controls preload=${this.preload} src=${this.src} aria-label=${this.label} @error=${this._onError}></audio>`;
   }

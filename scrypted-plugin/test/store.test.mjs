@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { KestrelStore } from '../src/store.ts';
 
-function makeVisit(id, species, score, startedAt) {
+function makeVisit(id, species, score, startedAt, cameraId = '88') {
     return {
         id,
-        camera: { id: '88', name: 'Backyard Camera' },
+        camera: { id: cameraId, name: cameraId === '88' ? 'Backyard Camera' : 'Back Door Camera' },
         kind: 'seen',
         startedAt,
         species,
@@ -223,6 +223,48 @@ test('regroupHeardVisits reclassifies known non-bird species, drops insects unle
         const survivingCricket = store.db.prepare("SELECT grp FROM visits WHERE id='cricket-2'").get();
         assert.ok(survivingCricket, 'the corrected insect row survives because a correction references it');
         assert.equal(survivingCricket.grp, 'bird', 'a protected drop-candidate is left ungrouped rather than silently reclassified');
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('usualSpeciesAtCamera ranks by count within the window, excludes the given species and non-identifications, and stays per-camera', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-usual-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        const now = Date.parse('2026-09-28T12:00:00Z');
+        const windowMs = 30 * 24 * 60 * 60 * 1000;
+        const within = (daysAgo) => now - daysAgo * 24 * 60 * 60 * 1000;
+        let n = 0;
+        const seen = (species, daysAgo, camera = '88') => store.saveVisit(makeVisit(`v${n++}`, species, 0.8, within(daysAgo), camera));
+        const heard = (species, daysAgo, camera = '88') => store.saveVisit(makeHeardVisit(`h${n++}`, species, within(daysAgo), camera));
+
+        // Robin: 3 sightings (seen+heard mixed) -- should rank first.
+        seen('American Robin', 1); heard('American Robin', 2); seen('American Robin', 5);
+        // Jay: 2 sightings -- second place.
+        seen('Blue Jay', 3); heard('Blue Jay', 10);
+        // Wren and Crow: 1 sighting each -- tied for third, alphabetical tiebreak (Crow before Wren).
+        seen('Carolina Wren', 15);
+        seen('American Crow', 20);
+        // Excluded: not_animal/unknown status, and the literal "Unidentified animal" species, even
+        // though they would otherwise be frequent enough to rank.
+        const notAnimal = makeVisit('excl-1', 'Squirrel', 0.9, within(1), '88'); notAnimal.status = 'not_animal';
+        store.saveVisit(notAnimal);
+        const unknownStatus = makeVisit('excl-2', 'Fox', 0.9, within(1), '88'); unknownStatus.status = 'unknown';
+        store.saveVisit(unknownStatus);
+        seen('Unidentified animal', 1);
+        // Outside the 30-day window -- must not count.
+        seen('Great Horned Owl', 45);
+        // A different camera entirely -- must not leak in.
+        seen('Northern Cardinal', 1, '103');
+
+        const usual = store.usualSpeciesAtCamera('88', 'American Robin', now - windowMs, 5);
+        assert.deepEqual(usual, ['Blue Jay', 'American Crow', 'Carolina Wren'],
+            'own species excluded; ranked by count then alphabetically; window/status/other-camera exclusions applied');
+
+        const limited = store.usualSpeciesAtCamera('88', 'zzz-nonexistent', now - windowMs, 2);
+        assert.deepEqual(limited, ['American Robin', 'Blue Jay'], 'limit is respected');
     } finally {
         store.close();
         await rm(directory, { recursive: true, force: true });

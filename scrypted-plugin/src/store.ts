@@ -466,6 +466,19 @@ export class KestrelStore {
         return { items, next: items.length === limit ? items[items.length - 1].startedAt : null };
     }
 
+    // Species most often recorded (seen or heard) at this camera in the last `since`..now window,
+    // excluding the visit's own species and anything that isn't a confirmed/auto animal ID. A
+    // single GROUP BY, not a row fetch-and-count in JS -- cheap enough to run at ingest.
+    usualSpeciesAtCamera(cameraId: string, excludeSpecies: string, since: number, limit: number): string[] {
+        const rows = this.db.prepare(`
+            SELECT species FROM visits
+            WHERE camera_id=? AND started_at>=? AND species<>? AND species<>'Unidentified animal'
+            AND status NOT IN ('not_animal','unknown')
+            GROUP BY species ORDER BY COUNT(*) DESC, species ASC LIMIT ?
+        `).all(cameraId, since, excludeSpecies, limit) as { species: string }[];
+        return rows.map(row => row.species);
+    }
+
     listReview(): Visit[] {
         return (this.db.prepare("SELECT * FROM visits WHERE review_flag=1 OR status='unknown' ORDER BY started_at DESC LIMIT 50").all() as unknown as RawVisit[]).map(row => this.decodeVisit(row));
     }
