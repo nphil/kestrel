@@ -299,8 +299,8 @@ var X=globalThis,F=X.ShadowRoot&&(X.ShadyCSS===void 0||X.ShadyCSS.nativeShadow)&
     .heard-hero ha-icon { width: 40px; height: 40px; color: var(--lu-ink-3); }
     .species-name { padding: var(--lu-space-1) var(--lu-space-2) 0; overflow-wrap: anywhere; font-size: var(--lu-type-label); font-weight: 600; }
     .species-marks { display: flex; flex-wrap: wrap; gap: var(--lu-space-3); padding: 0 var(--lu-space-2); color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
-    .species-marks span { display: inline-flex; align-items: center; gap: 5px; }
-    .species-marks ha-icon { width: 16px; height: 16px; }
+    .species-marks span { display: inline-flex; align-items: center; gap: var(--lu-space-2); }
+    .species-marks ha-icon { width: 16px; height: 16px; flex: none; }
     .species-tile .caption { padding: 0 var(--lu-space-2); }
     .show-more { margin: var(--lu-space-2) auto 0; }
     .species-detail-hero { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(110px,.6fr); align-items: center; gap: var(--lu-space-4); margin-bottom: var(--lu-space-5); }
@@ -359,6 +359,7 @@ var X=globalThis,F=X.ShadowRoot&&(X.ShadyCSS===void 0||X.ShadyCSS.nativeShadow)&
       .sheet-handle { display: block; }
     }
     @container (max-width: 400px) {
+      .species-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
       .camera-grid { grid-template-columns: 1fr; }
       .health-grid { grid-template-columns: 1fr; }
       .section-heading { align-items: flex-start; }

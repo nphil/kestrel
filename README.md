@@ -1,115 +1,123 @@
-<p align="center"><img src="assets/banner.png" alt="Wildlife Classifier: birds and backyard animals for Scrypted" width="100%"></p>
+<p align="center"><img src="assets/banner.png" alt="Kestrel: cameras and wildlife AI for Home Assistant" width="100%"></p>
 
-# Wildlife Classifier
+# Kestrel
 
-Names the birds and animals your cameras see, for [Scrypted](https://scrypted.app).
-When Scrypted's NVR spots an **animal**, this model looks at the crop and says
-*which* one: "Northern Cardinal", "Common Raccoon", "Eastern Gray Squirrel", or
-nothing when it isn't sure.
+A calm, fast **Cameras** panel for Home Assistant, built on
+[Scrypted](https://scrypted.app), with wildlife AI on top: it names the birds
+and animals your cameras **see** and **hear**, keeps a life list, sends a
+notification that opens straight to the clip, and learns from your corrections.
 
-It replaces Scrypted's stock **Bird Classifier** and, on the same test photos,
-gets about **twice as many right in clear shots, and four times as many from
-security-camera-quality frames**. It also knows mammals, which the stock model
-does not.
+Kestrel deliberately does **not** copy what Scrypted already does well (recording
+timelines, scrubbing, search, face training) — every view links out to Scrypted
+for those.
 
-## How it works
-
-1. **The model:** [EVA-02 Large, fine-tuned on iNaturalist 2021](https://huggingface.co/timm/eva02_large_patch14_clip_336.merged2b_ft_inat21)
-   (92.1% top-1 across 10,000 species).
-2. **Trimmed to your area:** only the birds and mammals with research-grade
-   iNaturalist sightings within 50 km of home are kept (plus domestic cats and
-   dogs, which iNaturalist does not count as wild). Fewer choices means it can't
-   guess a bird from another continent. For home (Atlanta area) that is
-   **268 classes: 233 birds, 35 mammals** — see [`species/atlanta.json`](species/atlanta.json).
-3. **Exported to ONNX** in the exact shape Scrypted's ONNX plugin loads as a
-   custom model, checked against PyTorch on export.
-4. **Installed into Scrypted** as the *Animal Classifier* on the cameras you pick.
-   Scrypted loads it once and keeps it on the GPU.
-
-## Results
-
-390 photos of the 60 most-seen local birds and 20 most-seen local mammals, all
-taken **2023 or later**, so neither model can have trained on them. Each photo
-is scored three ways: as taken, degraded like a crop out of a compressed
-security-camera stream, and the same in grayscale like IR night vision.
-"Shown and right" is what you actually experience: of the labels Scrypted
-would display (score above 50%), how many are correct.
-
-| Birds (290 photos both models know) | Wildlife Classifier | Stock Bird Classifier |
+| Live | Wildlife | AI check-up (phone, glass theme) |
 |---|---|---|
-| Clear photo: right first guess | **86%** | 40% |
-| Clear photo: shown and right | **94%** | 59% |
-| Camera quality: right first guess | **64%** | 17% |
-| Camera quality: shown and right | **86%** | 33% |
-| Night (IR): right first guess | **42%** | 4% |
-| Night (IR): shown and right | **74%** | 6% |
+| ![Live](docs/screenshots/live-wide-neumorphism-light.png) | ![Wildlife](docs/screenshots/wildlife-wide-neumorphism-light.png) | ![AI check-up](docs/screenshots/insights-phone-glass-dark.png) |
 
-| Mammals (100 photos) | Wildlife Classifier | Stock Bird Classifier |
+## What you get
+
+- **Live** — every Scrypted camera in one grid with honest status chips
+  (Online / Unstable / Offline, "Snapshot only" where there is no stream). Tap for
+  the focused player; "Open in Scrypted" for history.
+- **Visit** — where a notification lands: the snapshot immediately, a
+  "Saving clip…" progress bar while the recorder finishes, then the clip plays.
+  Tap an old notification later and it just plays.
+- **Wildlife** — your life list: every species seen or heard, best photo (or a
+  labelled reference photo), first/last seen, which cameras, what time of day,
+  new-this-year badges, and the recorded call for heard species.
+- **Corrections** — "Wrong?" on any visit: pick the right species (suggestions
+  first), *Not an animal* or *Can't tell*. The visit is fixed everywhere at once,
+  similar-looking animals at that camera are relabelled after a few corrections of
+  the same mix-up, and the retrain tool can teach the model itself.
+- **AI check-up** — a review queue for unsure calls, cameras that trigger AI checks
+  with nothing found, detector / GPU / storage health, and BirdNET status.
+- **Notifications** — one per visit, with the snapshot, deep-linked to the visit.
+
+Built in the **Lucent** design language: it takes its colours from your Home
+Assistant theme (flat or glass), works from 320 px phones to wide screens, and
+stays light — one ~57 KB (gzipped) bundle, bounded storage, no polling.
+
+## How it fits together
+
+```
+cameras ─▶ Scrypted NVR ─▶ Wildlife Classifier (ONNX, GPU) ─┐
+                         └▶ Events Recorder (clips) ─────────┤
+camera mics ─▶ BirdNET-Go (HA app, Perch v2) ─▶ MQTT ────────┤
+                                                             ▼
+                              Kestrel Scrypted plugin (visits, corrections, media, API)
+                                                             │  key-authenticated LAN API
+                                                             ▼
+                              Kestrel HA integration ─▶ entities, WebSocket API, signed media
+                                                             ▼
+                                                  Cameras panel (sidebar)
+```
+
+| Folder | What it is |
+|---|---|
+| [`scrypted-plugin/`](scrypted-plugin) | `@nphil/kestrel` — the Scrypted plugin: turns detections and BirdNET calls into visits, links clips, stores corrections and learning data in SQLite with strict retention, serves the API and media. |
+| [`custom_components/kestrel/`](custom_components/kestrel) | The Home Assistant integration (HACS): config flow, entities, WebSocket API for the panel, authenticated media proxy, brand icons. |
+| [`dashboard/`](dashboard) | The panel and card (Lit + TypeScript), built into the integration. |
+| [`classifier/`](classifier) | The Wildlife Classifier: EVA-02 (iNaturalist 2021) trimmed to your local species, exported to ONNX for Scrypted; evaluation and the retrain tool. |
+| [`audio-eval/`](audio-eval) | The bird-sound model bake-off behind the BirdNET-Go settings ([results](audio-eval/results.md)). |
+| [`tools/`](tools) | Reproducible brand and banner renderers. |
+
+## The models, and how well they do
+
+**Seeing — Wildlife Classifier.** [EVA-02 Large fine-tuned on iNaturalist 2021](https://huggingface.co/timm/eva02_large_patch14_clip_336.merged2b_ft_inat21),
+cut down to the birds and mammals recorded near home (268 classes for the Atlanta
+area). On 390 photos taken 2023 or later (so neither model trained on them),
+against Scrypted's stock bird classifier:
+
+| Birds | Kestrel | Stock |
 |---|---|---|
-| Clear / camera / night: right first guess | **87% / 62% / 44%** | cannot (birds only) |
+| Clear photo, first guess right | **86%** | 40% |
+| Camera-quality crop | **64%** | 17% |
+| Night (IR) | **42%** | 4% |
 
-Full numbers: [`eval/results.json`](eval/results.json). Two honest caveats:
-test photos are whole iNaturalist shots rather than detector crops (both models
-got identical inputs), and nothing beats checking real visits from your own
-cameras once birds are around.
+Mammals, which the stock model can't name at all: 87% / 62% / 44%. About 100 ms per
+animal on a Tesla P40. Details: [`classifier/README.md`](classifier/README.md).
 
-**On the Tesla P40:** about **100 ms per animal** and about **2 GB of GPU
-memory**. The file is ~1.2 GB. A newer GPU runs the same file faster; from
-roughly RTX 20-series on, it can be rebuilt in half precision for half the memory.
+**Hearing — BirdNET-Go with Google Perch v2.** Tested on 483 local bird calls mixed
+into real audio from the cameras: Perch v2 beat BirdNET v2.4 at every loudness
+level (59/50/32% vs 53/37/11% loud/medium/faint) with **zero** false alarms on bird-free
+audio. Audio "clean-up" filters didn't reliably help, so none run live.
+Details: [`audio-eval/results.md`](audio-eval/results.md).
 
-## Build it
+## Install
 
-Requires Python 3.10+ (CPU is fine; the export takes a few minutes and ~6 GB RAM).
+1. **Classifier** — build and install into Scrypted's ONNX plugin
+   ([`classifier/README.md`](classifier/README.md)), attach it as the *Animal Classifier*
+   on your exterior cameras.
+2. **Scrypted plugin** — `cd scrypted-plugin && npm install && npm run build &&
+   npm run scrypted-deploy <scrypted-host>:10443`. In its settings pick the cameras
+   to watch; copy the API key it shows.
+3. **Home Assistant integration** — HACS → Custom repositories → add
+   `https://github.com/nphil/kestrel` (Integration) → install → restart → add
+   *Kestrel* with the plugin URL (`http://<scrypted-host>:11080/endpoint/@nphil/kestrel/public/`)
+   and the key. A **Cameras** item appears in the sidebar.
+4. **Optional: hearing** — install the BirdNET-Go app, enable the Perch v2 model,
+   add the camera streams by name, and point its MQTT at your broker (topic
+   `birdnet`, HA discovery off); map stream names to cameras in the plugin settings.
+5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
+   each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
+   page is `/kestrel/visit?v=<visit_id>`.
 
-```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+## Privacy and footprint
 
-# 1. iNat21 class list (10 MB)
-mkdir -p data && curl -s https://ml-inat-competition-datasets.s3.amazonaws.com/2021/val.json.tar.gz | tar xz -C data
-.venv/bin/python -c "import json; d=json.load(open('data/val.json')); json.dump(sorted(d['categories'], key=lambda c: c['id']), open('data/inat21_categories.json','w'))"
-
-# 2. Local species -> species/<place>.json
-.venv/bin/python build/species.py --lat 33.75 --lng -84.39 --out species/atlanta.json
-
-# 3. Trim + export -> dist/wildlife-atlanta/{model.onnx,config.json}
-.venv/bin/python build/export.py --species species/atlanta.json --out dist/wildlife-atlanta
-```
-
-## Test it
-
-```bash
-.venv/bin/python eval/make_testset.py --species species/atlanta.json       # downloads ~400 photos to data/
-.venv/bin/python eval/evaluate.py --wildlife dist/wildlife-atlanta \
-    --baseline path/to/bird-classifier   # optional: a dir with the stock model.onnx + config.json
-```
-
-## Install into Scrypted
-
-```bash
-cd deploy && npm install
-./stage.sh ../dist/wildlife-atlanta            # copies the files into Scrypted's volume on the host
-SCRYPTED_USER=... SCRYPTED_PASS=... ./install.sh wildlife-atlanta \
-  "Front Door Camera,Back Door Camera,Bird Camera,Backyard Camera" "Bird Classifier"
-```
-
-`install.sh` creates the **Wildlife Classifier** device in the ONNX plugin,
-sets it as the animal classifier on exactly the cameras listed (and removes it
-from any others), and deletes the classifier named in the last argument.
-Scrypted only downloads custom models over http(s), so for those few seconds the
-files are served from inside the Scrypted container on `127.0.0.1` — never on
-the network. Re-running is safe.
-
-## Visit log in Home Assistant
-
-[`scrypted-plugin/`](scrypted-plugin) is a small Scrypted plugin that turns
-detections into one **visit** per animal per camera and publishes it to Home
-Assistant over MQTT: a **Wildlife Visits** device with an event entity per camera,
-so every visit lands in HA's history and logbook.
+- Everything runs locally; nothing is sent to a cloud service.
+- The plugin API requires a key; media reaches the browser only through Home
+  Assistant with signed, expiring links.
+- Snapshots and crops are kept 30 days (except the best photo per species and
+  corrected examples), visit history 3 years, learning data capped; Kestrel stays
+  within a 300 MB budget and reports its size on the AI check-up page.
+- Microphones near doors hear people: choose which cameras BirdNET-Go listens to,
+  and keep its web UI behind Home Assistant.
 
 ## Licences
 
-- Code in this repo: MIT ([LICENSE](LICENSE)).
-- Model weights: EVA-02 iNat21 fine-tune by timm, **CC BY-NC 4.0** — personal,
-  non-commercial use. The exported model inherits this.
-- iNaturalist data: the class list comes from the iNat 2021 competition; test
-  photos are downloaded at evaluation time, stay local and are not redistributed.
+- Kestrel code: MIT ([LICENSE](LICENSE)).
+- EVA-02 iNat21 weights (timm): CC BY-NC 4.0 — personal, non-commercial use; the
+  exported classifier inherits this.
+- Inter typeface (`tools/fonts`): SIL Open Font License.
+- BirdNET-Go and its models keep their own licences.
