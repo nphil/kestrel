@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import KestrelMark from "../../../assets/kestrel-icon-128.png";
-import { api, asVisit, extractLabels, navigate, routeView, speciesArray, speciesFromDetail, speciesPhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
+import { api, asArray, asVisit, cameraSnapshotUrl, extractLabels, navigate, routeView, speciesArray, speciesFromDetail, speciesPhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
 import { ago, clamp, clockTime, dateTime, formatMiB, timestamp } from "../format.ts";
 import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
 import type { Camera, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, SpeciesDetail, Visit } from "../types.ts";
@@ -314,7 +314,7 @@ export class KestrelCameras extends LitElement {
   private async _loadCameras(generation = this._generation): Promise<void> {
     if (!this._hass) return;
     const cameras = await api.cameras(this._hass);
-    if (this._isActive(generation)) this._cameras = Array.isArray(cameras) ? cameras.slice(0, 32) : [];
+    if (this._isActive(generation)) this._cameras = asArray<Camera>(cameras).slice(0, 32);
   }
 
   private async _loadVisit(id: string, generation = this._generation): Promise<void> {
@@ -337,7 +337,7 @@ export class KestrelCameras extends LitElement {
     if (!this._isActive(generation)) return;
     if (speciesResult.status === "fulfilled") this._species = speciesArray(speciesResult.value).slice(0, 500);
     if (settingsResult.status === "fulfilled") this._settings = settingsResult.value;
-    if (camerasResult.status === "fulfilled") this._cameras = Array.isArray(camerasResult.value) ? camerasResult.value.slice(0, 32) : [];
+    if (camerasResult.status === "fulfilled") this._cameras = asArray<Camera>(camerasResult.value).slice(0, 32);
     if (speciesResult.status === "rejected") throw speciesResult.reason;
     this._speciesVisible = Math.min(24, Math.max(this._speciesVisible, 24));
   }
@@ -355,7 +355,7 @@ export class KestrelCameras extends LitElement {
     const [health, review, cameras] = results;
     if (health.status === "fulfilled") this._health = health.value;
     if (review.status === "fulfilled") this._review = visitPage(review.value).items.slice(0, 24);
-    if (cameras.status === "fulfilled") this._cameras = Array.isArray(cameras.value) ? cameras.value.slice(0, 32) : [];
+    if (cameras.status === "fulfilled") this._cameras = asArray<Camera>(cameras.value).slice(0, 32);
     if (health.status === "rejected" && review.status === "rejected") throw health.reason;
   }
 
@@ -610,6 +610,12 @@ export class KestrelCameras extends LitElement {
     return health === "ok" ? "ok" : health === "unstable" ? "warn" : "danger";
   }
 
+  private _healthLabel(camera: Camera): string {
+    if (!camera.online) return "Offline";
+    const labels: Record<Camera["health"], string> = { ok: "Online", unstable: "Unstable", offline: "Offline" };
+    return labels[camera.health] ?? "Offline";
+  }
+
   private _cameraName(id: string | number): string {
     return this._cameras.find((camera) => String(camera.id) === String(id))?.name ?? `Camera ${id}`;
   }
@@ -651,8 +657,8 @@ export class KestrelCameras extends LitElement {
     const selected = this._selectedCamera ? this._cameras.find((camera) => String(camera.id) === this._selectedCamera) : null;
     if (selected) {
       return html`<section class="focused-camera">
-        <div class="section-heading"><button class="back-inline" type="button" @click=${() => { this._selectedCamera = null; }}>All cameras</button><h1>${selected.name}</h1><span class="status-chip"><i class="status-dot ${this._statusKind(selected.health)}"></i>${selected.online ? selected.health : "offline"}</span></div>
-        ${selected.online && selected.nvrCardId ? html`<div class="stream-slot focused-stream" data-camera-id=${String(selected.id)} aria-label=${`${selected.name} live view`}><span class="stream-placeholder">Connecting to live view…</span></div>` : html`<div class="unsupported-stream"><ha-icon .icon=${selected.online ? "mdi:video-off" : "mdi:cctv-off"}></ha-icon><strong>${selected.online ? "Live view isn't available in this card" : "Camera is offline"}</strong><span>${selected.online ? "This camera has no Scrypted NVR stream here. Open it in Scrypted." : "The last camera health state is offline."}</span><a href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a></div>`}
+        <div class="section-heading"><button class="back-inline" type="button" @click=${() => { this._selectedCamera = null; }}>All cameras</button><h1>${selected.name}</h1><span class="status-chip"><i class="status-dot ${this._statusKind(selected.health)}"></i>${this._healthLabel(selected)}</span></div>
+        ${selected.nvrCardId === null ? html`<div class="focused-snapshot"><kestrel-lazy-image class="snapshot-image" .src=${cameraSnapshotUrl(selected.id) ?? ""} alt=${`${selected.name} latest snapshot`} wide></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span></div>` : selected.online ? html`<div class="stream-slot focused-stream" data-camera-id=${String(selected.id)} aria-label=${`${selected.name} live view`}><span class="stream-placeholder">Connecting to live view…</span></div>` : html`<div class="unsupported-stream"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><strong>Camera is offline</strong><span>The last camera health state is offline.</span><a href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a></div>`}
         <div class="camera-meta"><span>${selected.drops1h ?? 0} stream drops in the last hour</span>${this._cameraSighting(selected) ? html`<span class="sighting"><ha-icon .icon=${"mdi:paw"}></ha-icon>${this._cameraSighting(selected)}</span>` : html`<span class="muted">No current AI sighting</span>`}</div>
       </section>`;
     }
@@ -664,8 +670,10 @@ export class KestrelCameras extends LitElement {
           <div class="camera-picture">
             ${camera.nvrCardId !== null && camera.online && supported.includes(String(camera.id))
               ? html`<div class="stream-slot" data-camera-id=${String(camera.id)} aria-label=${`${camera.name} live view`}><span class="stream-placeholder">Connecting…</span></div>`
-              : html`<div class="stream-placeholder static"><ha-icon .icon=${camera.online ? "mdi:cctv" : "mdi:cctv-off"}></ha-icon><span>${camera.nvrCardId === null ? "No NVR stream" : camera.online ? "Open for live view" : "Camera offline"}</span></div>`}
-            <span class="camera-health"><i class="status-dot ${this._statusKind(camera.health)}"></i>${camera.online ? camera.health : "offline"}</span>
+              : camera.nvrCardId === null
+                ? html`<kestrel-lazy-image class="camera-snapshot" .src=${cameraSnapshotUrl(camera.id) ?? ""} alt=${`${camera.name} latest snapshot`}></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span>`
+                : html`<div class="stream-placeholder static"><ha-icon .icon=${camera.online ? "mdi:cctv" : "mdi:cctv-off"}></ha-icon><span>${camera.online ? "Open for live view" : "Camera offline"}</span></div>`}
+            <span class="camera-health"><i class="status-dot ${this._statusKind(camera.health)}"></i>${this._healthLabel(camera)}</span>
           </div>
           <div class="camera-label"><strong>${camera.name}</strong>${this._cameraSighting(camera) ? html`<span class="sighting"><ha-icon .icon=${"mdi:paw"}></ha-icon>${this._cameraSighting(camera)}</span>` : html`<span class="muted">${camera.wildlife ? "Wildlife enabled" : "Camera"}</span>`}</div>
         </button>`)}
@@ -784,7 +792,7 @@ export class KestrelCameras extends LitElement {
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:expansion-card"}></ha-icon><span>GPU memory</span></div><strong>${health ? `${formatMiB(health.gpu.usedMiB)} / ${formatMiB(health.gpu.totalMiB)}` : "Not available"}</strong><div class="meter"><span style=${`width:${gpuPercent}%`}></span></div><small>${health?.gpu.util ?? 0}% GPU use</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:database"}></ha-icon><span>Wildlife storage</span></div><strong>${health ? `${storage.toFixed(1)} / ${health.storage.budgetMB} MB` : "Not available"}</strong><div class="meter"><span style=${`width:${storagePercent}%`}></span></div><small>${health ? `${health.storage.dbMB.toFixed(1)} MB database · ${health.storage.mediaMB.toFixed(1)} MB photos and clips` : "Waiting for health data"}</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:check-decagram"}></ha-icon><span>Corrections</span></div><strong>${health?.corrections.sinceRetrain ?? 0}</strong><p>since the last model retrain</p><small>${health?.corrections.total ?? 0} all-time corrections</small></article>
-        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:microphone"}></ha-icon><span>BirdNET sound detector</span></div><strong class=${health?.birdnet?.online ? "healthy" : "unhealthy"}>${health?.birdnet ? health.birdnet.online ? "Online" : "Offline" : "Not configured"}</strong><p>${health?.birdnet?.lastHeardAt ? `Last heard ${ago(health.birdnet.lastHeardAt)}` : "No recent sound detections"}</p></article>
+        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:microphone"}></ha-icon><span>BirdNET sound detector</span></div><strong class=${health?.birdnet ? (health.birdnet.online ? "healthy" : "unhealthy") : ""}>${health?.birdnet ? (health.birdnet.online ? "Online" : "Offline") : "Not set up yet"}</strong><p>${health?.birdnet?.lastHeardAt ? `Last heard ${ago(health.birdnet.lastHeardAt)}` : "No recent sound detections"}</p></article>
       </section>
       <section class="noisy-section sheet"><div class="section-heading compact"><div><h2>Quiet camera checks</h2><p class="muted">Checks with no animal detection today.</p></div></div>${noisy.length ? html`<ul class="simple-list">${noisy.map((camera) => html`<li><span>${this._cameraName(camera.id)}</span><strong>${camera.emptyChecksToday} of ${camera.checksToday} checks</strong></li>`)}</ul>` : html`<p class="empty-inline">No empty checks reported today.</p>`}</section>
     </section>`;
@@ -796,9 +804,9 @@ export class KestrelCameras extends LitElement {
   }
 
   static styles = [TOKENS_CSS, COMMON_CSS, css`
-    :host { container-type: inline-size; min-height: 100%; }
+    :host { container-type: inline-size; height: 100%; }
     ha-card { display: block; min-height: calc(100vh - var(--header-height, 56px)); overflow: hidden; border-radius: var(--lu-radius-card); color: var(--lu-ink); }
-    .app { min-height: inherit; display: flex; flex-direction: column; position: relative; }
+    .app { height: inherit; display: flex; flex-direction: column; position: relative; }
     .topbar { position: relative; display: flex; align-items: center; gap: var(--lu-space-3); min-height: 68px; padding: var(--lu-space-3) var(--lu-space-5); border-bottom: 1px solid var(--lu-edge); background: var(--lu-card); }
     .brand { width: 32px; height: 32px; object-fit: contain; flex: none; }
     .title-stack { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
@@ -812,7 +820,7 @@ export class KestrelCameras extends LitElement {
     .nav-item { display: inline-flex; min-height: var(--lu-target); align-items: center; justify-content: center; gap: var(--lu-space-2); padding: 0 var(--lu-space-5); border: 0; border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: transparent; font-size: var(--lu-type-label); font-weight: 500; cursor: pointer; }
     .nav-item.selected { color: var(--lu-accent-ink); background: var(--lu-accent); }
     .nav-item ha-icon { width: 20px; height: 20px; }
-    main { flex: 1; min-width: 0; padding: var(--lu-space-5); }
+    main { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: var(--lu-space-5); }
     h1, h2, h3, p { margin: 0; }
     h1 { font-size: clamp(1.45rem, 3cqi, 2rem); font-weight: 620; letter-spacing: -.02em; line-height: 1.18; }
     h2 { font-size: var(--lu-type-title); font-weight: 620; letter-spacing: -.012em; }
@@ -831,10 +839,14 @@ export class KestrelCameras extends LitElement {
     .stream-slot { position: relative; display: grid; width: 100%; height: 100%; min-height: 160px; place-items: center; overflow: hidden; aspect-ratio: 16 / 9; background: var(--lu-tile); }
     .camera-picture .stream-slot { position: absolute; inset: 0; min-height: 0; }
     .focused-stream { aspect-ratio: 16 / 9; min-height: clamp(240px, 45cqi, 520px); border-radius: var(--lu-radius-card); }
+    .focused-snapshot { position: relative; }
+    .focused-snapshot .snapshot-image { display: block; width: 100%; aspect-ratio: 16 / 9; min-height: clamp(240px, 45cqi, 520px); border-radius: var(--lu-radius-card); }
     .stream-placeholder { display: grid; place-items: center; min-height: 44px; padding: var(--lu-space-4); color: var(--lu-ink-3); font-size: var(--lu-type-caption); text-align: center; }
     .stream-placeholder.static { position: absolute; inset: 0; gap: var(--lu-space-2); align-content: center; }
     .stream-placeholder.static ha-icon { width: 26px; height: 26px; }
     .camera-health { position: absolute; top: var(--lu-space-2); left: var(--lu-space-2); display: inline-flex; min-height: 32px; align-items: center; gap: 6px; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-card); font-size: var(--lu-type-caption); text-transform: capitalize; }
+    .camera-picture .camera-snapshot { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .snapshot-chip { position: absolute; top: var(--lu-space-2); right: var(--lu-space-2); z-index: 1; display: inline-flex; min-height: 28px; align-items: center; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-card); font-size: var(--lu-type-caption); }
     .status-chip { display: inline-flex; min-height: 32px; align-items: center; gap: 7px; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-tile); font-size: var(--lu-type-caption); text-transform: capitalize; }
     .status-dot.info { background: var(--lu-info); }
     .camera-label { display: flex; min-height: 64px; flex-direction: column; justify-content: center; gap: var(--lu-space-1); padding: var(--lu-space-3) var(--lu-space-4); }
@@ -946,10 +958,14 @@ export class KestrelCameras extends LitElement {
     .toast-action { min-width: var(--lu-target); min-height: var(--lu-target); border: 0; border-radius: var(--lu-radius-pill); color: var(--lu-accent); background: transparent; font-weight: 600; cursor: pointer; }
     .toast-close { width: 42px; height: 42px; }
     @container (max-width: 680px) {
+      :host { --kestrel-nav-height: 64px; }
       ha-card { min-height: calc(100vh - var(--header-height, 56px)); }
-      main { padding: var(--lu-space-4) var(--lu-space-3) calc(84px + env(safe-area-inset-bottom)); }
+      main { padding: var(--lu-space-4) var(--lu-space-3) calc(var(--kestrel-nav-height) + var(--lu-space-5) + env(safe-area-inset-bottom)); }
       .topbar { min-height: 60px; padding: var(--lu-space-2) var(--lu-space-3); }
-      .navigation { position: fixed; z-index: 15; right: 0; bottom: 0; left: 0; display: grid; height: calc(64px + env(safe-area-inset-bottom)); grid-template-columns: repeat(3, minmax(0,1fr)); gap: var(--lu-space-1); padding: var(--lu-space-1) var(--lu-space-2) calc(var(--lu-space-1) + env(safe-area-inset-bottom)); border-top: 1px solid var(--lu-edge); background: var(--lu-card); }
+      .navigation { position: fixed; z-index: 15; right: 0; bottom: 0; left: 0; display: grid; height: calc(var(--kestrel-nav-height) + env(safe-area-inset-bottom)); grid-template-columns: repeat(3, minmax(0,1fr)); gap: var(--lu-space-1); padding: var(--lu-space-1) var(--lu-space-2) calc(var(--lu-space-1) + env(safe-area-inset-bottom)); border-top: 1px solid var(--lu-edge); background: var(--primary-background-color); }
+      @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+        .navigation { background: color-mix(in srgb, var(--lu-card) 75%, transparent); backdrop-filter: blur(24px) saturate(1.4); -webkit-backdrop-filter: blur(24px) saturate(1.4); }
+      }
       .nav-item { min-width: 0; min-height: 48px; flex-direction: column; gap: 2px; padding: var(--lu-space-1); font-size: var(--lu-type-caption); }
       .nav-item span { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
       .open-scrypted { min-height: 48px; padding: 0 var(--lu-space-2); font-size: var(--lu-type-caption); }

@@ -5,7 +5,7 @@ export function callWS<T>(hass: HomeAssistant, type: string, fields: Record<stri
 }
 
 export const api = {
-  cameras: (hass: HomeAssistant) => callWS<Camera[]>(hass, "kestrel/cameras"),
+  cameras: (hass: HomeAssistant) => callWS<Camera[] | { items: Camera[] }>(hass, "kestrel/cameras"),
   visits: (hass: HomeAssistant, query: VisitQuery = {}) => callWS<VisitPage>(hass, "kestrel/visits", query as Record<string, unknown>),
   visit: (hass: HomeAssistant, visitId: string) => callWS<Visit>(hass, "kestrel/visit", { visit_id: visitId }),
   correct: (hass: HomeAssistant, visitId: string, species: string) => callWS<unknown>(hass, "kestrel/visit/correct", { visit_id: visitId, species }),
@@ -95,6 +95,10 @@ export function speciesPhoto(species: Species, detail?: unknown): string | null 
   const item = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
   const direct = item.photo_url ?? item.photo ?? item.image ?? item.photoUrl ?? item.imageUrl;
   return mediaUrl(typeof direct === "string" ? direct : species.photo_url ?? species.photo ?? species.image ?? null);
+}
+
+export function cameraSnapshotUrl(id: string | number): string | null {
+  return mediaUrl(`media/camera/${id}.jpg`);
 }
 
 export function routeView(config: KestrelCardConfig): KestrelCardConfig["view"] {
