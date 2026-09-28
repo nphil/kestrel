@@ -36,6 +36,11 @@ const SETTINGS: Setting[] = [
 
 type Detection = { className?: string; label?: string | null; score?: number | null; id?: string; boundingBox?: number[] };
 type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestamp?: number; durationMs?: number; processingMs?: number };
+// health/drops1h describe the camera device's own Online state (Scrypted's aggregate online
+// flag, tracked in real time -- see setupOnlineListeners/handleOnlineChange below), NOT the
+// health of any individual RTSP/rebroadcast stream under it. A stream (e.g. the NVR recording
+// stream) can be restarting repeatedly while Online stays true, because another stream on the
+// same camera (e.g. the low-res analysis stream) still has data -- that is not visible here.
 type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; lastDetection: { species: string; at: number; visitId: string } | null };
 type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[]; durationTotal: number; durationSamples: number };
 type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
