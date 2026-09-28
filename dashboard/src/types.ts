@@ -62,6 +62,7 @@ export interface Health {
   cameras: Array<{ id: string | number; checksToday: number; emptyChecksToday: number; visitsToday: number }>;
   storage: { dbMB: number; mediaMB: number; budgetMB: number };
   birdnet: { online: boolean; lastHeardAt: string | number | null } | null;
+  birdnetLink?: string | null;
   corrections: { total: number; sinceRetrain: number };
 }
 

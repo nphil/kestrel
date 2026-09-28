@@ -12,10 +12,16 @@ DEFAULT_POLL_TIMEOUT = 25
 MIN_POLL_TIMEOUT = 1
 MAX_POLL_TIMEOUT = 25
 
-INTEGRATION_VERSION = "1.0.4"
+INTEGRATION_VERSION = "1.0.5"
 STATIC_PATH = "/kestrel-static"
-MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera"})
+MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio"})
 MEDIA_URL_TTL_HOURS = 12
+
+# BirdNET-Go runs as its own Home Assistant add-on. HA core reaches its API on the
+# internal add-on network directly (no auth needed there); the ingress path is HA's
+# own stable reverse-proxied route to the add-on's web UI, for a human "open it" link.
+BIRDNET_GO_INTERNAL_URL = "http://db21ed7f-birdnet-go:8080"
+BIRDNET_GO_INGRESS_PATH = "/hassio/ingress/db21ed7f_birdnet-go"
 
 # Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).
 PANEL_URL_PATH = "kestrel"

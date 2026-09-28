@@ -19,7 +19,8 @@ export interface Visit {
     snapshot: string | null;
     crop: string | null;
     clip: { state: ClipState; expectedReadyAt: number | null; url?: string };
-    heard: { visitId: string; species: string; hasAudio: boolean } | null;
+    heard: { visitId: string; species: string; hasAudio: boolean; birdnetDetectionId: number | null; birdnetClip: string | null } | null;
+    audio: { birdnetDetectionId: number | null; birdnetClip: string | null } | null;
     suggestions: { species: string; why: 'model' | 'heard' | 'usual' }[];
     firstEver: boolean;
     muted: boolean;
@@ -33,6 +34,8 @@ export interface VisitMeta {
     cropFile?: string | null;
     clipFile?: string | null;
     audioFile?: string | null;
+    birdnetDetectionId?: number | null;
+    birdnetClip?: string | null;
     review?: boolean;
     lastChangeAt?: number | null;
     undoData?: string | null;
@@ -74,6 +77,8 @@ interface RawVisit {
     crop_file: string | null;
     clip_file: string | null;
     audio_file: string | null;
+    birdnet_detection_id: number | null;
+    birdnet_clip: string | null;
     clip_state: ClipState;
     clip_expected_ready_at: number | null;
     review_flag: number;
@@ -235,6 +240,12 @@ export class KestrelStore {
                 created_at INTEGER NOT NULL
             );
         `);
+        // One-time migration: the visits table predates these two columns (BirdNET-Go's
+        // own detection reference), so a pre-existing on-disk DB needs them added explicitly --
+        // CREATE TABLE IF NOT EXISTS above does not alter an existing table.
+        const visitColumns = new Set((this.db.prepare('PRAGMA table_info(visits)').all() as { name: string }[]).map(column => column.name));
+        if (!visitColumns.has('birdnet_detection_id')) this.db.exec('ALTER TABLE visits ADD COLUMN birdnet_detection_id INTEGER');
+        if (!visitColumns.has('birdnet_clip')) this.db.exec('ALTER TABLE visits ADD COLUMN birdnet_clip TEXT');
         this.recordDetectorCheckStatement = this.db.prepare(`INSERT INTO camera_daily_stats(day,camera_id,checks,empty_checks) VALUES(?,?,1,?)
             ON CONFLICT(day,camera_id) DO UPDATE SET checks=checks+1,empty_checks=empty_checks+excluded.empty_checks`);
     }
@@ -296,26 +307,29 @@ export class KestrelStore {
         const cropFile = value('cropFile', prior?.crop_file) as string | null;
         const clipFile = value('clipFile', prior?.clip_file) as string | null;
         const audioFile = value('audioFile', prior?.audio_file) as string | null;
+        const birdnetDetectionId = value('birdnetDetectionId', prior?.birdnet_detection_id) as number | null;
+        const birdnetClip = value('birdnetClip', prior?.birdnet_clip) as string | null;
         const review = has('review') ? !!meta.review : !!prior?.review_flag;
         const data = JSON.stringify(visit);
         const updatedAt = Date.now();
         this.db.prepare(`INSERT INTO visits (
             id,camera_id,camera_name,kind,started_at,species,grp,status,score,detection_label,
-            snapshot_file,crop_file,clip_file,audio_file,clip_state,clip_expected_ready_at,
+            snapshot_file,crop_file,clip_file,audio_file,birdnet_detection_id,birdnet_clip,clip_state,clip_expected_ready_at,
             review_flag,first_ever,muted,data,last_change_at,undo_data,last_correction_id,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             camera_id=excluded.camera_id,camera_name=excluded.camera_name,kind=excluded.kind,
             started_at=excluded.started_at,species=excluded.species,grp=excluded.grp,status=excluded.status,
             score=excluded.score,detection_label=excluded.detection_label,snapshot_file=excluded.snapshot_file,
             crop_file=excluded.crop_file,clip_file=excluded.clip_file,audio_file=excluded.audio_file,
+            birdnet_detection_id=excluded.birdnet_detection_id,birdnet_clip=excluded.birdnet_clip,
             clip_state=excluded.clip_state,clip_expected_ready_at=excluded.clip_expected_ready_at,
             review_flag=excluded.review_flag,first_ever=excluded.first_ever,muted=excluded.muted,data=excluded.data,
             last_change_at=excluded.last_change_at,undo_data=excluded.undo_data,
             last_correction_id=excluded.last_correction_id,updated_at=excluded.updated_at`).run(
             visit.id, visit.camera.id, visit.camera.name, visit.kind, visit.startedAt, visit.species, visit.grp,
             visit.status, visit.score, has('detectionLabel') ? meta.detectionLabel ?? null : prior?.detection_label ?? null,
-            snapshotFile, cropFile, clipFile, audioFile, visit.clip.state, visit.clip.expectedReadyAt,
+            snapshotFile, cropFile, clipFile, audioFile, birdnetDetectionId, birdnetClip, visit.clip.state, visit.clip.expectedReadyAt,
             Number(review), Number(visit.firstEver), Number(visit.muted), data,
             has('lastChangeAt') ? meta.lastChangeAt ?? null : prior?.last_change_at ?? null,
             has('undoData') ? meta.undoData ?? null : prior?.undo_data ?? null,

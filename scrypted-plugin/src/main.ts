@@ -1,5 +1,5 @@
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
@@ -69,6 +69,51 @@ function asNumber(value: unknown): number | undefined {
 }
 function systemDeviceValue<T>(id: string, property: string): T | undefined {
     return sdk.systemManager.getSystemState()[id]?.[property]?.value as T | undefined;
+}
+
+// BirdNET-Go publishes Date ("2024-01-15") and Time ("14:30:00") as separate local-wall-clock
+// strings plus an optional IANA `timezone`, not a single combined timestamp. This install's
+// BirdNET-Go and Home Assistant both run on America/New_York, so that is the fallback when
+// `timezone` is absent from a message.
+const DEFAULT_BIRDNET_TIME_ZONE = 'America/New_York';
+
+function zonedDateTimeToUtcMillis(dateStr: string, timeStr: string, timeZone: string): number | undefined {
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+    const timeMatch = /^(\d{2}):(\d{2}):(\d{2})/.exec(timeStr);
+    if (!dateMatch || !timeMatch) return undefined;
+    const [, year, month, day] = dateMatch;
+    const [, hour, minute, second] = timeMatch;
+    // Guess the UTC instant is the wall-clock numbers taken literally, then see how that
+    // guess renders back in `timeZone`; the gap is the zone's offset at that instant
+    // (DST-aware), so subtracting it corrects the guess to the true UTC instant.
+    const guess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+    let formatter: Intl.DateTimeFormat;
+    try {
+        formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+    } catch {
+        return guess; // Unrecognized IANA zone name: treat the wall-clock numbers as UTC rather than fail outright.
+    }
+    const parts = Object.fromEntries(formatter.formatToParts(guess).map(part => [part.type, part.value]));
+    const renderedAsUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    return guess - (renderedAsUtc - guess);
+}
+
+function parseBirdnetTimestamp(message: BrokerMessage): number | undefined {
+    const dateValue = message.Date ?? message.date;
+    const timeValue = message.Time ?? message.time;
+    if (typeof dateValue === 'string' && typeof timeValue === 'string') {
+        const zoneValue = message.timezone;
+        const zone = typeof zoneValue === 'string' && zoneValue.trim() ? zoneValue.trim() : DEFAULT_BIRDNET_TIME_ZONE;
+        const zoned = zonedDateTimeToUtcMillis(dateValue, timeValue, zone);
+        if (zoned !== undefined) return zoned;
+    }
+    // Fallback for a payload shaped with a single combined timestamp field instead.
+    const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime;
+    const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
+    return parsedTime !== undefined && Number.isFinite(parsedTime) ? normalizedTime(parsedTime) : undefined;
 }
 
 function normalizedTime(value: number): number {
@@ -395,7 +440,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const visit: Visit = {
             id, camera: { id: camera.id, name: camera.name }, kind: 'seen', startedAt: pending.startedAt, species: finalSpecies, grp,
             status: visitStatus, score: pending.score, snapshot: `media/snap/${id}.jpg`, crop: `media/crop/${id}.jpg`,
-            clip: { state: 'pending', expectedReadyAt: pending.startedAt + CLIP_EXPECTED_DELAY_MS }, heard: null,
+            clip: { state: 'pending', expectedReadyAt: pending.startedAt + CLIP_EXPECTED_DELAY_MS }, heard: null, audio: null,
             suggestions: this.suggestionsFor(camera.id, finalSpecies, detectionLabel), firstEver, muted: this.mutedSpecies().includes(finalSpecies), notify: false,
         };
         visit.notify = !visit.muted;
@@ -414,12 +459,16 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (exact) {
             const other = this.db.getVisit(exact.id);
             if (other && visit.kind === 'seen') {
-                visit.heard = { visitId: other.id, species: other.species, hasAudio: !!this.db.getRawVisit(other.id)?.audio_file };
+                const heardRaw = this.db.getRawVisit(other.id);
+                visit.heard = { visitId: other.id, species: other.species, hasAudio: heardRaw?.birdnet_detection_id != null,
+                    birdnetDetectionId: heardRaw?.birdnet_detection_id ?? null, birdnetClip: heardRaw?.birdnet_clip ?? null };
                 visit.suggestions.push({ species: other.species, why: 'heard' });
                 this.db.saveVisit(visit);
                 this.publishEvent('visit_updated', other);
             } else if (other && visit.kind === 'heard' && other.kind === 'seen') {
-                other.heard = { visitId: visit.id, species: visit.species, hasAudio: !!this.db.getRawVisit(visit.id)?.audio_file };
+                const heardRaw = this.db.getRawVisit(visit.id);
+                other.heard = { visitId: visit.id, species: visit.species, hasAudio: heardRaw?.birdnet_detection_id != null,
+                    birdnetDetectionId: heardRaw?.birdnet_detection_id ?? null, birdnetClip: heardRaw?.birdnet_clip ?? null };
                 other.suggestions.push({ species: visit.species, why: 'heard' });
                 this.db.saveVisit(other);
                 this.publishEvent('visit_updated', other);
@@ -533,33 +582,40 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         } catch {
             return;
         }
-        const nested = message.detection && typeof message.detection === 'object' ? message.detection as BrokerMessage : {};
-        const speciesValue = message.commonName ?? message.CommonName ?? message.species ?? message.Species ?? nested.commonName ?? nested.CommonName ?? nested.species;
+        // Real shape is BirdNET-Go's MQTTEventDTO (internal/mqtt/dto.go): flat, mostly
+        // PascalCase, Date+Time as separate local-wall-clock strings. The lowercase/camelCase
+        // fallbacks below are tolerance for a differently-shaped publisher on the same topic,
+        // not anything BirdNET-Go itself sends.
+        const speciesValue = message.CommonName ?? message.commonName ?? message.species ?? message.Species;
         if (typeof speciesValue !== 'string' || !speciesValue.trim()) return;
-        const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime ?? message.time ?? message.Time;
-        const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
-        const startedAt = parsedTime && Number.isFinite(parsedTime) ? normalizedTime(parsedTime) : Date.now();
+        const startedAt = parseBirdnetTimestamp(message) ?? Date.now();
         // A real, parseable BirdNET-Go detection was received on the topic -- mark it heard even if the
         // source doesn't map to a watched camera below, so health.birdnet reflects real broker traffic.
         this.db.setSetting('birdnetLastHeardAt', String(startedAt));
-        const sourceValue = message.sourceName ?? message.SourceName ?? message.source ?? message.Source ?? message.camera ?? message.Camera ?? nested.source ?? nested.Source;
+        const sourceValue = message.sourceName ?? message.SourceName ?? message.source ?? message.Source ?? message.camera ?? message.Camera;
         const cameraId = this.cameraForBirdnetSource(String(sourceValue ?? ''));
         if (!cameraId) return;
         const camera = this.cameras.get(cameraId);
         if (!camera) return;
-        const confidence = asNumber(message.confidence ?? message.Confidence ?? message.score ?? nested.confidence);
+        const confidence = asNumber(message.Confidence ?? message.confidence ?? message.score ?? message.Score);
         const score = confidence === undefined ? null : confidence > 1 ? confidence / 100 : confidence;
         const species = speciesValue.trim();
         const firstEver = !this.db.hasSpecies(species);
         const id = randomUUID();
-        const audioFile = await this.saveBirdnetAudio(message, id);
+        // BirdNET-Go's own reference to its detection and clip -- Kestrel never fetches or
+        // stores the audio itself; the HA integration reaches BirdNET-Go directly for it.
+        const birdnetDetectionId = asNumber(message.detectionId ?? message.DetectionID ?? message.detection_id) ?? null;
+        const clipValue = message.ClipName ?? message.clipName ?? message.clip_name;
+        const birdnetClip = typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null;
         const visit: Visit = {
             id, camera: { id: camera.id, name: camera.name }, kind: 'heard', startedAt, species, grp: 'bird', status: 'auto', score,
-            snapshot: null, crop: null, clip: { state: 'none', expectedReadyAt: null }, heard: null, suggestions: [],
+            snapshot: null, crop: null, clip: { state: 'none', expectedReadyAt: null }, heard: null,
+            audio: birdnetDetectionId !== null || birdnetClip !== null ? { birdnetDetectionId, birdnetClip } : null,
+            suggestions: [],
             firstEver, muted: this.mutedSpecies().includes(species), notify: false,
         };
         visit.notify = !visit.muted && this.db.getSetting('heardNotify', 'new_only') !== 'never' && firstEver;
-        this.db.saveVisit(visit, { audioFile });
+        this.db.saveVisit(visit, { birdnetDetectionId, birdnetClip });
         await this.linkRelatedVisit(visit);
         this.publishEvent('visit_new', this.db.getVisit(id) ?? visit);
     }
@@ -570,20 +626,6 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (mapped && this.cameras.has(String(mapped))) return String(mapped);
         const normalized = slugify(source);
         return [...this.cameras.values()].find(camera => camera.id === source || camera.name.toLowerCase() === source.toLowerCase() || slugify(camera.name) === normalized)?.id;
-    }
-
-    private async saveBirdnetAudio(message: BrokerMessage, id: string): Promise<string | null> {
-        if (!this.mediaDirs) return null;
-        const value = message.audioBase64 ?? message.audio_base64 ?? message.clipBase64 ?? message.clip_base64;
-        if (typeof value !== 'string' || value.length > 14_000_000) return null;
-        const match = value.match(/^data:audio\/[a-z0-9.+-]+;base64,(.*)$/i);
-        const base64 = match?.[1] ?? value;
-        if (!/^[A-Za-z0-9+/=\r\n]+$/.test(base64)) return null;
-        const bytes = Buffer.from(base64, 'base64');
-        if (!bytes.length || bytes.length > 10 * 1024 * 1024) return null;
-        const file = join(this.mediaDirs.audio, `${id}.audio`);
-        await writeFile(file, bytes);
-        return file;
     }
 
     private async findClip(cameraId: string, startedAt: number): Promise<string | undefined> {
@@ -693,7 +735,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (alsoHeard && updated.kind === 'seen') {
             const matches = this.db.findHeardOrSeen(updated.camera.id, updated.species, 'seen', updated.startedAt);
             const heard = matches.find(row => row.species === updated.species && row.kind === 'heard');
-            if (heard) updated.heard = { visitId: heard.id, species: heard.species, hasAudio: !!heard.audio_file };
+            if (heard) updated.heard = { visitId: heard.id, species: heard.species, hasAudio: heard.birdnet_detection_id != null,
+                birdnetDetectionId: heard.birdnet_detection_id, birdnetClip: heard.birdnet_clip };
         }
         const correctionId = this.db.recordCorrection(updated, from, current.species, true, raw.snapshot_file, raw.crop_file);
         this.db.saveVisit(updated, { lastChangeAt: Date.now(), undoData: JSON.stringify(current), lastCorrectionId: correctionId, review: false });

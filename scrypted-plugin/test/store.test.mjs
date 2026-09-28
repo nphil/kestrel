@@ -19,6 +19,7 @@ function makeVisit(id, species, score, startedAt) {
         crop: `media/crop/${id}.jpg`,
         clip: { state: 'none', expectedReadyAt: null },
         heard: null,
+        audio: null,
         suggestions: [],
         firstEver: true,
         muted: false,

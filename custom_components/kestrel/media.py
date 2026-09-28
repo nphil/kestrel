@@ -1,4 +1,4 @@
-"""Authenticated streaming media proxy for Kestrel plugin files."""
+"""Authenticated streaming media proxy for Kestrel plugin files and BirdNET-Go audio."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ import aiohttp
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import KestrelApiError
-from .const import DOMAIN, MEDIA_KINDS
+from .const import BIRDNET_GO_INTERNAL_URL, DOMAIN, MEDIA_KINDS
 from .coordinator import KestrelCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,27 +38,54 @@ class KestrelMediaView(HomeAssistantView):
     async def get(self, request: web.Request, kind: str, media_id: str) -> web.StreamResponse:
         if kind not in MEDIA_KINDS or not media_id or "/" in media_id:
             return web.Response(status=404, text="Media not found")
-        coordinator: KestrelCoordinator | None = self._hass.data.get(DOMAIN, {}).get("coordinator")
-        if coordinator is None:
-            return web.Response(status=503, text="Kestrel is not connected")
 
-        headers = {}
+        headers: dict[str, str] = {}
         if range_header := request.headers.get("Range"):
             headers["Range"] = range_header
         if if_range := request.headers.get("If-Range"):
             headers["If-Range"] = if_range
 
+        if kind == "birdnet_audio":
+            # BirdNET-Go's own add-on API, independent of the Kestrel plugin's connectivity.
+            if not media_id.isdigit():
+                return web.Response(status=404, text="Media not found")
+            return await self._stream(
+                request,
+                async_get_clientsession(self._hass),
+                f"{BIRDNET_GO_INTERNAL_URL}/api/v2/audio/{media_id}",
+                headers,
+                aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+            )
+
+        coordinator: KestrelCoordinator | None = self._hass.data.get(DOMAIN, {}).get("coordinator")
+        if coordinator is None:
+            return web.Response(status=503, text="Kestrel is not connected")
+        return await self._stream(
+            request,
+            coordinator.client.session,
+            coordinator.client.media_url(kind, media_id),
+            {**coordinator.client.headers, **headers},
+            aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
+        )
+
+    @staticmethod
+    async def _stream(
+        request: web.Request,
+        session: aiohttp.ClientSession,
+        url: str,
+        headers: dict[str, str],
+        timeout: aiohttp.ClientTimeout,
+    ) -> web.StreamResponse:
         try:
-            async with coordinator.client.session.get(
-                coordinator.client.media_url(kind, media_id),
-                headers={**coordinator.client.headers, **headers},
-                timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
-                allow_redirects=False,
+            async with session.get(
+                url, headers=headers, timeout=timeout, allow_redirects=False
             ) as upstream:
                 if upstream.status not in (200, 206, 416):
                     if upstream.status == 404:
                         return web.Response(status=404, text="Media not found")
-                    _LOGGER.warning("Kestrel media request returned HTTP %s", upstream.status)
+                    _LOGGER.warning(
+                        "Kestrel media request to %s returned HTTP %s", url, upstream.status
+                    )
                     return web.Response(status=502, text="Kestrel media request failed")
 
                 downstream_headers = {
@@ -73,7 +101,7 @@ class KestrelMediaView(HomeAssistantView):
                 await response.write_eof()
                 return response
         except (KestrelApiError, aiohttp.ClientError, TimeoutError, OSError) as err:
-            _LOGGER.debug("Kestrel media proxy failed: %s", err)
+            _LOGGER.debug("Kestrel media proxy failed for %s: %s", url, err)
             return web.Response(status=502, text="Kestrel media request failed")
 
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import timedelta
-from urllib.parse import quote, unquote
 from typing import Any
+from urllib.parse import quote, unquote
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
@@ -14,11 +15,11 @@ from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 
 from .client import KestrelApiError
-from .const import DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS
+from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS
 from .coordinator import KestrelCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-_MEDIA_RE = re.compile(r"(?:^|/)media/(snap|crop|clip|audio|species|camera)/([^?#]+)")
+_MEDIA_RE = re.compile(r"(?:^|/)media/(snap|crop|clip|audio|species|camera|birdnet_audio)/([^?#]+)")
 
 
 def _coordinator(hass: HomeAssistant) -> KestrelCoordinator:
@@ -58,12 +59,20 @@ def _sign_media_paths(
             result["photo_url"] = _signed_media_url(
                 hass, "species", species + ".jpg", refresh_token_id
             )
+        audio = result.get("audio")
+        if isinstance(audio, dict):
+            detection_id = audio.get("birdnetDetectionId")
+            result["audio"] = (
+                _signed_media_url(hass, "birdnet_audio", str(detection_id), refresh_token_id)
+                if detection_id is not None
+                else None
+            )
         heard = result.get("heard")
-        if isinstance(heard, dict) and heard.get("hasAudio") is True:
-            heard_id = heard.get("visitId")
-            if heard_id is not None:
+        if isinstance(heard, dict):
+            heard_detection_id = heard.get("birdnetDetectionId")
+            if heard_detection_id is not None:
                 heard["audio_url"] = _signed_media_url(
-                    hass, "audio", str(heard_id), refresh_token_id
+                    hass, "birdnet_audio", str(heard_detection_id), refresh_token_id
                 )
         clip = result.get("clip")
         visit_id = result.get("id", result.get("visit_id"))
@@ -88,12 +97,15 @@ async def _async_api_call(
     *,
     params: dict[str, Any] | None = None,
     body: Any | None = None,
+    postprocess: Callable[[Any], Any] | None = None,
 ) -> None:
     try:
         result = await _coordinator(hass).client.async_request(
             method, path, params=params, json=body
         )
         result = _sign_media_paths(hass, result, connection.refresh_token_id)
+        if postprocess is not None:
+            result = postprocess(result)
         connection.send_result(msg["id"], result)
     except KestrelApiError as err:
         connection.send_error(msg["id"], err.code, str(err))
@@ -229,7 +241,18 @@ async def ws_labels(hass: HomeAssistant, connection: websocket_api.ActiveConnect
 @websocket_api.websocket_command({vol.Required("type"): "kestrel/health"})
 @websocket_api.async_response
 async def ws_health(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
-    await _async_api_call(hass, connection, msg, "GET", "health")
+    await _async_api_call(
+        hass,
+        connection,
+        msg,
+        "GET",
+        "health",
+        postprocess=lambda result: (
+            {**result, "birdnetLink": BIRDNET_GO_INGRESS_PATH}
+            if isinstance(result, dict)
+            else result
+        ),
+    )
 
 
 @websocket_api.websocket_command({vol.Required("type"): "kestrel/settings/get"})
