@@ -49,6 +49,7 @@ export class KestrelCameras extends LitElement {
     _audioLoading: { state: true },
     _audioUrl: { state: true },
     _visitReferencePhoto: { state: true },
+    _visitReferencePhotoFailed: { state: true },
     _heardConfirmed: { state: true },
   };
 
@@ -82,6 +83,7 @@ export class KestrelCameras extends LitElement {
   declare _audioLoading: string | null;
   declare _audioUrl: string | null;
   declare _visitReferencePhoto: string | null;
+  declare _visitReferencePhotoFailed: boolean;
   declare _heardConfirmed: boolean;
   declare narrow: boolean;
 
@@ -96,6 +98,7 @@ export class KestrelCameras extends LitElement {
   private _resizeObserver?: ResizeObserver;
   private _liveElements = new Map<string, HTMLElement>();
   private _pendingLiveMounts = new Set<string>();
+  private _failedReferenceImages = new Set<string>();
   private static _nvrComponentsPromise: Promise<void> | undefined;
   private _pendingUndo: PendingUndo | null = null;
   private _routeKey = "";
@@ -131,6 +134,7 @@ export class KestrelCameras extends LitElement {
     this._audioLoading = null;
     this._audioUrl = null;
     this._visitReferencePhoto = null;
+    this._visitReferencePhotoFailed = false;
     this._heardConfirmed = false;
     this.narrow = false;
   }
@@ -251,12 +255,14 @@ export class KestrelCameras extends LitElement {
       this._pickerOpen = false;
       this._audioUrl = null;
       this._visitReferencePhoto = null;
+      this._visitReferencePhotoFailed = false;
     }
     if (visitId !== oldVisitId) {
       this._visit = null;
       this._heardConfirmed = false;
       this._audioUrl = null;
       this._visitReferencePhoto = null;
+      this._visitReferencePhotoFailed = false;
     }
     if (load && (view !== oldView || visitId !== oldVisitId)) void this._loadForView();
   }
@@ -352,6 +358,7 @@ export class KestrelCameras extends LitElement {
     this._visit = visit;
     this._audioUrl = visitAudio(visit);
     this._visitReferencePhoto = null;
+    this._visitReferencePhotoFailed = false;
     if (visit.kind === "heard" && !visitSnapshot(visit) && this._hass) {
       try {
         const detail = await api.speciesDetail(this._hass, visit.species);
@@ -743,9 +750,9 @@ export class KestrelCameras extends LitElement {
           : photo
             ? html`<kestrel-lazy-image class="visit-image" .src=${photo} alt=${`${visit.species} at ${visit.camera.name}`} wide></kestrel-lazy-image>`
             : visit.kind === "heard"
-              ? html`<kestrel-lazy-image class="visit-image" .src=${this._visitReferencePhoto ?? ""} alt=${`${visit.species} reference photo`} wide><div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div></kestrel-lazy-image>`
+              ? html`<kestrel-lazy-image class="visit-image" .src=${this._visitReferencePhoto ?? ""} alt=${`${visit.species} reference photo`} wide @kestrel-image-error=${() => this._onVisitReferenceImageError()}><div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div></kestrel-lazy-image>`
               : html`<kestrel-lazy-image class="visit-image" .src=${""} alt=${visit.species || "Unidentified animal"} wide></kestrel-lazy-image>`}
-        ${visit.kind === "heard" && !photo && this._visitReferencePhoto ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
+        ${visit.kind === "heard" && !photo && this._visitReferencePhoto && !this._visitReferencePhotoFailed ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
         ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">The recording is still being finalized. This view updates when it's ready.</p></div>` : nothing}
         ${visit.clip?.state === "none" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
         ${visit.clip?.state === "deleted" ? html`<p class="media-note">This clip is no longer available.</p>` : nothing}
@@ -782,6 +789,14 @@ export class KestrelCameras extends LitElement {
     return { url: reference, isReference: reference !== null };
   }
 
+  private _onReferenceImageError(name: string): void {
+    if (this._failedReferenceImages.has(name)) return;
+    this._failedReferenceImages.add(name);
+    this.requestUpdate("_failedReferenceImages", undefined);
+  }
+
+  private _onVisitReferenceImageError(): void { this._visitReferencePhotoFailed = true; }
+
   private _renderCorrectionSheet(visit: Visit) {
     const suggestionNames = (Array.isArray(visit.suggestions) ? visit.suggestions : []).map((suggestion) => suggestion.species).filter(Boolean);
     const candidates = [...new Set([...suggestionNames, ...this._labels])].filter((name) => name.toLowerCase().includes(this._search.trim().toLowerCase())).slice(0, 16);
@@ -816,8 +831,8 @@ export class KestrelCameras extends LitElement {
     const mark = this._seenHeardLabel(species);
     return html`<button class="species-tile" type="button" @click=${() => this._openSpecies(species.species)} aria-label=${`View ${species.species}`}>
       <div class="species-photo">
-        <kestrel-lazy-image .src=${photo.url ?? ""} alt=${species.species} square>${species.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div>` : nothing}</kestrel-lazy-image>
-        ${photo.isReference ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
+        <kestrel-lazy-image .src=${photo.url ?? ""} alt=${species.species} square @kestrel-image-error=${() => this._onReferenceImageError(species.species)}>${species.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div>` : nothing}</kestrel-lazy-image>
+        ${photo.isReference && !this._failedReferenceImages.has(species.species) ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
       </div>
       <span class="species-name">${species.species}</span>
       <span class="species-marks"><span><ha-icon .icon=${mark.icon}></ha-icon>${mark.label}</span>${species.newThisYear ? html`<span class="new-tag">New this year</span>` : nothing}</span>
@@ -838,7 +853,7 @@ export class KestrelCameras extends LitElement {
     const recent = this._speciesVisits.slice(0, 24);
     return html`<div class="scrim" @click=${this._closeSpecies}><section class="species-sheet sheet" role="dialog" aria-modal="true" aria-labelledby="species-title" @click=${(event: Event) => event.stopPropagation()}>
       <div class="sheet-handle" aria-hidden="true"></div><div class="sheet-head"><div><h2 id="species-title">${detail.species}</h2><p class="muted">${detail.grp === "bird" ? "Bird" : detail.grp === "mammal" ? "Mammal" : "Wildlife"}${detail.first ? ` · First seen ${dateTime(detail.first)}` : ""}</p></div><button class="icon-button" type="button" aria-label="Close" @click=${this._closeSpecies}><ha-icon .icon=${"mdi:close"}></ha-icon></button></div>
-      <div class="species-detail-hero"><div class="species-photo"><kestrel-lazy-image .src=${photo.url ?? ""} alt=${detail.species} wide>${detail.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div>` : nothing}</kestrel-lazy-image>${photo.isReference ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}</div><div class="species-count"><strong>${detail.count30d}</strong><span>${detail.count30d === 1 ? "visit" : "visits"} in the last 30 days</span></div></div>
+      <div class="species-detail-hero"><div class="species-photo"><kestrel-lazy-image .src=${photo.url ?? ""} alt=${detail.species} wide @kestrel-image-error=${() => this._onReferenceImageError(detail.species)}>${detail.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${"mdi:waveform"}></ha-icon></div>` : nothing}</kestrel-lazy-image>${photo.isReference && !this._failedReferenceImages.has(detail.species) ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}</div><div class="species-count"><strong>${detail.count30d}</strong><span>${detail.count30d === 1 ? "visit" : "visits"} in the last 30 days</span></div></div>
       <section class="detail-section"><h3>When it visits</h3><div class="hours-chart" role="img" aria-label="Visits by hour of day">${Array.from({ length: 24 }, (_, hour) => html`<span class="hour-bar" style=${`--bar-height:${clamp(((Number(detail.hours[hour]) || 0) / max) * 100, 4, 100)}%`} title=${`${hour}:00 — ${detail.hours[hour] ?? 0} visits`}></span>`)}</div><div class="hours-labels"><span>12 am</span><span>6 am</span><span>12 pm</span><span>6 pm</span><span>12 am</span></div></section>
       <section class="detail-section"><h3>Cameras</h3>${cameras.length ? html`<ul class="simple-list">${cameras.map(([id, count]) => html`<li><span>${this._cameraName(id)}</span><strong>${count}</strong></li>`)}</ul>` : html`<p class="muted">No camera breakdown is available yet.</p>`}</section>
       <section class="detail-section"><h3>Recent visits</h3>${recent.length ? html`<ul class="visit-list">${recent.map((visit) => html`<li><button type="button" class="visit-row" @click=${() => this._openVisit(visit.id)}><span><strong>${visit.kind === "heard" ? "Heard" : visit.camera.name}</strong><small>${dateTime(visit.startedAt)}</small></span><ha-icon .icon=${"mdi:chevron-right"}></ha-icon></button></li>`)}</ul>${this._visitsNext ? html`<button class="text-button" type="button" @click=${() => this._loadMoreSpeciesVisits()}>Show more visits</button>` : nothing}` : html`<p class="muted">No recent visits found.</p>`}</section>

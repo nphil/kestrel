@@ -55,7 +55,10 @@ export class KestrelLazyImage extends LitElement {
     if (changed.has("src")) this._failed = false;
   }
 
-  private _onError(): void { this._failed = true; }
+  private _onError(): void {
+    this._failed = true;
+    this.dispatchEvent(new CustomEvent("kestrel-image-error", { bubbles: true, composed: true }));
+  }
 
   static styles = [TOKENS_CSS, css`
     :host { display: block; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; border-radius: var(--lu-radius-tile); background: var(--lu-tile); }
