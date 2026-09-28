@@ -22,6 +22,7 @@ const CLIP_GIVE_UP_MS = 5 * 60_000;
 const CLIP_POLL_MS = 5_000;
 const MEDIA_BUDGET_BYTES = 300 * 1024 * 1024;
 const MAX_LONG_POLLS = 100;
+const DETECTOR_SESSION_IDLE_MS = 3_000;
 const SETTINGS: Setting[] = [
     { key: CAMERA_SETTING, title: 'Wildlife cameras', description: 'Select Scrypted cameras for animal detections and BirdNET matching.', type: 'device', deviceFilter: 'VideoCamera', multiple: true },
     { key: 'cooldownMinutes', title: 'Species cooldown (minutes)', description: 'Minimum interval between visits for the same species on one camera.', type: 'number', value: DEFAULT_COOLDOWN_MINUTES },
@@ -38,6 +39,7 @@ type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestam
 type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; lastDetection: { species: string; at: number; visitId: string } | null };
 type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[]; durationTotal: number; durationSamples: number };
 type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
+type DetectorSession = { sawObject: boolean; timer: NodeJS.Timeout };
 type DeviceWithSettings = { name?: string; interfaces?: string[]; mixins?: string[]; getSettings?: () => Promise<Setting[]> };
 type BrokerMessage = Record<string, unknown>;
 
@@ -113,6 +115,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private cameraListeners = new Map<string, { removeListener(): void }>();
     private cameras = new Map<string, { id: string; name: string; nvrCardId: string | null }>();
     private pending = new Map<string, PendingDetection>();
+    private detectorSessions = new Map<string, DetectorSession>();
     private cameraRuntime = new Map<string, CameraRuntime>();
     private eventWaiters = new Set<() => void>();
     private clipTimer?: NodeJS.Timeout;
@@ -139,6 +142,10 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (!this.store.getSetting('cooldownMinutes')) this.store.setSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES));
         if (!this.store.getSetting('brokerUrl')) this.store.setSetting('brokerUrl', DEFAULT_BROKER);
         if (!this.store.getSetting('birdnetTopic')) this.store.setSetting('birdnetTopic', DEFAULT_TOPIC);
+        if (!this.store.getSetting('detectorSessionCountingV2Since')) {
+            this.store.resetTodayDetectorCounts();
+            this.store.setSetting('detectorSessionCountingV2Since', String(Date.now()));
+        }
         await this.copyBrokerCredentials();
         await this.reconfigure();
         this.connectBirdnet();
@@ -233,7 +240,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (!camera || !event || !Array.isArray(event.detections)) return;
         const runtime = this.runtime(cameraId);
         const startedAt = normalizedTime(asNumber(event.timestamp) ?? Date.now());
-        this.db.recordDetectorCheck(cameraId, event.detections.length === 0, startedAt);
+        const sawObject = event.detections.some(detection => !!detection.className && detection.className !== 'motion');
+        this.recordDetectorSession(cameraId, event.detections.length > 0, sawObject);
         const duration = asNumber(event.processingMs ?? event.durationMs);
         if (duration !== undefined && duration >= 0) {
             runtime.durationTotal += duration;
@@ -275,6 +283,30 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 this.pending.set(key, record);
             }
         }
+    }
+
+    private recordDetectorSession(cameraId: string, hasDetections: boolean, sawObject: boolean): void {
+        const existing = this.detectorSessions.get(cameraId);
+        if (existing) {
+            if (sawObject) existing.sawObject = true;
+            if (hasDetections) {
+                clearTimeout(existing.timer);
+                existing.timer = setTimeout(() => this.finishDetectorSession(cameraId), DETECTOR_SESSION_IDLE_MS);
+            }
+            return;
+        }
+        if (!hasDetections) return;
+        this.detectorSessions.set(cameraId, {
+            sawObject,
+            timer: setTimeout(() => this.finishDetectorSession(cameraId), DETECTOR_SESSION_IDLE_MS),
+        });
+    }
+
+    private finishDetectorSession(cameraId: string): void {
+        const session = this.detectorSessions.get(cameraId);
+        if (!session) return;
+        this.detectorSessions.delete(cameraId);
+        this.db.recordDetectorCheck(cameraId, !session.sawObject);
     }
 
     private async expirePending(key: string): Promise<void> {
@@ -938,6 +970,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.cameraListeners.clear();
         for (const pending of this.pending.values()) clearTimeout(pending.timer);
         this.pending.clear();
+        for (const session of this.detectorSessions.values()) clearTimeout(session.timer);
+        this.detectorSessions.clear();
         if (this.client) this.client.end(true);
         if (this.clipTimer) clearInterval(this.clipTimer);
         if (this.healthTimer) clearInterval(this.healthTimer);

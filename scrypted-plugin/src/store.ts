@@ -508,6 +508,11 @@ export class KestrelStore {
         this.recordDetectorCheckStatement.run(day, cameraId, Number(empty));
     }
 
+    resetTodayDetectorCounts(at = Date.now()): void {
+        const day = newYorkDayKey(at);
+        this.db.prepare('UPDATE camera_daily_stats SET checks=0,empty_checks=0 WHERE day=?').run(day);
+    }
+
     cameraDailyStats(cameraId: string, at = Date.now()): { checksToday: number; emptyChecksToday: number; visitsToday: number } {
         const range = newYorkDayBounds(at);
         this.db.prepare('INSERT OR IGNORE INTO camera_daily_stats(day,camera_id) VALUES(?,?)').run(range.day, cameraId);
