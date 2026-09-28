@@ -33,7 +33,7 @@ async def async_setup_entry(
             if not camera_id or slug in known:
                 continue
             known.add(slug)
-            entities.append(KestrelLatestAnimalImage(coordinator, camera))
+            entities.append(KestrelLatestAnimalImage(hass, coordinator, camera))
         if entities:
             async_add_entities(entities, update_before_add=True)
 
@@ -47,8 +47,14 @@ class KestrelLatestAnimalImage(CoordinatorEntity[KestrelCoordinator], ImageEntit
     _attr_icon = "mdi:camera-image"
     _attr_has_entity_name = False
 
-    def __init__(self, coordinator: KestrelCoordinator, camera: dict[str, Any]) -> None:
-        super().__init__(coordinator)
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coordinator: KestrelCoordinator,
+        camera: dict[str, Any],
+    ) -> None:
+        CoordinatorEntity.__init__(self, coordinator)
+        ImageEntity.__init__(self, hass)
         self._camera_id = str(camera["id"])
         self._camera_name = str(camera.get("name") or f"Camera {self._camera_id}")
         slug = camera_slug(camera)

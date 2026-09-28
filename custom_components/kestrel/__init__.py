@@ -37,7 +37,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             [StaticPathConfig(STATIC_PATH, str(frontend_dir), cache_headers=True)]
         )
         domain_data["frontend_registered"] = True
-        bundles = sorted(frontend_dir.glob("kestrel.*.js"))
+        bundles = await hass.async_add_executor_job(
+            lambda: sorted(frontend_dir.glob("kestrel.*.js"))
+        )
         if bundles:
             frontend.add_extra_js_url(
                 hass,
