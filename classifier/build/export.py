@@ -25,15 +25,10 @@ import torch
 MODEL_ID = "eva02_large_patch14_clip_336.merged2b_ft_inat21"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--species", type=Path, required=True, help="output of species.py")
-    ap.add_argument("--out", type=Path, required=True, help="directory for model.onnx + config.json")
-    args = ap.parse_args()
-
-    rows = json.loads(args.species.read_text())
+def load_model(rows: list[dict], head_path: Path | None = None) -> torch.nn.Module:
+    """EVA-02 with its head cut down to `rows` (species.py output). `head_path`, when
+    given, replaces that trimmed head with a retrained one (retrain.py output)."""
     keep = torch.tensor([r["index"] for r in rows])
-
     # timm's fused attention passes a tensor as `is_causal`, which the ONNX tracer
     # rejects; the plain attention path computes the same thing and traces cleanly.
     timm.layers.set_fused_attn(False)
@@ -43,12 +38,21 @@ def main() -> None:
     with torch.no_grad():
         trimmed.weight.copy_(head.weight[keep])
         trimmed.bias.copy_(head.bias[keep])
+        if head_path is not None:
+            state = torch.load(head_path, map_location="cpu")
+            if tuple(state["weight"].shape) != tuple(trimmed.weight.shape):
+                raise SystemExit(f"{head_path} does not match the species list ({len(rows)} classes)")
+            trimmed.load_state_dict(state)
     model.head = trimmed
+    return model
 
+
+def export_onnx(model: torch.nn.Module, rows: list[dict], out: Path) -> None:
+    """Write model.onnx + config.json in the shape Scrypted's ONNX plugin loads."""
     cfg = model.pretrained_cfg
     size = cfg["input_size"][1]
-    args.out.mkdir(parents=True, exist_ok=True)
-    onnx_path = args.out / "model.onnx"
+    out.mkdir(parents=True, exist_ok=True)
+    onnx_path = out / "model.onnx"
     dummy = torch.randn(1, 3, size, size)
     torch.onnx.export(model, (dummy,), str(onnx_path), input_names=["input"], output_names=["logits"],
                       opset_version=17, dynamo=False)
@@ -69,9 +73,20 @@ def main() -> None:
         "files": ["model.onnx"],
         "labels": {str(i): r["label"] for i, r in enumerate(rows)},
     }
-    (args.out / "config.json").write_text(json.dumps(config, indent=1) + "\n")
+    (out / "config.json").write_text(json.dumps(config, indent=1) + "\n")
     print(f"exported {onnx_path} ({onnx_path.stat().st_size / 1e6:.0f} MB), {len(rows)} classes, "
           f"input {size}px, max diff vs torch {err:.2e}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--species", type=Path, required=True, help="output of species.py")
+    ap.add_argument("--out", type=Path, required=True, help="directory for model.onnx + config.json")
+    ap.add_argument("--head", type=Path, help="retrained head (retrain.py output) to use instead of the stock one")
+    args = ap.parse_args()
+
+    rows = json.loads(args.species.read_text())
+    export_onnx(load_model(rows, args.head), rows, args.out)
 
 
 if __name__ == "__main__":

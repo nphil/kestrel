@@ -108,6 +108,7 @@ export function visitIdFromLocation(): string | null {
 }
 
 export function navigate(path: string, search = ""): void {
-  window.history.pushState({}, "", `/cameras/${path}${search}`);
+  const dashboardPath = window.location.pathname.split("/").filter(Boolean)[0] ?? "lovelace";
+  window.history.pushState({}, "", `/${dashboardPath}/${path}${search}`);
   window.dispatchEvent(new Event("location-changed"));
 }

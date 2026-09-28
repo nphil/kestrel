@@ -1,139 +1,86 @@
 #!/usr/bin/env python3
-"""Render Home Assistant's eight Kestrel brand PNGs from the source icon."""
+"""Render Home Assistant's eight Kestrel brand PNGs from the source icon.
 
+Home Assistant serves `custom_components/kestrel/brand/*.png` for a custom integration
+(see skill notes: core's `brands` component, `_serve_from_custom_integration`).
+
+- icon: the Kestrel tile itself, cut to a crisp rounded square (the source's soft outer
+  glow is dropped so it stays sharp at 48 px), transparent corners.
+- logo: the tile + the "Kestrel" wordmark in Inter SemiBold (tools/fonts, SIL OFL).
+  `logo*` uses dark ink for HA's light theme, `dark_logo*` light ink for the dark theme.
+  The tile carries its own dark plate and lavender rim, so the icon reads on both.
+
+    python tools/render_brand.py
+"""
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "assets" / "kestrel-icon-source.png"
+FONT = ROOT / "tools" / "fonts" / "Inter-SemiBold.ttf"
 OUTPUT = ROOT / "custom_components" / "kestrel" / "brand"
 
-# A fixed glyph set keeps the logo reproducible without system-font dependencies.
-_GLYPHS = {
-    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
-    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
-    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
-    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
-    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
-}
+INK_LIGHT_THEME = (23, 19, 31, 255)   # Rosé Pine role "ink" (light)
+INK_DARK_THEME = (242, 239, 246, 255)  # Rosé Pine role "ink" (dark)
+CORNER = 0.215  # corner radius as a share of the tile width (matches the artwork)
 
 
-def _trim_transparent(image: Image.Image) -> Image.Image:
-    """Crop near-transparent edges and retain antialiased mark pixels."""
-    visible = image.getchannel("A").point(lambda value: 255 if value > 8 else 0)
-    bbox = visible.getbbox()
-    return image.crop(bbox) if bbox else image
+def tile() -> Image.Image:
+    """The solid tile, cropped to its edges, with a clean rounded-square alpha mask."""
+    src = Image.open(SOURCE).convert("RGBA")
+    solid = src.getchannel("A").point(lambda a: 255 if a > 235 else 0)
+    box = solid.getbbox()
+    if box is None:
+        raise SystemExit(f"{SOURCE} has no opaque tile")
+    left, top, right, bottom = box
+    side = max(right - left, bottom - top)
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    crop = src.crop((cx - side // 2, cy - side // 2, cx - side // 2 + side, cy - side // 2 + side))
+    scale = 4  # supersample the mask so the corners are smooth
+    mask = Image.new("L", (side * scale, side * scale), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, side * scale - 1, side * scale - 1),
+                                           radius=int(side * scale * CORNER), fill=255)
+    mask = mask.resize((side, side), Image.LANCZOS)
+    crop.putalpha(ImageChops.multiply(crop.getchannel("A"), mask))
+    return crop
 
 
-def _plate(size: tuple[int, int], dark_mode: bool) -> tuple[Image.Image, ImageDraw.ImageDraw]:
-    width, height = size
-    image = Image.new("RGBA", size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    background = (241, 239, 250, 255) if dark_mode else (35, 31, 58, 255)
-    margin = max(1, round(min(size) * 0.025))
-    draw.rounded_rectangle(
-        (margin, margin, width - margin - 1, height - margin - 1),
-        radius=round(min(size) * 0.16),
-        fill=background,
-    )
-    return image, draw
+def icon(base: Image.Image, size: int) -> Image.Image:
+    pad = round(size * 0.04)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.alpha_composite(base.resize((size - 2 * pad, size - 2 * pad), Image.LANCZOS), (pad, pad))
+    return canvas
 
 
-def _composite_mark(canvas: Image.Image, source: Image.Image, box: tuple[int, int, int, int]) -> None:
-    x0, y0, x1, y1 = box
-    source = _trim_transparent(source)
-    source.thumbnail((x1 - x0, y1 - y0), Image.Resampling.LANCZOS)
-    x = x0 + (x1 - x0 - source.width) // 2
-    y = y0 + (y1 - y0 - source.height) // 2
-    canvas.alpha_composite(source, (x, y))
-
-
-def _render_icon(source: Image.Image, size: int, dark_mode: bool) -> Image.Image:
-    image, draw = _plate((size, size), dark_mode)
-    inset = round(size * 0.13)
-    draw.rounded_rectangle(
-        (inset, inset, size - inset - 1, size - inset - 1),
-        radius=round(size * 0.11),
-        fill=(255, 255, 255, 255) if dark_mode else (239, 235, 255, 255),
-    )
-    mark_inset = round(size * 0.19)
-    _composite_mark(image, source, (mark_inset, mark_inset, size - mark_inset, size - mark_inset))
-    return image
-
-
-def _draw_wordmark(
-    draw: ImageDraw.ImageDraw,
-    width: int,
-    height: int,
-    color: tuple[int, int, int, int],
-) -> None:
-    scale = max(1, round(height / 48))
-    gap = scale * 2
-    total_width = (5 * scale) * len("KESTREL") + gap * (len("KESTREL") - 1)
-    x = round(height * 0.95)
-    y = (height - 7 * scale) // 2
-    for letter in "KESTREL":
-        for row, line in enumerate(_GLYPHS[letter]):
-            for column, pixel in enumerate(line):
-                if pixel == "1":
-                    left, top = x + column * scale, y + row * scale
-                    draw.rectangle((left, top, left + scale - 1, top + scale - 1), fill=color)
-        x += 5 * scale + gap
-    assert x - gap == round(height * 0.95) + total_width
-    assert x - gap <= width - round(width * 0.02), f"Wordmark does not fit {width}px canvas"
-
-
-def _render_logo(source: Image.Image, size: tuple[int, int], dark_mode: bool) -> Image.Image:
-    width, height = size
-    image, draw = _plate(size, dark_mode)
-    side = round(height * 0.78)
-    x, y = round(height * 0.08), (height - side) // 2
-    draw.rounded_rectangle(
-        (x, y, x + side, y + side),
-        radius=round(side * 0.18),
-        fill=(255, 255, 255, 255) if dark_mode else (239, 235, 255, 255),
-    )
-    inset = round(side * 0.18)
-    _composite_mark(image, source, (x + inset, y + inset, x + side - inset, y + side - inset))
-    text_color = (35, 31, 58, 255) if dark_mode else (246, 244, 255, 255)
-    _draw_wordmark(draw, width, height, text_color)
-    return image
-
-
-def render(source_path: Path = SOURCE, output_dir: Path = OUTPUT) -> list[Path]:
-    """Write the eight required icon/logo variants and return their paths."""
-    source = Image.open(source_path).convert("RGBA")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    outputs = []
-    for dark_mode, prefix in ((False, ""), (True, "dark_")):
-        outputs.extend(
-            (
-                (f"{prefix}icon.png", _render_icon(source, 256, dark_mode)),
-                (f"{prefix}icon@2x.png", _render_icon(source, 512, dark_mode)),
-                (f"{prefix}logo.png", _render_logo(source, (512, 256), dark_mode)),
-                (f"{prefix}logo@2x.png", _render_logo(source, (1024, 512), dark_mode)),
-            )
-        )
-    paths = []
-    for name, image in outputs:
-        path = output_dir / name
-        image.save(path, format="PNG", optimize=True)
-        paths.append(path)
-    return paths
+def logo(base: Image.Image, height: int, ink: tuple[int, int, int, int]) -> Image.Image:
+    font = ImageFont.truetype(str(FONT), round(height * 0.50))
+    word = "Kestrel"
+    l, t, r, b = font.getbbox(word)
+    gap = round(height * 0.22)
+    width = height + gap + (r - l) + round(height * 0.06)
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    canvas.alpha_composite(icon(base, height), (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    # Optical centre: centre the cap height, not the full glyph box.
+    cap_top, _, _, cap_bottom = font.getbbox("K")
+    y = (height - (cap_bottom - cap_top)) // 2 - cap_top
+    draw.text((height + gap - l, y), word, font=font, fill=ink)
+    return canvas
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=SOURCE)
-    parser.add_argument("--output-dir", type=Path, default=OUTPUT)
-    args = parser.parse_args()
-    for path in render(args.source, args.output_dir):
-        print(path)
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    base = tile()
+    for suffix, scale in (("", 1), ("@2x", 2)):
+        mark = icon(base, 256 * scale)
+        mark.save(OUTPUT / f"icon{suffix}.png", optimize=True)
+        mark.save(OUTPUT / f"dark_icon{suffix}.png", optimize=True)
+        logo(base, 128 * scale, INK_LIGHT_THEME).save(OUTPUT / f"logo{suffix}.png", optimize=True)
+        logo(base, 128 * scale, INK_DARK_THEME).save(OUTPUT / f"dark_logo{suffix}.png", optimize=True)
+    print(f"wrote 8 brand images to {OUTPUT.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

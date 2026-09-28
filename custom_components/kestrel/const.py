@@ -12,7 +12,7 @@ DEFAULT_POLL_TIMEOUT = 25
 MIN_POLL_TIMEOUT = 1
 MAX_POLL_TIMEOUT = 25
 
-INTEGRATION_VERSION = "1.0.0"
+INTEGRATION_VERSION = "1.0.1"
 STATIC_PATH = "/kestrel"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera"})
 MEDIA_URL_TTL_HOURS = 12

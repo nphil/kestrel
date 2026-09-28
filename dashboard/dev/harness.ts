@@ -1,4 +1,5 @@
 import "../src/main.ts";
+import { navigate } from "../src/api.ts";
 import type { Camera, Health, HomeAssistant, Settings, Species, Visit } from "../src/types.ts";
 
 const now = Date.now();
@@ -40,8 +41,7 @@ function readyClip(): void {
 function showVisit(): void {
   window.clearTimeout(readyTimer);
   visit = createVisit();
-  history.pushState({}, "", `/cameras/visit?v=${visit.id}`);
-  window.dispatchEvent(new Event("location-changed"));
+  navigate("visit", `?v=${encodeURIComponent(visit.id)}`);
   readyTimer = window.setTimeout(readyClip, 5_000);
 }
 
@@ -105,8 +105,7 @@ document.querySelectorAll<HTMLButtonElement>(".fixture-controls button").forEach
     }
     if (button.id === "visit") { showVisit(); return; }
     if (button.id === "live" || button.id === "wildlife" || button.id === "insights") {
-      history.pushState({}, "", `/cameras/${button.id}`);
-      window.dispatchEvent(new Event("location-changed"));
+      navigate(button.id);
     }
   });
 });

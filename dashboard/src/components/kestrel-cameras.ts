@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import KestrelMark from "../../../assets/kestrel-icon-128.png";
-import { api, asVisit, extractLabels, routeView, speciesArray, speciesFromDetail, speciesPhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
+import { api, asVisit, extractLabels, navigate, routeView, speciesArray, speciesFromDetail, speciesPhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
 import { ago, clamp, clockTime, dateTime, formatMiB, timestamp } from "../format.ts";
 import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
 import type { Camera, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, SpeciesDetail, Visit } from "../types.ts";
@@ -595,8 +595,8 @@ export class KestrelCameras extends LitElement {
 
   private _stopLivePlayers(): void { this._unmountAllLivePlayers(); }
 
-  private _goTo(view: "live" | "wildlife" | "insights"): void { window.history.pushState({}, "", `/cameras/${view}`); window.dispatchEvent(new Event("location-changed")); }
-  private _openVisit(id: string): void { window.history.pushState({}, "", `/cameras/visit?v=${encodeURIComponent(id)}`); window.dispatchEvent(new Event("location-changed")); }
+  private _goTo(view: "live" | "wildlife" | "insights"): void { navigate(view); }
+  private _openVisit(id: string): void { navigate("visit", `?v=${encodeURIComponent(id)}`); }
   private _returnLive(): void { this._selectedCamera = null; this._goTo("live"); }
 
   private _statusKind(health: Camera["health"]): string {
