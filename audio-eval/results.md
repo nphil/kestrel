@@ -149,9 +149,8 @@ running it directly on the Unraid box with no Docker involved at all. Root cause
 particular build of the tool loads its ONNX math library separately at startup, and that
 loading path never finishes on this machine. The fix was switching to the tool's other,
 self-contained build (which bundles its own matching copy of that library) — confirmed
-working, and it's what every run in this report actually used. Full detail is in a comment at
-the top of `run_bakeoff.py`'s `REMOTE_SCRIPT`, in case a future update to that tool needs the
-same fix re-checked.
+working, and it's what every run in this report actually used. Full detail is in a comment in
+`get_birda.py`, in case a future update to that tool needs the same fix re-checked.
 
 ## Cleanup done
 
