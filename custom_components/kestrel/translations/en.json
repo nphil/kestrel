@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Kestrel",
+        "description": "Enter the plugin URL and the key shown in the Kestrel plugin settings in Scrypted.",
+        "data": {
+          "url": "Plugin URL",
+          "api_key": "Plugin key"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "The plugin key was not accepted.",
+      "cannot_connect": "Could not reach the Kestrel plugin. Check the URL and that Scrypted is online."
+    },
+    "abort": {
+      "already_configured": "This Kestrel plugin is already connected."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Kestrel connection",
+        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting.",
+        "data": {
+          "poll_timeout": "Event wait (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "event": {
+      "animal": {
+        "name": "Animal",
+        "state": {
+          "bird": "Bird",
+          "mammal": "Mammal",
+          "unidentified": "Unidentified"
+        }
+      },
+      "heard_bird": {
+        "name": "Heard bird",
+        "state": {
+          "bird": "Bird"
+        }
+      }
+    },
+    "image": {
+      "latest_animal": {
+        "name": "Latest animal"
+      }
+    },
+    "binary_sensor": {
+      "connection": {
+        "name": "Connection"
+      }
+    }
+  }
+}

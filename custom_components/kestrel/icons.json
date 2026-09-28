@@ -1,0 +1,14 @@
+{
+  "entity": {
+    "event": {
+      "animal": {"default": "mdi:paw"},
+      "heard_bird": {"default": "mdi:bird"}
+    },
+    "image": {
+      "latest_animal": {"default": "mdi:camera-image"}
+    },
+    "binary_sensor": {
+      "connection": {"default": "mdi:lan-connect"}
+    }
+  }
+}
