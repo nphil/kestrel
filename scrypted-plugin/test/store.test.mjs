@@ -27,6 +27,28 @@ function makeVisit(id, species, score, startedAt) {
     };
 }
 
+function makeHeardVisit(id, species, startedAt, cameraId = '88') {
+    return {
+        id,
+        camera: { id: cameraId, name: 'Backyard Camera' },
+        kind: 'heard',
+        startedAt,
+        species,
+        grp: 'bird',
+        status: 'auto',
+        score: 0.8,
+        snapshot: null,
+        crop: null,
+        clip: { state: 'none', expectedReadyAt: null },
+        heard: null,
+        audio: null,
+        suggestions: [],
+        firstEver: false,
+        muted: false,
+        notify: false,
+    };
+}
+
 test('undo removes its learning embedding and restores best photos to the correct species', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'kestrel-store-test-'));
     const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
@@ -109,6 +131,57 @@ test('old daily detector buckets are pruned while the current day remains', asyn
         await store.prune(currentDay, directory, 300 * 1024 * 1024);
         assert.equal(store.db.prepare('SELECT checks FROM camera_daily_stats WHERE day=? AND camera_id=?').get('2026-08-01', '88'), undefined);
         assert.equal(store.db.prepare('SELECT checks FROM camera_daily_stats WHERE day=? AND camera_id=?').get('2026-09-15', '88').checks, 1);
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('cleanupDuplicateHeardVisits collapses near-duplicate jitter, protects corrected rows, leaves distinct visits alone, and recomputes first_ever', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-dedup-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        const t0 = Date.parse('2026-09-28T06:00:00Z');
+        // Species seen earlier than any heard visit below -- should end up holding first_ever.
+        store.saveVisit(makeVisit('seen-owl', 'Great Horned Owl', 0.9, t0));
+        // An exact duplicate pair from the (fixed) overlapping-subscription bug: same
+        // camera+species+startedAt. No correction on either -- the second (later-inserted) row
+        // should be removed, keeping the first.
+        store.saveVisit(makeHeardVisit('owl-dup-1', 'Great Horned Owl', t0 + 60_000));
+        store.saveVisit(makeHeardVisit('owl-dup-2', 'Great Horned Owl', t0 + 60_000));
+        // The real-world case: the two racing deliveries each fell back to Date.now(), landing a
+        // few milliseconds apart rather than exactly equal -- must still collapse to one.
+        store.saveVisit(makeHeardVisit('jay-dup-1', 'Blue Jay', t0 + 90_000));
+        store.saveVisit(makeHeardVisit('jay-dup-2', 'Blue Jay', t0 + 90_009));
+        // A third pair, but this time a correction references the row that would normally be
+        // removed -- cleanup must never delete a row a correction points at.
+        store.saveVisit(makeHeardVisit('hawk-dup-1', "Cooper's Hawk", t0 + 120_000));
+        const hawkDup2 = makeHeardVisit('hawk-dup-2', "Cooper's Hawk", t0 + 120_000);
+        store.saveVisit(hawkDup2);
+        store.recordCorrection(hawkDup2, "Cooper's Hawk", "Sharp-shinned Hawk", false, null, null);
+        // Two genuinely separate detections of the same species well outside the jitter window
+        // (3 s apart) -- both must survive; the window must not over-merge real repeat calls.
+        store.saveVisit(makeHeardVisit('crow-1', 'American Crow', t0 + 180_000));
+        store.saveVisit(makeHeardVisit('crow-2', 'American Crow', t0 + 183_000));
+
+        const { removed } = store.cleanupDuplicateHeardVisits();
+        assert.equal(removed, 2, 'the two unprotected duplicates (owl, jay) are removed; the corrected hawk row is spared');
+
+        const owlRows = store.db.prepare("SELECT id FROM visits WHERE kind='heard' AND species=?").all('Great Horned Owl');
+        assert.deepEqual(owlRows.map(r => r.id), ['owl-dup-1'], 'the first-inserted exact duplicate survives');
+
+        const jayRows = store.db.prepare("SELECT id FROM visits WHERE kind='heard' AND species=?").all('Blue Jay');
+        assert.deepEqual(jayRows.map(r => r.id), ['jay-dup-1'], 'the first-inserted near-duplicate (9ms apart) survives');
+
+        const hawkRows = store.db.prepare("SELECT id FROM visits WHERE kind='heard' AND species=? ORDER BY id").all("Cooper's Hawk");
+        assert.deepEqual(hawkRows.map(r => r.id).sort(), ['hawk-dup-1', 'hawk-dup-2'], 'both rows survive because one is referenced by a correction');
+
+        const crowRows = store.db.prepare("SELECT id FROM visits WHERE kind='heard' AND species=? ORDER BY id").all('American Crow');
+        assert.deepEqual(crowRows.map(r => r.id).sort(), ['crow-1', 'crow-2'], 'visits 3s apart are distinct detections, not jitter, and are both kept');
+
+        const firstEverIds = store.db.prepare('SELECT id FROM visits WHERE first_ever=1 ORDER BY id').all().map(r => r.id);
+        assert.deepEqual(firstEverIds.sort(), ['crow-1', 'hawk-dup-1', 'jay-dup-1', 'seen-owl'].sort(),
+            'first_ever recomputes per species across kinds -- the earlier seen visit keeps the flag over the later heard duplicate');
     } finally {
         store.close();
         await rm(directory, { recursive: true, force: true });

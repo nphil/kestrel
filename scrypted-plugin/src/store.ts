@@ -351,6 +351,57 @@ export class KestrelStore {
         return row ? this.decodeVisit(row) : undefined;
     }
 
+    findRecentHeardVisit(cameraId: string, species: string, since: number): Visit | undefined {
+        const row = this.db.prepare("SELECT * FROM visits WHERE camera_id=? AND species=? AND kind='heard' AND started_at>=? ORDER BY started_at DESC LIMIT 1").get(cameraId, species, since) as RawVisit | undefined;
+        return row ? this.decodeVisit(row) : undefined;
+    }
+
+    // One-time cleanup for a fixed bug: an overlapping pair of MQTT subscriptions caused every
+    // BirdNET-Go detection to be ingested twice. The two deliveries are handled by two separate,
+    // fully-synchronous calls to onBirdnetMessage, so when the message itself carries no
+    // parseable Date+Time (startedAt falls back to `Date.now()`), the resulting timestamps differ
+    // by whatever the event loop took to run the first delivery to completion -- observed in
+    // practice as single-digit-to-low-tens of milliseconds, never seconds. Clusters consecutive
+    // heard visits for the same camera+species whose gap to the previous one is within
+    // DUPLICATE_WINDOW_MS (chained, so a run of 3+ near-simultaneous deliveries collapses too);
+    // keeps the first (lowest rowid = earliest inserted) of each cluster, then recomputes
+    // first_ever globally, since a duplicate could have taken the flag that belongs to the
+    // surviving row (or vice versa).
+    cleanupDuplicateHeardVisits(): { removed: number } {
+        const DUPLICATE_WINDOW_MS = 2_000;
+        const rows = this.db.prepare(
+            "SELECT id, camera_id, species, started_at FROM visits WHERE kind='heard' ORDER BY camera_id, species, started_at ASC, rowid ASC"
+        ).all() as { id: string; camera_id: string; species: string; started_at: number }[];
+        const correctedIds = new Set((this.db.prepare('SELECT visit_id FROM corrections').all() as { visit_id: string }[]).map(r => r.visit_id));
+        const toDelete: string[] = [];
+        let clusterStart = 0;
+        for (let i = 1; i <= rows.length; i++) {
+            const prev = rows[i - 1];
+            const cur = rows[i];
+            const sameCluster = cur && cur.camera_id === prev.camera_id && cur.species === prev.species && cur.started_at - prev.started_at <= DUPLICATE_WINDOW_MS;
+            if (sameCluster) continue;
+            const cluster = rows.slice(clusterStart, i);
+            for (const row of cluster.slice(1)) {
+                if (!correctedIds.has(row.id)) toDelete.push(row.id);
+            }
+            clusterStart = i;
+        }
+        let removed = 0;
+        if (toDelete.length) {
+            const deleteOne = this.db.prepare('DELETE FROM visits WHERE id=?');
+            for (const id of toDelete) removed += Number(deleteOne.run(id).changes);
+        }
+        this.db.exec('UPDATE visits SET first_ever=0');
+        this.db.exec(`
+            UPDATE visits SET first_ever=1 WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (PARTITION BY species ORDER BY started_at ASC, rowid ASC) AS rn FROM visits
+                ) WHERE rn=1
+            )
+        `);
+        return { removed };
+    }
+
     hasSpecies(species: string): boolean {
         return !!this.db.prepare("SELECT 1 FROM visits WHERE species=? AND status NOT IN ('not_animal','unknown') LIMIT 1").get(species);
     }

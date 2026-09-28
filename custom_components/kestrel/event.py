@@ -19,9 +19,9 @@ async def async_setup_entry(
     entry: ConfigEntry[KestrelCoordinator],
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create wildlife-camera event entities and one heard-bird event entity."""
+    """Create wildlife-camera event entities and one heard-animal event entity."""
     coordinator = entry.runtime_data
-    async_add_entities([KestrelHeardBirdEvent(coordinator)], update_before_add=True)
+    async_add_entities([KestrelHeardAnimalEvent(coordinator)], update_before_add=True)
     known: set[str] = set()
 
     @callback
@@ -92,15 +92,15 @@ class KestrelAnimalEvent(_KestrelEventBase):
         super()._handle_coordinator_update()
 
 
-class KestrelHeardBirdEvent(_KestrelEventBase):
-    """A BirdNET-linked heard-bird visit."""
+class KestrelHeardAnimalEvent(_KestrelEventBase):
+    """A BirdNET-linked heard-animal visit (bird or mammal call)."""
 
-    _attr_translation_key = "heard_bird"
-    _attr_event_types = ["bird"]
-    _attr_icon = "mdi:bird"
-    _attr_unique_id = "kestrel_heard_bird"
-    _attr_suggested_object_id = "kestrel_heard_bird"
-    _attr_name = "Heard bird"
+    _attr_translation_key = "heard_animal"
+    _attr_event_types = ["bird", "mammal"]
+    _attr_icon = "mdi:ear-hearing"
+    _attr_unique_id = "kestrel_heard_animal"
+    _attr_suggested_object_id = "kestrel_heard_animal"
+    _attr_name = "Heard animal"
 
     def __init__(self, coordinator: KestrelCoordinator) -> None:
         super().__init__(coordinator)
@@ -111,9 +111,10 @@ class KestrelHeardBirdEvent(_KestrelEventBase):
             visit = _visit_from_event(event)
             if visit is None or str(visit.get("kind", "")).lower() != "heard":
                 continue
-            if str(visit.get("grp", "unknown")).lower() not in ("bird", "unknown"):
+            group = str(visit.get("grp", "")).lower()
+            if group not in ("bird", "mammal"):
                 continue
-            self._trigger_event("bird", _event_attributes(visit, _camera_name(visit)))
+            self._trigger_event(group, _event_attributes(visit, _camera_name(visit)))
             self.async_write_ha_state()
         super()._handle_coordinator_update()
 

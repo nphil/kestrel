@@ -39,10 +39,11 @@
           "unidentified": "Unidentified"
         }
       },
-      "heard_bird": {
-        "name": "Heard bird",
+      "heard_animal": {
+        "name": "Heard animal",
         "state": {
-          "bird": "Bird"
+          "bird": "Bird",
+          "mammal": "Mammal"
         }
       }
     },

@@ -2,7 +2,7 @@
   "entity": {
     "event": {
       "animal": {"default": "mdi:paw"},
-      "heard_bird": {"default": "mdi:bird"}
+      "heard_animal": {"default": "mdi:ear-hearing"}
     },
     "image": {
       "latest_animal": {"default": "mdi:camera-image"}

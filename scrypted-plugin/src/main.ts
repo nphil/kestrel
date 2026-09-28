@@ -10,6 +10,7 @@ import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from '.
 import { captureDetection, embedCrop, ensureMediaDirectories, saveCapture } from './media';
 import { KestrelStore, type EventItem, type EventsResponse, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
+import { SPECIES_GROUPS } from './species-groups';
 
 const CAMERA_SETTING = 'cameras';
 const DEFAULT_CAMERAS = ['88', '103', '104', '106'];
@@ -121,8 +122,12 @@ function normalizedTime(value: number): number {
 }
 
 function groupForSpecies(species: string, kind: VisitKind): VisitGroup {
-    if (kind === 'heard') return 'bird';
+    if (kind === 'heard') return 'bird'; // BirdNET-Go only ever detects birds.
     const name = species.toLowerCase();
+    const known = SPECIES_GROUPS[name];
+    if (known) return known;
+    // Fallback for labels the local classifier's 268-species list doesn't cover (e.g. a
+    // hand-typed correction, or "Unidentified animal"): keyword heuristic, same as before.
     const mammals = ['squirrel', 'raccoon', 'opossum', 'fox', 'coyote', 'deer', 'rabbit', 'cat', 'dog', 'mouse', 'rat', 'chipmunk', 'groundhog', 'skunk', 'bear', 'mole', 'shrew', 'bat', 'porcupine', 'beaver', 'bobcat', 'armadillo', 'weasel', 'mink', 'otter', 'muskrat', 'vole', 'marmot'];
     const birds = ['bird', 'crow', 'raven', 'hawk', 'owl', 'eagle', 'finch', 'sparrow', 'cardinal', 'dove', 'pigeon', 'warbler', 'woodpecker', 'jay', 'wren', 'thrush', 'blackbird', 'heron', 'duck', 'goose', 'chicken', 'robin', 'starling', 'swallow', 'gull', 'kingfisher', 'oriole', 'tanagers', 'turkey', 'hummingbird', 'bluebird'];
     if (mammals.some(label => name.includes(label))) return 'mammal';
@@ -196,6 +201,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (!this.store.getSetting('detectorSessionCountingV2Since')) {
             this.store.resetTodayDetectorCounts();
             this.store.setSetting('detectorSessionCountingV2Since', String(Date.now()));
+        }
+        if (!this.store.getSetting('heardDuplicatesCleanedAtV2')) {
+            const { removed } = this.store.cleanupDuplicateHeardVisits();
+            this.console.log(`Removed ${removed} duplicate heard visit(s) from the overlapping-subscription bug.`);
+            this.store.setSetting('heardDuplicatesCleanedAtV2', String(Date.now()));
         }
         await this.copyBrokerCredentials();
         await this.reconfigure();
@@ -561,7 +571,10 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         client.on('connect', () => {
             if (generation !== this.brokerGeneration) return;
             const topic = this.db.getSetting('birdnetTopic', DEFAULT_TOPIC).trim() || DEFAULT_TOPIC;
-            client.subscribe([topic, `${topic.replace(/\/+$/, '')}/#`], { qos: 1 }, error => {
+            // `topic/#` already matches the exact base topic too (MQTT wildcard semantics), so a
+            // separate `topic` subscription alongside it is a second, overlapping match --
+            // the broker then delivers every message twice. Subscribe to the wildcard only.
+            client.subscribe(`${topic.replace(/\/+$/, '')}/#`, { qos: 1 }, error => {
                 if (error) this.console.warn(`BirdNET MQTT subscribe failed: ${error.message}`);
             });
         });
@@ -600,6 +613,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const confidence = asNumber(message.Confidence ?? message.confidence ?? message.score ?? message.Score);
         const score = confidence === undefined ? null : confidence > 1 ? confidence / 100 : confidence;
         const species = speciesValue.trim();
+        // Same cooldown as seen visits (10 min per camera+species by default): a bird that keeps
+        // calling triggers BirdNET-Go repeatedly, so fold repeats into the one existing visit
+        // instead of creating a new row per detection.
+        const cooldown = Math.max(0, Number(this.db.getSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES)))) * 60_000;
+        if (this.db.findRecentHeardVisit(cameraId, species, startedAt - cooldown)) return;
         const firstEver = !this.db.hasSpecies(species);
         const id = randomUUID();
         // BirdNET-Go's own reference to its detection and clip -- Kestrel never fetches or
