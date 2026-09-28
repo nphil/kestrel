@@ -11,6 +11,7 @@ import { captureDetection, embedCrop, ensureMediaDirectories, saveCapture } from
 import { KestrelStore, type EventItem, type EventsResponse, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
+import { GENUS_CLASS, SPECIES_CLASS } from './taxonomy';
 
 const CAMERA_SETTING = 'cameras';
 const DEFAULT_CAMERAS = ['88', '103', '104', '106'];
@@ -122,18 +123,51 @@ function normalizedTime(value: number): number {
 }
 
 function groupForSpecies(species: string, kind: VisitKind): VisitGroup {
-    if (kind === 'heard') return 'bird'; // BirdNET-Go only ever detects birds.
     const name = species.toLowerCase();
-    const known = SPECIES_GROUPS[name];
-    if (known) return known;
-    // Fallback for labels the local classifier's 268-species list doesn't cover (e.g. a
-    // hand-typed correction, or "Unidentified animal"): keyword heuristic, same as before.
+    if (kind === 'seen') {
+        const known = SPECIES_GROUPS[name];
+        if (known) return known;
+    }
+    // Fallback keyword heuristic: for 'seen', labels the local classifier's 268-species list
+    // doesn't cover (a hand-typed correction, or "Unidentified animal"). For 'heard', a common-
+    // name correction on an audio visit -- the precise scientific-name/taxonomy resolution
+    // (resolveHeardGroup, used at ingest) isn't available here, only the name Nitin typed.
     const mammals = ['squirrel', 'raccoon', 'opossum', 'fox', 'coyote', 'deer', 'rabbit', 'cat', 'dog', 'mouse', 'rat', 'chipmunk', 'groundhog', 'skunk', 'bear', 'mole', 'shrew', 'bat', 'porcupine', 'beaver', 'bobcat', 'armadillo', 'weasel', 'mink', 'otter', 'muskrat', 'vole', 'marmot'];
     const birds = ['bird', 'crow', 'raven', 'hawk', 'owl', 'eagle', 'finch', 'sparrow', 'cardinal', 'dove', 'pigeon', 'warbler', 'woodpecker', 'jay', 'wren', 'thrush', 'blackbird', 'heron', 'duck', 'goose', 'chicken', 'robin', 'starling', 'swallow', 'gull', 'kingfisher', 'oriole', 'tanagers', 'turkey', 'hummingbird', 'bluebird'];
     if (mammals.some(label => name.includes(label))) return 'mammal';
     if (birds.some(label => name.includes(label))) return 'bird';
-    return 'unknown';
+    return kind === 'heard' ? 'bird' : 'unknown';
 }
+
+// Resolves grp for a heard (audio) detection from BirdNET-Go's ScientificName: exact species
+// match -> genus match -> default 'bird' (Perch's output is overwhelmingly birds). Returns
+// 'drop' for Insecta -- BirdNET-Go's insect calls are too unreliable to keep as a visit.
+function resolveHeardGroup(scientificName: string | undefined): VisitGroup | 'drop' {
+    const normalized = scientificName?.toLowerCase().trim();
+    if (!normalized) return 'bird';
+    const cls = SPECIES_CLASS.get(normalized) ?? GENUS_CLASS.get(normalized.split(' ')[0]);
+    switch (cls) {
+        case 'Mammalia': return 'mammal';
+        case 'Amphibia':
+        case 'Reptilia': return 'other';
+        case 'Insecta': return 'drop';
+        default: return 'bird';
+    }
+}
+
+// One-time-migration-only: the specific non-bird common names already verified (2026-09-28,
+// via classifier/data/inat21_categories.json) to exist in stored heard visits from before this
+// fix, keyed lowercased. Existing rows only have the common name persisted, not BirdNET-Go's
+// ScientificName, so this can't reuse resolveHeardGroup's precise taxonomy lookup -- it is
+// intentionally small and exact rather than a second bundled reference table. Species not
+// listed here default to 'bird' (unchanged), same as resolveHeardGroup's own default.
+const KNOWN_NON_BIRD_HEARD_SPECIES: Readonly<Record<string, VisitGroup | 'drop'>> = {
+    'coyote': 'mammal',
+    'eastern chipmunk': 'mammal',
+    'eastern gray squirrel': 'mammal',
+    'spring peeper': 'other',
+    'japanese burrowing cricket': 'drop',
+};
 
 function headerValue(headers: HttpRequest['headers'], name: string): string | undefined {
     if (!headers) return undefined;
@@ -206,6 +240,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             const { removed } = this.store.cleanupDuplicateHeardVisits();
             this.console.log(`Removed ${removed} duplicate heard visit(s) from the overlapping-subscription bug.`);
             this.store.setSetting('heardDuplicatesCleanedAtV2', String(Date.now()));
+        }
+        if (!this.store.getSetting('heardRegroupedAtV1')) {
+            const { regrouped, dropped } = this.store.regroupHeardVisits(KNOWN_NON_BIRD_HEARD_SPECIES);
+            this.console.log(`Regrouped ${regrouped} and dropped ${dropped} heard visit(s) using taxonomic classes instead of always 'bird'.`);
+            this.store.setSetting('heardRegroupedAtV1', String(Date.now()));
         }
         await this.copyBrokerCredentials();
         await this.reconfigure();
@@ -613,6 +652,15 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const confidence = asNumber(message.Confidence ?? message.confidence ?? message.score ?? message.Score);
         const score = confidence === undefined ? null : confidence > 1 ? confidence / 100 : confidence;
         const species = speciesValue.trim();
+        const scientificValue = message.ScientificName ?? message.scientificName ?? message.scientific_name;
+        const grp = resolveHeardGroup(typeof scientificValue === 'string' ? scientificValue : undefined);
+        // Perch (BirdNET-Go's multi-taxa audio model) also emits insect calls, which are too
+        // unreliable to keep as a visit -- drop silently (no visit, no event, no notification),
+        // but keep a visible daily count so an unexpected flood of these is noticeable in health.
+        if (grp === 'drop') {
+            this.db.recordBirdnetIgnored();
+            return;
+        }
         // Same cooldown as seen visits (10 min per camera+species by default): a bird that keeps
         // calling triggers BirdNET-Go repeatedly, so fold repeats into the one existing visit
         // instead of creating a new row per detection.
@@ -626,7 +674,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const clipValue = message.ClipName ?? message.clipName ?? message.clip_name;
         const birdnetClip = typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null;
         const visit: Visit = {
-            id, camera: { id: camera.id, name: camera.name }, kind: 'heard', startedAt, species, grp: 'bird', status: 'auto', score,
+            id, camera: { id: camera.id, name: camera.name }, kind: 'heard', startedAt, species, grp, status: 'auto', score,
             snapshot: null, crop: null, clip: { state: 'none', expectedReadyAt: null }, heard: null,
             audio: birdnetDetectionId !== null || birdnetClip !== null ? { birdnetDetectionId, birdnetClip } : null,
             suggestions: [],
@@ -824,7 +872,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             gpu,
             cameras: counterItems,
             storage: { dbMB: Number(dbMB.toFixed(2)), mediaMB: Number(mediaMB.toFixed(2)), budgetMB: 300 },
-            birdnet: lastHeardAt === null ? null : { online: now - lastHeardAt <= 30 * 60_000, lastHeardAt },
+            birdnet: lastHeardAt === null ? null : { online: now - lastHeardAt <= 30 * 60_000, lastHeardAt, ignoredToday: this.db.birdnetIgnoredToday(now) },
             corrections: { total: stats.total, sinceRetrain: stats.sinceRetrain },
         };
     }

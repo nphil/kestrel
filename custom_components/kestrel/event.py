@@ -93,10 +93,10 @@ class KestrelAnimalEvent(_KestrelEventBase):
 
 
 class KestrelHeardAnimalEvent(_KestrelEventBase):
-    """A BirdNET-linked heard-animal visit (bird or mammal call)."""
+    """A BirdNET-linked heard-animal visit (bird, mammal, or other call)."""
 
     _attr_translation_key = "heard_animal"
-    _attr_event_types = ["bird", "mammal"]
+    _attr_event_types = ["bird", "mammal", "other"]
     _attr_icon = "mdi:ear-hearing"
     _attr_unique_id = "kestrel_heard_animal"
     _attr_suggested_object_id = "kestrel_heard_animal"
@@ -112,7 +112,7 @@ class KestrelHeardAnimalEvent(_KestrelEventBase):
             if visit is None or str(visit.get("kind", "")).lower() != "heard":
                 continue
             group = str(visit.get("grp", "")).lower()
-            if group not in ("bird", "mammal"):
+            if group not in ("bird", "mammal", "other"):
                 continue
             self._trigger_event(group, _event_attributes(visit, _camera_name(visit)))
             self.async_write_ha_state()

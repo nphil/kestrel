@@ -14,6 +14,7 @@ from homeassistant.components import websocket_api
 from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 
+from . import birdnet_images
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS
 from .coordinator import KestrelCoordinator
@@ -66,7 +67,7 @@ def _sign_media_paths(
                 .get("birdnet_species_map", {})
                 .get(species.strip().lower())
             )
-            if scientific_name:
+            if scientific_name and birdnet_images.available_now(hass, scientific_name) is True:
                 result["referenceImage"] = _signed_media_url(
                     hass, "species_ref", scientific_name, refresh_token_id
                 )

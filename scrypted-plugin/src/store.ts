@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import type { StatementSync } from 'node:sqlite';
 
 export type VisitKind = 'seen' | 'heard';
-export type VisitGroup = 'bird' | 'mammal' | 'unknown';
+export type VisitGroup = 'bird' | 'mammal' | 'other' | 'unknown';
 export type VisitStatus = 'auto' | 'learned' | 'corrected' | 'confirmed' | 'not_animal' | 'unknown';
 export type ClipState = 'pending' | 'ready' | 'none' | 'deleted';
 
@@ -152,6 +152,7 @@ export class KestrelStore {
     readonly db: DatabaseSync;
     private readonly dbPath: string;
     private readonly recordDetectorCheckStatement: StatementSync;
+    private readonly recordBirdnetIgnoredStatement: StatementSync;
 
     constructor(path: string) {
         this.dbPath = path;
@@ -198,6 +199,10 @@ export class KestrelStore {
                 checks INTEGER NOT NULL DEFAULT 0,
                 empty_checks INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(day, camera_id)
+            );
+            CREATE TABLE IF NOT EXISTS birdnet_daily_stats (
+                day TEXT PRIMARY KEY,
+                ignored INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS species_best (
                 species TEXT PRIMARY KEY,
@@ -248,6 +253,8 @@ export class KestrelStore {
         if (!visitColumns.has('birdnet_clip')) this.db.exec('ALTER TABLE visits ADD COLUMN birdnet_clip TEXT');
         this.recordDetectorCheckStatement = this.db.prepare(`INSERT INTO camera_daily_stats(day,camera_id,checks,empty_checks) VALUES(?,?,1,?)
             ON CONFLICT(day,camera_id) DO UPDATE SET checks=checks+1,empty_checks=empty_checks+excluded.empty_checks`);
+        this.recordBirdnetIgnoredStatement = this.db.prepare(`INSERT INTO birdnet_daily_stats(day,ignored) VALUES(?,1)
+            ON CONFLICT(day) DO UPDATE SET ignored=ignored+1`);
     }
 
     getSetting(key: string, fallback = ''): string {
@@ -391,6 +398,11 @@ export class KestrelStore {
             const deleteOne = this.db.prepare('DELETE FROM visits WHERE id=?');
             for (const id of toDelete) removed += Number(deleteOne.run(id).changes);
         }
+        this.recomputeFirstEver();
+        return { removed };
+    }
+
+    private recomputeFirstEver(): void {
         this.db.exec('UPDATE visits SET first_ever=0');
         this.db.exec(`
             UPDATE visits SET first_ever=1 WHERE rowid IN (
@@ -399,7 +411,40 @@ export class KestrelStore {
                 ) WHERE rn=1
             )
         `);
-        return { removed };
+    }
+
+    // One-time migration: every heard visit was tagged grp='bird' regardless of species, because
+    // the ingest path incorrectly assumed BirdNET-Go only ever detects birds -- Perch v2 is
+    // multi-taxa (mammals, amphibians, insects too). Recomputes grp for stored heard visits using
+    // `knownNonBird`, a small map of the specific non-bird common names known to exist in this
+    // install's data (this migration only has the common name that was stored, not BirdNET-Go's
+    // ScientificName the live ingest path now resolves precisely against the full taxonomy).
+    // Species not in the map default to 'bird', same as the live path's own default. A 'drop'
+    // resolution (Insecta -- too unreliable to keep) deletes the row unless a correction
+    // references it.
+    regroupHeardVisits(knownNonBird: Readonly<Record<string, VisitGroup | 'drop'>>): { regrouped: number; dropped: number } {
+        const rows = this.db.prepare("SELECT id, species, grp FROM visits WHERE kind='heard'").all() as { id: string; species: string; grp: VisitGroup }[];
+        const correctedIds = new Set((this.db.prepare('SELECT visit_id FROM corrections').all() as { visit_id: string }[]).map(r => r.visit_id));
+        const updateGrp = this.db.prepare('UPDATE visits SET grp=? WHERE id=?');
+        const deleteVisit = this.db.prepare('DELETE FROM visits WHERE id=?');
+        let regrouped = 0;
+        let dropped = 0;
+        for (const row of rows) {
+            const resolved = knownNonBird[row.species.toLowerCase()];
+            if (!resolved) continue;
+            if (resolved === 'drop') {
+                if (correctedIds.has(row.id)) continue;
+                deleteVisit.run(row.id);
+                dropped++;
+                continue;
+            }
+            if (resolved !== row.grp) {
+                updateGrp.run(resolved, row.id);
+                regrouped++;
+            }
+        }
+        this.recomputeFirstEver();
+        return { regrouped, dropped };
     }
 
     hasSpecies(species: string): boolean {
@@ -578,6 +623,15 @@ export class KestrelStore {
         this.db.prepare('UPDATE camera_daily_stats SET checks=0,empty_checks=0 WHERE day=?').run(day);
     }
 
+    recordBirdnetIgnored(at = Date.now()): void {
+        this.recordBirdnetIgnoredStatement.run(newYorkDayKey(at));
+    }
+
+    birdnetIgnoredToday(at = Date.now()): number {
+        const row = this.db.prepare('SELECT ignored FROM birdnet_daily_stats WHERE day=?').get(newYorkDayKey(at)) as { ignored: number } | undefined;
+        return row?.ignored ?? 0;
+    }
+
     cameraDailyStats(cameraId: string, at = Date.now()): { checksToday: number; emptyChecksToday: number; visitsToday: number } {
         const range = newYorkDayBounds(at);
         this.db.prepare('INSERT OR IGNORE INTO camera_daily_stats(day,camera_id) VALUES(?,?)').run(range.day, cameraId);
@@ -613,6 +667,7 @@ export class KestrelStore {
     async prune(now: number, mediaDir: string, storageBudgetBytes: number): Promise<{ dbBytes: number; mediaBytes: number }> {
         const cutoff = now - 30 * 24 * 60 * 60 * 1000;
         this.db.prepare('DELETE FROM camera_daily_stats WHERE day<?').run(newYorkDayKey(now - 30 * 24 * 60 * 60 * 1000));
+        this.db.prepare('DELETE FROM birdnet_daily_stats WHERE day<?').run(newYorkDayKey(now - 30 * 24 * 60 * 60 * 1000));
         const old = this.db.prepare('SELECT id,snapshot_file,crop_file FROM visits WHERE started_at<? AND (snapshot_file IS NOT NULL OR crop_file IS NOT NULL)')
             .all(cutoff) as { id: string; snapshot_file: string | null; crop_file: string | null }[];
         for (const row of old) {

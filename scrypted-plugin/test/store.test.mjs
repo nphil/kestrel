@@ -187,3 +187,44 @@ test('cleanupDuplicateHeardVisits collapses near-duplicate jitter, protects corr
         await rm(directory, { recursive: true, force: true });
     }
 });
+
+test('regroupHeardVisits reclassifies known non-bird species, drops insects unless corrected, and leaves unknown species alone', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-regroup-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        const t0 = Date.parse('2026-09-28T06:00:00Z');
+        const knownNonBird = { coyote: 'mammal', 'spring peeper': 'other', cricket: 'drop' };
+
+        // Mammal: was wrongly saved as 'bird', should become 'mammal'.
+        store.saveVisit(makeHeardVisit('coyote-1', 'Coyote', t0));
+        // Amphibian: was wrongly saved as 'bird', should become 'other'.
+        store.saveVisit(makeHeardVisit('peeper-1', 'Spring Peeper', t0 + 1000));
+        // Insect, uncorrected: should be deleted entirely.
+        store.saveVisit(makeHeardVisit('cricket-1', 'Cricket', t0 + 2000));
+        // Insect, but a correction references it: must survive, ungrouped (stays 'bird').
+        const cricket2 = makeHeardVisit('cricket-2', 'Cricket', t0 + 3000);
+        store.saveVisit(cricket2);
+        store.recordCorrection(cricket2, 'Cricket', 'not_animal', false, null, null);
+        // A real bird, and a species not in the known-non-bird map at all: both left untouched.
+        store.saveVisit(makeHeardVisit('owl-1', 'Great Horned Owl', t0 + 4000));
+        // A 'seen' visit, unaffected since regroupHeardVisits only touches kind='heard'.
+        store.saveVisit(makeVisit('seen-coyote', 'Coyote', 0.9, t0 - 1000));
+
+        const { regrouped, dropped } = store.regroupHeardVisits(knownNonBird);
+        assert.equal(regrouped, 2, 'coyote and spring peeper are reclassified');
+        assert.equal(dropped, 1, 'only the uncorrected cricket is dropped');
+
+        assert.equal(store.db.prepare("SELECT grp FROM visits WHERE id='coyote-1'").get().grp, 'mammal');
+        assert.equal(store.db.prepare("SELECT grp FROM visits WHERE id='peeper-1'").get().grp, 'other');
+        assert.equal(store.db.prepare("SELECT grp FROM visits WHERE id='owl-1'").get().grp, 'bird', 'species outside the map is left as-is');
+        assert.equal(store.db.prepare("SELECT grp FROM visits WHERE id='seen-coyote'").get().grp, 'mammal', 'seen visits are untouched by this heard-only migration');
+
+        assert.equal(store.db.prepare("SELECT 1 FROM visits WHERE id='cricket-1'").get(), undefined, 'the uncorrected insect row is deleted');
+        const survivingCricket = store.db.prepare("SELECT grp FROM visits WHERE id='cricket-2'").get();
+        assert.ok(survivingCricket, 'the corrected insect row survives because a correction references it');
+        assert.equal(survivingCricket.grp, 'bird', 'a protected drop-candidate is left ungrouped rather than silently reclassified');
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});

@@ -12,7 +12,7 @@ DEFAULT_POLL_TIMEOUT = 25
 MIN_POLL_TIMEOUT = 1
 MAX_POLL_TIMEOUT = 25
 
-INTEGRATION_VERSION = "1.0.9"
+INTEGRATION_VERSION = "1.0.10"
 STATIC_PATH = "/kestrel-static"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
@@ -22,6 +22,12 @@ MEDIA_URL_TTL_HOURS = 12
 # own stable reverse-proxied route to the add-on's web UI, for a human "open it" link.
 BIRDNET_GO_INTERNAL_URL = "http://db21ed7f-birdnet-go:8080"
 BIRDNET_GO_INGRESS_PATH = "/hassio/ingress/db21ed7f_birdnet-go"
+
+# How long a per-species referenceImage availability verdict stays cached (see
+# birdnet_images.py). Positive matches BirdNET-Go's own 30-day image cache; a
+# negative (no image found) is rechecked sooner in case a provider gets one later.
+BIRDNET_IMAGE_POSITIVE_CACHE_DAYS = 30
+BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS = 7
 
 # Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).
 PANEL_URL_PATH = "kestrel"

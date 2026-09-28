@@ -43,7 +43,8 @@
         "name": "Heard animal",
         "state": {
           "bird": "Bird",
-          "mammal": "Mammal"
+          "mammal": "Mammal",
+          "other": "Other"
         }
       }
     },
