@@ -3,7 +3,7 @@ import KestrelMark from "../../../assets/kestrel-icon-128.png";
 import { api, asArray, asVisit, cameraSnapshotUrl, extractLabels, navigate, routeView, speciesArray, speciesFromDetail, speciesPhoto, speciesReferencePhoto, visitAudio, visitClip, visitPage, visitSnapshot, visitIdFromLocation } from "../api.ts";
 import { ago, clamp, clockTime, dateTime, formatMiB, pluralize, timestamp } from "../format.ts";
 import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
-import type { Camera, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, SpeciesDetail, Visit } from "../types.ts";
+import type { Camera, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, SpeciesDetail, Visit, VisitSuggestion } from "../types.ts";
 import "./kestrel-lazy-image.ts";
 import "./kestrel-lazy-audio.ts";
 
@@ -382,7 +382,7 @@ export class KestrelCameras extends LitElement {
   }
 
   private async _loadSpecies(): Promise<void> {
-    if (!this._hass) return;
+    if (!this._hass || this._species.length) return;
     try { this._species = speciesArray(await api.species(this._hass)).slice(0, 500); }
     catch { /* keep the last good species list */ }
   }
@@ -457,6 +457,7 @@ export class KestrelCameras extends LitElement {
     this._pickerOpen = true;
     this._search = "";
     void this._loadLabels();
+    void this._loadSpecies();
   }
 
   private _closeWrongPicker(): void { this._pickerOpen = false; this._search = ""; }
@@ -754,7 +755,7 @@ export class KestrelCameras extends LitElement {
               : html`<kestrel-lazy-image class="visit-image" .src=${""} alt=${visit.species || "Unidentified animal"} wide></kestrel-lazy-image>`}
         ${visit.kind === "heard" && !photo && this._visitReferencePhoto && !this._visitReferencePhotoFailed ? html`<span class="snapshot-chip">Reference photo</span>` : nothing}
         ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">The recording is still being finalized. This view updates when it's ready.</p></div>` : nothing}
-        ${visit.clip?.state === "none" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
+        ${visit.clip?.state === "none" && visit.kind !== "heard" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
         ${visit.clip?.state === "deleted" ? html`<p class="media-note">This clip is no longer available.</p>` : nothing}
         ${visit.clip?.state === "ready" && !clip ? html`<p class="media-note">The clip is ready, but its signed link isn't available yet.</p>` : nothing}
       </section>
@@ -762,9 +763,9 @@ export class KestrelCameras extends LitElement {
         <div class="visit-title-row"><div><h1>${visit.species || "Unidentified animal"}</h1><p class="muted">${visit.camera.name} · ${dateTime(visit.startedAt)}</p></div><span class="score">${Math.round((visit.score ?? 0) * 100)}<small>%</small></span></div>
         <div class="visit-tags"><span class="status-chip"><i class="status-dot ${visit.kind === "heard" ? "info" : "ok"}"></i>${visit.kind === "heard" ? "Heard" : visit.grp === "bird" ? "Bird" : visit.grp === "mammal" ? "Mammal" : "Wildlife"}</span><span class="status-chip">${this._statusLabel(visit.status)}</span>${visit.firstEver ? html`<span class="status-chip new-tag">First visit</span>` : nothing}</div>
         <div class="visit-actions"><button class="pill primary" type="button" ?disabled=${confirmed || this._saving} @click=${() => this._confirmVisit()}>${confirmed ? "✓ Confirmed" : "✓ That's right"}</button><button class="pill secondary" type="button" ?disabled=${this._saving} @click=${this._openWrongPicker}>Wrong?</button></div>
-        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? html`<kestrel-lazy-audio .src=${this._audioUrl} label=${`Call recording of ${visit.species}`}></kestrel-lazy-audio>` : html`<span class="muted">No recording is available for this visit.</span>`}</section>` : nothing}
+        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? html`<kestrel-lazy-audio .src=${this._audioUrl} label=${`Call recording of ${visit.species}`} preload="metadata"></kestrel-lazy-audio>` : html`<span class="muted">No recording is available for this visit.</span>`}</section>` : nothing}
         ${heard ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Also heard: ${heard.species}</strong><span class="muted">Sound recorded near this visit</span></div><button class="pill secondary" type="button" ?disabled=${this._saving || this._heardConfirmed} @click=${() => this._confirmVisit(visit.id, true)}>${this._heardConfirmed ? "✓ Also heard" : "✓ Also heard"}</button>
-          ${this._audioUrl ? html`<kestrel-lazy-audio .src=${this._audioUrl} label=${`Call recording of ${heard.species}`}></kestrel-lazy-audio>` : html`<button class="text-button" type="button" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} @click=${() => this._loadCallAudio(heard.visitId)}>${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"}</button>`}
+          ${this._audioUrl ? html`<kestrel-lazy-audio .src=${this._audioUrl} label=${`Call recording of ${heard.species}`} preload="metadata"></kestrel-lazy-audio>` : html`<button class="text-button" type="button" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} @click=${() => this._loadCallAudio(heard.visitId)}>${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"}</button>`}
         </section>` : nothing}
       </div>
       ${this._pickerOpen ? this._renderCorrectionSheet(visit) : nothing}
@@ -798,14 +799,32 @@ export class KestrelCameras extends LitElement {
   private _onVisitReferenceImageError(): void { this._visitReferencePhotoFailed = true; }
 
   private _renderCorrectionSheet(visit: Visit) {
-    const suggestionNames = (Array.isArray(visit.suggestions) ? visit.suggestions : []).map((suggestion) => suggestion.species).filter(Boolean);
-    const candidates = [...new Set([...suggestionNames, ...this._labels])].filter((name) => name.toLowerCase().includes(this._search.trim().toLowerCase())).slice(0, 16);
+    const reasonLabels: Record<VisitSuggestion["why"], string> = { usual: "Common here", model: "Model's 2nd guess", heard: "Heard here" };
+    const seen = new Set<string>(visit.species ? [visit.species] : []);
+    const rows: { name: string; reason?: string }[] = [];
+    for (const suggestion of Array.isArray(visit.suggestions) ? visit.suggestions : []) {
+      if (!suggestion.species || seen.has(suggestion.species)) continue;
+      seen.add(suggestion.species);
+      rows.push({ name: suggestion.species, reason: reasonLabels[suggestion.why] });
+    }
+    for (const species of [...this._species].sort((a, b) => b.count30d - a.count30d)) {
+      if (!species.species || seen.has(species.species)) continue;
+      seen.add(species.species);
+      rows.push({ name: species.species });
+    }
+    for (const name of [...this._labels].sort((a, b) => a.localeCompare(b))) {
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      rows.push({ name });
+    }
+    const query = this._search.trim().toLowerCase();
+    const candidates = (query ? rows.filter((row) => row.name.toLowerCase().includes(query)) : rows).slice(0, 16);
     return html`<div class="scrim" @click=${this._closeWrongPicker}>
       <section class="correction-sheet sheet" role="dialog" aria-modal="true" aria-labelledby="correction-title" @click=${(event: Event) => event.stopPropagation()}>
         <div class="sheet-handle" aria-hidden="true"></div><div class="sheet-head"><div><h2 id="correction-title">What was it?</h2><p class="muted">Choose a better match or search the species list.</p></div><button class="icon-button" type="button" aria-label="Close" @click=${this._closeWrongPicker}><ha-icon .icon=${"mdi:close"}></ha-icon></button></div>
         <input class="species-search" type="search" placeholder="Search species" .value=${this._search} @input=${(event: Event) => { this._search = (event.currentTarget as HTMLInputElement).value; }}>
         <div class="choice-list" role="listbox" aria-label="Species choices">
-          ${candidates.map((name) => html`<button class="choice-row" type="button" role="option" @click=${() => this._correctVisit(name)}><span>${name}</span><ha-icon .icon=${"mdi:chevron-right"}></ha-icon></button>`)}
+          ${candidates.map((row) => html`<button class="choice-row" type="button" role="option" @click=${() => this._correctVisit(row.name)}><span class="choice-copy"><span>${row.name}</span>${row.reason ? html`<small class="caption">${row.reason}</small>` : nothing}</span><ha-icon .icon=${"mdi:chevron-right"}></ha-icon></button>`)}
           ${candidates.length === 0 ? html`<p class="muted no-match">No matching species.</p>` : nothing}
         </div>
         <div class="special-choices"><button class="pill secondary" type="button" @click=${() => this._correctVisit("not_animal")}>Not an animal</button><button class="pill secondary" type="button" @click=${() => this._correctVisit("unknown")}>Can't tell</button></div>
@@ -929,10 +948,10 @@ export class KestrelCameras extends LitElement {
     .stream-placeholder { display: grid; place-items: center; min-height: 44px; padding: var(--lu-space-4); color: var(--lu-ink-3); font-size: var(--lu-type-caption); text-align: center; }
     .stream-placeholder.static { position: absolute; inset: 0; gap: var(--lu-space-2); align-content: center; }
     .stream-placeholder.static ha-icon { width: 26px; height: 26px; }
-    .camera-health { position: absolute; top: var(--lu-space-2); left: var(--lu-space-2); display: inline-flex; min-height: 32px; align-items: center; gap: 6px; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-card); font-size: var(--lu-type-caption); text-transform: capitalize; }
+    .camera-health { position: absolute; top: var(--lu-space-2); left: var(--lu-space-2); display: inline-flex; min-height: 32px; align-items: center; gap: 6px; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-card); font-size: var(--lu-type-caption); }
     .camera-picture .camera-snapshot { position: absolute; inset: 0; width: 100%; height: 100%; }
     .snapshot-chip { position: absolute; top: var(--lu-space-2); right: var(--lu-space-2); z-index: 1; display: inline-flex; min-height: 28px; align-items: center; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-card); font-size: var(--lu-type-caption); }
-    .status-chip { display: inline-flex; min-height: 32px; align-items: center; gap: 7px; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-tile); font-size: var(--lu-type-caption); text-transform: capitalize; }
+    .status-chip { display: inline-flex; min-height: 32px; align-items: center; gap: 7px; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-tile); font-size: var(--lu-type-caption); }
     .status-dot.info { background: var(--lu-info); }
     .camera-label { display: flex; min-height: 64px; flex-direction: column; justify-content: center; gap: var(--lu-space-1); padding: var(--lu-space-3) var(--lu-space-4); }
     .camera-label strong { font-weight: 600; }
@@ -976,11 +995,10 @@ export class KestrelCameras extends LitElement {
     .visit-tags { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); }
     .new-tag { color: var(--lu-accent); }
     .visit-actions { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); margin-top: var(--lu-space-1); }
-    .heard-panel { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: var(--lu-space-3); padding: var(--lu-space-4); }
+    .heard-panel { display: grid; grid-template-columns: 1fr minmax(0, 210px); align-items: center; gap: var(--lu-space-3); padding: var(--lu-space-4); }
     .heard-copy { display: flex; flex-direction: column; gap: var(--lu-space-1); }
     .heard-copy strong { font-size: var(--lu-type-label); }
     .heard-copy span { font-size: var(--lu-type-caption); }
-    .heard-panel audio { grid-column: 1 / -1; width: 100%; }
     .heard-panel .text-button { grid-column: 1 / -1; justify-self: start; }
     .scrim { position: fixed; z-index: 20; inset: 0; display: flex; align-items: flex-end; justify-content: center; padding: var(--lu-space-4); background: var(--lu-scrim, color-mix(in srgb, var(--primary-background-color) 55%, transparent)); }
     .correction-sheet, .species-sheet { width: min(100%, 640px); max-height: min(86vh, 820px); overflow-y: auto; padding: var(--lu-space-5); border-radius: var(--lu-radius-sheet); background: var(--lu-card); box-shadow: var(--lu-shadow-rest); }
@@ -992,6 +1010,7 @@ export class KestrelCameras extends LitElement {
     .choice-row, .visit-row { display: flex; width: 100%; min-height: var(--lu-target); align-items: center; justify-content: space-between; gap: var(--lu-space-3); padding: var(--lu-space-2) var(--lu-space-3); border: 0; border-bottom: 1px solid var(--lu-edge); border-radius: var(--lu-radius-row); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; }
     .choice-row:hover, .visit-row:hover { background: var(--lu-glass-raised); }
     .choice-row ha-icon, .visit-row ha-icon { color: var(--lu-ink-3); }
+    .choice-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
     .no-match { padding: var(--lu-space-4); }
     .special-choices { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); margin-top: var(--lu-space-4); }
     .wildlife-view, .insights-view { display: grid; gap: var(--lu-space-5); max-width: 1440px; margin: 0 auto; }

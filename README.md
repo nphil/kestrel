@@ -99,6 +99,11 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
 4. **Optional: hearing** — install the BirdNET-Go app, enable the Perch v2 model,
    add the camera streams by name, and point its MQTT at your broker (topic
    `birdnet`, HA discovery off); map stream names to cameras in the plugin settings.
+   Set the app's `BIRDSONGS_FOLDER` option to `/media/birdnet-go/clips` (create the
+   folder first): Home Assistant's backups include app folders but not `/media`, so
+   30 days of recordings would otherwise grow every nightly backup by several GB.
+   Perch hears more than birds: mammals and frogs are kept (event types `mammal` /
+   `other`), insects are ignored.
 5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`.

@@ -8,17 +8,20 @@ export class KestrelLazyAudio extends LitElement {
   static properties = {
     src: { type: String },
     label: { type: String },
+    preload: { type: String },
     _failed: { state: true },
   };
 
   declare src: string;
   declare label: string;
+  declare preload: "none" | "metadata";
   declare _failed: boolean;
 
   constructor() {
     super();
     this.src = "";
     this.label = "";
+    this.preload = "none";
     this._failed = false;
   }
 
@@ -40,7 +43,7 @@ export class KestrelLazyAudio extends LitElement {
     if (this._failed) {
       return html`<p class="fallback"><ha-icon .icon=${"mdi:volume-off"} aria-hidden="true"></ha-icon>Can't play this format here.</p>`;
     }
-    return html`<audio controls preload="none" src=${this.src} aria-label=${this.label} @error=${this._onError}></audio>`;
+    return html`<audio controls preload=${this.preload} src=${this.src} aria-label=${this.label} @error=${this._onError}></audio>`;
   }
 }
 
