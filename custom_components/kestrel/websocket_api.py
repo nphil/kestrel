@@ -14,7 +14,7 @@ from homeassistant.components import websocket_api
 from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 
-from . import birdnet_images
+from . import birdnet_availability
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS
 from .coordinator import KestrelCoordinator
@@ -67,7 +67,7 @@ def _sign_media_paths(
                 .get("birdnet_species_map", {})
                 .get(species.strip().lower())
             )
-            if scientific_name and birdnet_images.available_now(hass, scientific_name) is True:
+            if scientific_name and birdnet_availability.image_available_now(hass, scientific_name) is True:
                 result["referenceImage"] = _signed_media_url(
                     hass, "species_ref", scientific_name, refresh_token_id
                 )
@@ -80,12 +80,15 @@ def _sign_media_paths(
             result["audio"] = (
                 _signed_media_url(hass, "birdnet_audio", str(detection_id), refresh_token_id)
                 if detection_id is not None
+                and birdnet_availability.audio_available_now(hass, str(detection_id)) is True
                 else None
             )
         heard = result.get("heard")
         if isinstance(heard, dict):
             heard_detection_id = heard.get("birdnetDetectionId")
-            if heard_detection_id is not None:
+            if heard_detection_id is not None and birdnet_availability.audio_available_now(
+                hass, str(heard_detection_id)
+            ) is True:
                 heard["audio_url"] = _signed_media_url(
                     hass, "birdnet_audio", str(heard_detection_id), refresh_token_id
                 )

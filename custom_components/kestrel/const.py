@@ -12,7 +12,7 @@ DEFAULT_POLL_TIMEOUT = 25
 MIN_POLL_TIMEOUT = 1
 MAX_POLL_TIMEOUT = 25
 
-INTEGRATION_VERSION = "1.0.10"
+INTEGRATION_VERSION = "1.0.11"
 STATIC_PATH = "/kestrel-static"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
@@ -23,11 +23,17 @@ MEDIA_URL_TTL_HOURS = 12
 BIRDNET_GO_INTERNAL_URL = "http://db21ed7f-birdnet-go:8080"
 BIRDNET_GO_INGRESS_PATH = "/hassio/ingress/db21ed7f_birdnet-go"
 
-# How long a per-species referenceImage availability verdict stays cached (see
-# birdnet_images.py). Positive matches BirdNET-Go's own 30-day image cache; a
-# negative (no image found) is rechecked sooner in case a provider gets one later.
+# Per-item availability verdicts (see birdnet_availability.py) for media that
+# BirdNET-Go may not actually have, even though it recognizes the name/id:
+# referenceImage (species with no provider photo) and heard-visit audio (a
+# low-confidence detection whose clip BirdNET-Go never saved). Image positive
+# matches BirdNET-Go's own 30-day image cache; image negative is rechecked
+# sooner in case a provider gets one later. Audio positive never expires (a
+# saved clip is not deleted); audio negative is rechecked in minutes, since a
+# clip can land a few seconds after its MQTT detection message.
 BIRDNET_IMAGE_POSITIVE_CACHE_DAYS = 30
 BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS = 7
+BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES = 10
 
 # Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).
 PANEL_URL_PATH = "kestrel"
