@@ -1,0 +1,1878 @@
+[
+ {
+  "index": 3115,
+  "label": "Sharp-shinned Hawk",
+  "scientific": "Accipiter striatus",
+  "group": "Birds",
+  "local_obs": 27
+ },
+ {
+  "index": 3127,
+  "label": "Red-tailed Hawk",
+  "scientific": "Buteo jamaicensis",
+  "group": "Birds",
+  "local_obs": 1578
+ },
+ {
+  "index": 3129,
+  "label": "Red-shouldered Hawk",
+  "scientific": "Buteo lineatus",
+  "group": "Birds",
+  "local_obs": 2112
+ },
+ {
+  "index": 3131,
+  "label": "Broad-winged Hawk",
+  "scientific": "Buteo platypterus",
+  "group": "Birds",
+  "local_obs": 89
+ },
+ {
+  "index": 3145,
+  "label": "Northern Harrier",
+  "scientific": "Circus hudsonius",
+  "group": "Birds",
+  "local_obs": 7
+ },
+ {
+  "index": 3149,
+  "label": "American Swallow-tailed Kite",
+  "scientific": "Elanoides forficatus",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3161,
+  "label": "Bald Eagle",
+  "scientific": "Haliaeetus leucocephalus",
+  "group": "Birds",
+  "local_obs": 131
+ },
+ {
+  "index": 3167,
+  "label": "Mississippi Kite",
+  "scientific": "Ictinia mississippiensis",
+  "group": "Birds",
+  "local_obs": 33
+ },
+ {
+  "index": 3185,
+  "label": "Osprey",
+  "scientific": "Pandion haliaetus",
+  "group": "Birds",
+  "local_obs": 161
+ },
+ {
+  "index": 3188,
+  "label": "Wood Duck",
+  "scientific": "Aix sponsa",
+  "group": "Birds",
+  "local_obs": 158
+ },
+ {
+  "index": 3189,
+  "label": "Egyptian Goose",
+  "scientific": "Alopochen aegyptiaca",
+  "group": "Birds",
+  "local_obs": 3
+ },
+ {
+  "index": 3191,
+  "label": "Northern Pintail",
+  "scientific": "Anas acuta",
+  "group": "Birds",
+  "local_obs": 22
+ },
+ {
+  "index": 3194,
+  "label": "Common Teal",
+  "scientific": "Anas crecca",
+  "group": "Birds",
+  "local_obs": 30
+ },
+ {
+  "index": 3201,
+  "label": "Mallard",
+  "scientific": "Anas platyrhynchos",
+  "group": "Birds",
+  "local_obs": 1622
+ },
+ {
+  "index": 3203,
+  "label": "American Black Duck",
+  "scientific": "Anas rubripes",
+  "group": "Birds",
+  "local_obs": 15
+ },
+ {
+  "index": 3207,
+  "label": "Greater White-fronted Goose",
+  "scientific": "Anser albifrons",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3208,
+  "label": "Greylag Goose",
+  "scientific": "Anser anser",
+  "group": "Birds",
+  "local_obs": 8
+ },
+ {
+  "index": 3210,
+  "label": "Snow Goose",
+  "scientific": "Anser caerulescens",
+  "group": "Birds",
+  "local_obs": 14
+ },
+ {
+  "index": 3211,
+  "label": "Swan Goose",
+  "scientific": "Anser cygnoides",
+  "group": "Birds",
+  "local_obs": 38
+ },
+ {
+  "index": 3214,
+  "label": "Ross's Goose",
+  "scientific": "Anser rossii",
+  "group": "Birds",
+  "local_obs": 10
+ },
+ {
+  "index": 3215,
+  "label": "Lesser Scaup",
+  "scientific": "Aythya affinis",
+  "group": "Birds",
+  "local_obs": 43
+ },
+ {
+  "index": 3216,
+  "label": "Redhead",
+  "scientific": "Aythya americana",
+  "group": "Birds",
+  "local_obs": 47
+ },
+ {
+  "index": 3218,
+  "label": "Ring-necked Duck",
+  "scientific": "Aythya collaris",
+  "group": "Birds",
+  "local_obs": 131
+ },
+ {
+  "index": 3221,
+  "label": "Greater Scaup",
+  "scientific": "Aythya marila",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 3224,
+  "label": "Canvasback",
+  "scientific": "Aythya valisineria",
+  "group": "Birds",
+  "local_obs": 19
+ },
+ {
+  "index": 3226,
+  "label": "Canada Goose",
+  "scientific": "Branta canadensis",
+  "group": "Birds",
+  "local_obs": 2070
+ },
+ {
+  "index": 3230,
+  "label": "Bufflehead",
+  "scientific": "Bucephala albeola",
+  "group": "Birds",
+  "local_obs": 49
+ },
+ {
+  "index": 3231,
+  "label": "Common Goldeneye",
+  "scientific": "Bucephala clangula",
+  "group": "Birds",
+  "local_obs": 15
+ },
+ {
+  "index": 3233,
+  "label": "Muscovy Duck",
+  "scientific": "Cairina moschata",
+  "group": "Birds",
+  "local_obs": 761
+ },
+ {
+  "index": 3237,
+  "label": "Long-tailed Duck",
+  "scientific": "Clangula hyemalis",
+  "group": "Birds",
+  "local_obs": 7
+ },
+ {
+  "index": 3244,
+  "label": "Mute Swan",
+  "scientific": "Cygnus olor",
+  "group": "Birds",
+  "local_obs": 55
+ },
+ {
+  "index": 3245,
+  "label": "Black-bellied Whistling-Duck",
+  "scientific": "Dendrocygna autumnalis",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 3250,
+  "label": "Hooded Merganser",
+  "scientific": "Lophodytes cucullatus",
+  "group": "Birds",
+  "local_obs": 219
+ },
+ {
+  "index": 3253,
+  "label": "American Wigeon",
+  "scientific": "Mareca americana",
+  "group": "Birds",
+  "local_obs": 27
+ },
+ {
+  "index": 3255,
+  "label": "Gadwall",
+  "scientific": "Mareca strepera",
+  "group": "Birds",
+  "local_obs": 69
+ },
+ {
+  "index": 3257,
+  "label": "American White-winged Scoter",
+  "scientific": "Melanitta deglandi",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3261,
+  "label": "Red-breasted Merganser",
+  "scientific": "Mergus serrator",
+  "group": "Birds",
+  "local_obs": 10
+ },
+ {
+  "index": 3264,
+  "label": "Ruddy Duck",
+  "scientific": "Oxyura jamaicensis",
+  "group": "Birds",
+  "local_obs": 43
+ },
+ {
+  "index": 3268,
+  "label": "Northern Shoveler",
+  "scientific": "Spatula clypeata",
+  "group": "Birds",
+  "local_obs": 34
+ },
+ {
+  "index": 3270,
+  "label": "Blue-winged Teal",
+  "scientific": "Spatula discors",
+  "group": "Birds",
+  "local_obs": 93
+ },
+ {
+  "index": 3288,
+  "label": "Chimney Swift",
+  "scientific": "Chaetura pelagica",
+  "group": "Birds",
+  "local_obs": 97
+ },
+ {
+  "index": 3292,
+  "label": "Common Nighthawk",
+  "scientific": "Chordeiles minor",
+  "group": "Birds",
+  "local_obs": 24
+ },
+ {
+  "index": 3307,
+  "label": "Ruby-throated Hummingbird",
+  "scientific": "Archilochus colubris",
+  "group": "Birds",
+  "local_obs": 809
+ },
+ {
+  "index": 3325,
+  "label": "Calliope Hummingbird",
+  "scientific": "Selasphorus calliope",
+  "group": "Birds",
+  "local_obs": 3
+ },
+ {
+  "index": 3327,
+  "label": "Rufous Hummingbird",
+  "scientific": "Selasphorus rufus",
+  "group": "Birds",
+  "local_obs": 15
+ },
+ {
+  "index": 3331,
+  "label": "Turkey Vulture",
+  "scientific": "Cathartes aura",
+  "group": "Birds",
+  "local_obs": 411
+ },
+ {
+  "index": 3333,
+  "label": "Black Vulture",
+  "scientific": "Coragyps atratus",
+  "group": "Birds",
+  "local_obs": 503
+ },
+ {
+  "index": 3361,
+  "label": "Semipalmated Plover",
+  "scientific": "Charadrius semipalmatus",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3363,
+  "label": "Killdeer",
+  "scientific": "Charadrius vociferus",
+  "group": "Birds",
+  "local_obs": 314
+ },
+ {
+  "index": 3401,
+  "label": "Bonaparte's Gull",
+  "scientific": "Chroicocephalus philadelphia",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 3414,
+  "label": "Ring-billed Gull",
+  "scientific": "Larus delawarensis",
+  "group": "Birds",
+  "local_obs": 17
+ },
+ {
+  "index": 3431,
+  "label": "Forster's Tern",
+  "scientific": "Sterna forsteri",
+  "group": "Birds",
+  "local_obs": 3
+ },
+ {
+  "index": 3444,
+  "label": "American Avocet",
+  "scientific": "Recurvirostra americana",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3448,
+  "label": "Spotted Sandpiper",
+  "scientific": "Actitis macularius",
+  "group": "Birds",
+  "local_obs": 127
+ },
+ {
+  "index": 3458,
+  "label": "White-rumped Sandpiper",
+  "scientific": "Calidris fuscicollis",
+  "group": "Birds",
+  "local_obs": 4
+ },
+ {
+  "index": 3462,
+  "label": "Pectoral Sandpiper",
+  "scientific": "Calidris melanotos",
+  "group": "Birds",
+  "local_obs": 7
+ },
+ {
+  "index": 3464,
+  "label": "Least Sandpiper",
+  "scientific": "Calidris minutilla",
+  "group": "Birds",
+  "local_obs": 29
+ },
+ {
+  "index": 3466,
+  "label": "Semipalmated Sandpiper",
+  "scientific": "Calidris pusilla",
+  "group": "Birds",
+  "local_obs": 8
+ },
+ {
+  "index": 3471,
+  "label": "Wilson's Snipe",
+  "scientific": "Gallinago delicata",
+  "group": "Birds",
+  "local_obs": 88
+ },
+ {
+  "index": 3483,
+  "label": "Red Phalarope",
+  "scientific": "Phalaropus fulicarius",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3486,
+  "label": "American Woodcock",
+  "scientific": "Scolopax minor",
+  "group": "Birds",
+  "local_obs": 25
+ },
+ {
+  "index": 3489,
+  "label": "Lesser Yellowlegs",
+  "scientific": "Tringa flavipes",
+  "group": "Birds",
+  "local_obs": 18
+ },
+ {
+  "index": 3492,
+  "label": "Greater Yellowlegs",
+  "scientific": "Tringa melanoleuca",
+  "group": "Birds",
+  "local_obs": 14
+ },
+ {
+  "index": 3496,
+  "label": "Solitary Sandpiper",
+  "scientific": "Tringa solitaria",
+  "group": "Birds",
+  "local_obs": 103
+ },
+ {
+  "index": 3514,
+  "label": "Rock Pigeon",
+  "scientific": "Columba livia",
+  "group": "Birds",
+  "local_obs": 622
+ },
+ {
+  "index": 3536,
+  "label": "Eurasian Collared-Dove",
+  "scientific": "Streptopelia decaocto",
+  "group": "Birds",
+  "local_obs": 20
+ },
+ {
+  "index": 3547,
+  "label": "Mourning Dove",
+  "scientific": "Zenaida macroura",
+  "group": "Birds",
+  "local_obs": 975
+ },
+ {
+  "index": 3557,
+  "label": "Belted Kingfisher",
+  "scientific": "Megaceryle alcyon",
+  "group": "Birds",
+  "local_obs": 237
+ },
+ {
+  "index": 3582,
+  "label": "Yellow-billed Cuckoo",
+  "scientific": "Coccyzus americanus",
+  "group": "Birds",
+  "local_obs": 109
+ },
+ {
+  "index": 3583,
+  "label": "Black-billed Cuckoo",
+  "scientific": "Coccyzus erythropthalmus",
+  "group": "Birds",
+  "local_obs": 8
+ },
+ {
+  "index": 3596,
+  "label": "Merlin",
+  "scientific": "Falco columbarius",
+  "group": "Birds",
+  "local_obs": 8
+ },
+ {
+  "index": 3601,
+  "label": "Peregrine Falcon",
+  "scientific": "Falco peregrinus",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 3604,
+  "label": "American Kestrel",
+  "scientific": "Falco sparverius",
+  "group": "Birds",
+  "local_obs": 37
+ },
+ {
+  "index": 3620,
+  "label": "Helmeted Guineafowl",
+  "scientific": "Numida meleagris",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 3624,
+  "label": "Northern Bobwhite",
+  "scientific": "Colinus virginianus",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 3634,
+  "label": "Wild Turkey",
+  "scientific": "Meleagris gallopavo",
+  "group": "Birds",
+  "local_obs": 304
+ },
+ {
+  "index": 3635,
+  "label": "Common Peafowl",
+  "scientific": "Pavo cristatus",
+  "group": "Birds",
+  "local_obs": 8
+ },
+ {
+  "index": 3637,
+  "label": "Ring-necked Pheasant",
+  "scientific": "Phasianus colchicus",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 3642,
+  "label": "Common Loon",
+  "scientific": "Gavia immer",
+  "group": "Birds",
+  "local_obs": 13
+ },
+ {
+  "index": 3645,
+  "label": "Limpkin",
+  "scientific": "Aramus guarauna",
+  "group": "Birds",
+  "local_obs": 36
+ },
+ {
+  "index": 3648,
+  "label": "Sandhill Crane",
+  "scientific": "Antigone canadensis",
+  "group": "Birds",
+  "local_obs": 128
+ },
+ {
+  "index": 3655,
+  "label": "American Coot",
+  "scientific": "Fulica americana",
+  "group": "Birds",
+  "local_obs": 52
+ },
+ {
+  "index": 3668,
+  "label": "Sora",
+  "scientific": "Porzana carolina",
+  "group": "Birds",
+  "local_obs": 11
+ },
+ {
+  "index": 3701,
+  "label": "Cedar Waxwing",
+  "scientific": "Bombycilla cedrorum",
+  "group": "Birds",
+  "local_obs": 356
+ },
+ {
+  "index": 3709,
+  "label": "Northern Cardinal",
+  "scientific": "Cardinalis cardinalis",
+  "group": "Birds",
+  "local_obs": 3132
+ },
+ {
+  "index": 3714,
+  "label": "Blue Grosbeak",
+  "scientific": "Passerina caerulea",
+  "group": "Birds",
+  "local_obs": 142
+ },
+ {
+  "index": 3715,
+  "label": "Painted Bunting",
+  "scientific": "Passerina ciris",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 3716,
+  "label": "Indigo Bunting",
+  "scientific": "Passerina cyanea",
+  "group": "Birds",
+  "local_obs": 248
+ },
+ {
+  "index": 3720,
+  "label": "Rose-breasted Grosbeak",
+  "scientific": "Pheucticus ludovicianus",
+  "group": "Birds",
+  "local_obs": 245
+ },
+ {
+  "index": 3725,
+  "label": "Scarlet Tanager",
+  "scientific": "Piranga olivacea",
+  "group": "Birds",
+  "local_obs": 158
+ },
+ {
+  "index": 3726,
+  "label": "Summer Tanager",
+  "scientific": "Piranga rubra",
+  "group": "Birds",
+  "local_obs": 222
+ },
+ {
+  "index": 3727,
+  "label": "Dickcissel",
+  "scientific": "Spiza americana",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 3728,
+  "label": "Brown Creeper",
+  "scientific": "Certhia americana",
+  "group": "Birds",
+  "local_obs": 89
+ },
+ {
+  "index": 3749,
+  "label": "American Crow",
+  "scientific": "Corvus brachyrhynchos",
+  "group": "Birds",
+  "local_obs": 287
+ },
+ {
+  "index": 3759,
+  "label": "Fish Crow",
+  "scientific": "Corvus ossifragus",
+  "group": "Birds",
+  "local_obs": 71
+ },
+ {
+  "index": 3761,
+  "label": "Blue Jay",
+  "scientific": "Cyanocitta cristata",
+  "group": "Birds",
+  "local_obs": 796
+ },
+ {
+  "index": 3824,
+  "label": "House Finch",
+  "scientific": "Haemorhous mexicanus",
+  "group": "Birds",
+  "local_obs": 1291
+ },
+ {
+  "index": 3825,
+  "label": "Purple Finch",
+  "scientific": "Haemorhous purpureus",
+  "group": "Birds",
+  "local_obs": 175
+ },
+ {
+  "index": 3835,
+  "label": "Pine Siskin",
+  "scientific": "Spinus pinus",
+  "group": "Birds",
+  "local_obs": 101
+ },
+ {
+  "index": 3838,
+  "label": "American Goldfinch",
+  "scientific": "Spinus tristis",
+  "group": "Birds",
+  "local_obs": 957
+ },
+ {
+  "index": 3849,
+  "label": "Barn Swallow",
+  "scientific": "Hirundo rustica",
+  "group": "Birds",
+  "local_obs": 139
+ },
+ {
+  "index": 3853,
+  "label": "Cliff Swallow",
+  "scientific": "Petrochelidon pyrrhonota",
+  "group": "Birds",
+  "local_obs": 49
+ },
+ {
+  "index": 3855,
+  "label": "Purple Martin",
+  "scientific": "Progne subis",
+  "group": "Birds",
+  "local_obs": 28
+ },
+ {
+  "index": 3861,
+  "label": "Northern Rough-winged Swallow",
+  "scientific": "Stelgidopteryx serripennis",
+  "group": "Birds",
+  "local_obs": 228
+ },
+ {
+  "index": 3864,
+  "label": "Tree Swallow",
+  "scientific": "Tachycineta bicolor",
+  "group": "Birds",
+  "local_obs": 70
+ },
+ {
+  "index": 3867,
+  "label": "Red-winged Blackbird",
+  "scientific": "Agelaius phoeniceus",
+  "group": "Birds",
+  "local_obs": 553
+ },
+ {
+  "index": 3873,
+  "label": "Bobolink",
+  "scientific": "Dolichonyx oryzivorus",
+  "group": "Birds",
+  "local_obs": 13
+ },
+ {
+  "index": 3874,
+  "label": "Rusty Blackbird",
+  "scientific": "Euphagus carolinus",
+  "group": "Birds",
+  "local_obs": 134
+ },
+ {
+  "index": 3877,
+  "label": "Bullock's Oriole",
+  "scientific": "Icterus bullockii",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 3880,
+  "label": "Baltimore Oriole",
+  "scientific": "Icterus galbula",
+  "group": "Birds",
+  "local_obs": 66
+ },
+ {
+  "index": 3889,
+  "label": "Orchard Oriole",
+  "scientific": "Icterus spurius",
+  "group": "Birds",
+  "local_obs": 75
+ },
+ {
+  "index": 3893,
+  "label": "Brown-headed Cowbird",
+  "scientific": "Molothrus ater",
+  "group": "Birds",
+  "local_obs": 496
+ },
+ {
+  "index": 3901,
+  "label": "Common Grackle",
+  "scientific": "Quiscalus quiscula",
+  "group": "Birds",
+  "local_obs": 246
+ },
+ {
+  "index": 3902,
+  "label": "Eastern Meadowlark",
+  "scientific": "Sturnella magna",
+  "group": "Birds",
+  "local_obs": 33
+ },
+ {
+  "index": 3905,
+  "label": "Yellow-breasted Chat",
+  "scientific": "Icteria virens",
+  "group": "Birds",
+  "local_obs": 38
+ },
+ {
+  "index": 3940,
+  "label": "Gray Catbird",
+  "scientific": "Dumetella carolinensis",
+  "group": "Birds",
+  "local_obs": 538
+ },
+ {
+  "index": 3944,
+  "label": "Northern Mockingbird",
+  "scientific": "Mimus polyglottos",
+  "group": "Birds",
+  "local_obs": 1716
+ },
+ {
+  "index": 3950,
+  "label": "Brown Thrasher",
+  "scientific": "Toxostoma rufum",
+  "group": "Birds",
+  "local_obs": 1304
+ },
+ {
+  "index": 3962,
+  "label": "American Pipit",
+  "scientific": "Anthus rubescens",
+  "group": "Birds",
+  "local_obs": 22
+ },
+ {
+  "index": 4027,
+  "label": "Tufted Titmouse",
+  "scientific": "Baeolophus bicolor",
+  "group": "Birds",
+  "local_obs": 1006
+ },
+ {
+  "index": 4038,
+  "label": "Carolina Chickadee",
+  "scientific": "Poecile carolinensis",
+  "group": "Birds",
+  "local_obs": 736
+ },
+ {
+  "index": 4046,
+  "label": "Canada Warbler",
+  "scientific": "Cardellina canadensis",
+  "group": "Birds",
+  "local_obs": 20
+ },
+ {
+  "index": 4047,
+  "label": "Wilson's Warbler",
+  "scientific": "Cardellina pusilla",
+  "group": "Birds",
+  "local_obs": 19
+ },
+ {
+  "index": 4048,
+  "label": "Kentucky Warbler",
+  "scientific": "Geothlypis formosa",
+  "group": "Birds",
+  "local_obs": 30
+ },
+ {
+  "index": 4049,
+  "label": "Mourning Warbler",
+  "scientific": "Geothlypis philadelphia",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 4051,
+  "label": "Common Yellowthroat",
+  "scientific": "Geothlypis trichas",
+  "group": "Birds",
+  "local_obs": 221
+ },
+ {
+  "index": 4052,
+  "label": "Worm-eating Warbler",
+  "scientific": "Helmitheros vermivorum",
+  "group": "Birds",
+  "local_obs": 31
+ },
+ {
+  "index": 4053,
+  "label": "Orange-crowned Warbler",
+  "scientific": "Leiothlypis celata",
+  "group": "Birds",
+  "local_obs": 117
+ },
+ {
+  "index": 4055,
+  "label": "Tennessee Warbler",
+  "scientific": "Leiothlypis peregrina",
+  "group": "Birds",
+  "local_obs": 185
+ },
+ {
+  "index": 4056,
+  "label": "Nashville Warbler",
+  "scientific": "Leiothlypis ruficapilla",
+  "group": "Birds",
+  "local_obs": 10
+ },
+ {
+  "index": 4057,
+  "label": "Black-and-white Warbler",
+  "scientific": "Mniotilta varia",
+  "group": "Birds",
+  "local_obs": 116
+ },
+ {
+  "index": 4061,
+  "label": "Louisiana Waterthrush",
+  "scientific": "Parkesia motacilla",
+  "group": "Birds",
+  "local_obs": 65
+ },
+ {
+  "index": 4062,
+  "label": "Northern Waterthrush",
+  "scientific": "Parkesia noveboracensis",
+  "group": "Birds",
+  "local_obs": 64
+ },
+ {
+  "index": 4063,
+  "label": "Prothonotary Warbler",
+  "scientific": "Protonotaria citrea",
+  "group": "Birds",
+  "local_obs": 33
+ },
+ {
+  "index": 4064,
+  "label": "Ovenbird",
+  "scientific": "Seiurus aurocapilla",
+  "group": "Birds",
+  "local_obs": 94
+ },
+ {
+  "index": 4065,
+  "label": "Northern Parula",
+  "scientific": "Setophaga americana",
+  "group": "Birds",
+  "local_obs": 142
+ },
+ {
+  "index": 4066,
+  "label": "Black-throated Blue Warbler",
+  "scientific": "Setophaga caerulescens",
+  "group": "Birds",
+  "local_obs": 44
+ },
+ {
+  "index": 4067,
+  "label": "Bay-breasted Warbler",
+  "scientific": "Setophaga castanea",
+  "group": "Birds",
+  "local_obs": 60
+ },
+ {
+  "index": 4068,
+  "label": "Cerulean Warbler",
+  "scientific": "Setophaga cerulea",
+  "group": "Birds",
+  "local_obs": 24
+ },
+ {
+  "index": 4070,
+  "label": "Hooded Warbler",
+  "scientific": "Setophaga citrina",
+  "group": "Birds",
+  "local_obs": 124
+ },
+ {
+  "index": 4071,
+  "label": "Yellow-rumped Warbler",
+  "scientific": "Setophaga coronata",
+  "group": "Birds",
+  "local_obs": 694
+ },
+ {
+  "index": 4072,
+  "label": "Prairie Warbler",
+  "scientific": "Setophaga discolor",
+  "group": "Birds",
+  "local_obs": 71
+ },
+ {
+  "index": 4073,
+  "label": "Yellow-throated Warbler",
+  "scientific": "Setophaga dominica",
+  "group": "Birds",
+  "local_obs": 36
+ },
+ {
+  "index": 4074,
+  "label": "Blackburnian Warbler",
+  "scientific": "Setophaga fusca",
+  "group": "Birds",
+  "local_obs": 31
+ },
+ {
+  "index": 4076,
+  "label": "Magnolia Warbler",
+  "scientific": "Setophaga magnolia",
+  "group": "Birds",
+  "local_obs": 156
+ },
+ {
+  "index": 4079,
+  "label": "Palm Warbler",
+  "scientific": "Setophaga palmarum",
+  "group": "Birds",
+  "local_obs": 319
+ },
+ {
+  "index": 4080,
+  "label": "Chestnut-sided Warbler",
+  "scientific": "Setophaga pensylvanica",
+  "group": "Birds",
+  "local_obs": 105
+ },
+ {
+  "index": 4082,
+  "label": "Pine Warbler",
+  "scientific": "Setophaga pinus",
+  "group": "Birds",
+  "local_obs": 714
+ },
+ {
+  "index": 4084,
+  "label": "American Redstart",
+  "scientific": "Setophaga ruticilla",
+  "group": "Birds",
+  "local_obs": 164
+ },
+ {
+  "index": 4085,
+  "label": "Blackpoll Warbler",
+  "scientific": "Setophaga striata",
+  "group": "Birds",
+  "local_obs": 49
+ },
+ {
+  "index": 4086,
+  "label": "Cape May Warbler",
+  "scientific": "Setophaga tigrina",
+  "group": "Birds",
+  "local_obs": 84
+ },
+ {
+  "index": 4087,
+  "label": "Townsend's Warbler",
+  "scientific": "Setophaga townsendi",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 4088,
+  "label": "Black-throated Green Warbler",
+  "scientific": "Setophaga virens",
+  "group": "Birds",
+  "local_obs": 81
+ },
+ {
+  "index": 4089,
+  "label": "Golden-winged Warbler",
+  "scientific": "Vermivora chrysoptera",
+  "group": "Birds",
+  "local_obs": 15
+ },
+ {
+  "index": 4090,
+  "label": "Blue-winged Warbler",
+  "scientific": "Vermivora cyanoptera",
+  "group": "Birds",
+  "local_obs": 15
+ },
+ {
+  "index": 4092,
+  "label": "Grasshopper Sparrow",
+  "scientific": "Ammodramus savannarum",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 4099,
+  "label": "Lark Bunting",
+  "scientific": "Calamospiza melanocorys",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 4100,
+  "label": "Henslow's Sparrow",
+  "scientific": "Centronyx henslowii",
+  "group": "Birds",
+  "local_obs": 7
+ },
+ {
+  "index": 4102,
+  "label": "Lark Sparrow",
+  "scientific": "Chondestes grammacus",
+  "group": "Birds",
+  "local_obs": 4
+ },
+ {
+  "index": 4103,
+  "label": "Dark-eyed Junco",
+  "scientific": "Junco hyemalis",
+  "group": "Birds",
+  "local_obs": 242
+ },
+ {
+  "index": 4105,
+  "label": "Swamp Sparrow",
+  "scientific": "Melospiza georgiana",
+  "group": "Birds",
+  "local_obs": 241
+ },
+ {
+  "index": 4106,
+  "label": "Lincoln's Sparrow",
+  "scientific": "Melospiza lincolnii",
+  "group": "Birds",
+  "local_obs": 20
+ },
+ {
+  "index": 4107,
+  "label": "Song Sparrow",
+  "scientific": "Melospiza melodia",
+  "group": "Birds",
+  "local_obs": 1112
+ },
+ {
+  "index": 4112,
+  "label": "Savannah Sparrow",
+  "scientific": "Passerculus sandwichensis",
+  "group": "Birds",
+  "local_obs": 98
+ },
+ {
+  "index": 4113,
+  "label": "Fox Sparrow",
+  "scientific": "Passerella iliaca",
+  "group": "Birds",
+  "local_obs": 49
+ },
+ {
+  "index": 4118,
+  "label": "Eastern Towhee",
+  "scientific": "Pipilo erythrophthalmus",
+  "group": "Birds",
+  "local_obs": 1282
+ },
+ {
+  "index": 4120,
+  "label": "Vesper Sparrow",
+  "scientific": "Pooecetes gramineus",
+  "group": "Birds",
+  "local_obs": 36
+ },
+ {
+  "index": 4123,
+  "label": "Clay-colored Sparrow",
+  "scientific": "Spizella pallida",
+  "group": "Birds",
+  "local_obs": 8
+ },
+ {
+  "index": 4124,
+  "label": "Chipping Sparrow",
+  "scientific": "Spizella passerina",
+  "group": "Birds",
+  "local_obs": 1135
+ },
+ {
+  "index": 4125,
+  "label": "Field Sparrow",
+  "scientific": "Spizella pusilla",
+  "group": "Birds",
+  "local_obs": 171
+ },
+ {
+  "index": 4127,
+  "label": "White-throated Sparrow",
+  "scientific": "Zonotrichia albicollis",
+  "group": "Birds",
+  "local_obs": 503
+ },
+ {
+  "index": 4130,
+  "label": "White-crowned Sparrow",
+  "scientific": "Zonotrichia leucophrys",
+  "group": "Birds",
+  "local_obs": 22
+ },
+ {
+  "index": 4131,
+  "label": "Harris's Sparrow",
+  "scientific": "Zonotrichia querula",
+  "group": "Birds",
+  "local_obs": 4
+ },
+ {
+  "index": 4133,
+  "label": "House Sparrow",
+  "scientific": "Passer domesticus",
+  "group": "Birds",
+  "local_obs": 548
+ },
+ {
+  "index": 4156,
+  "label": "Blue-gray Gnatcatcher",
+  "scientific": "Polioptila caerulea",
+  "group": "Birds",
+  "local_obs": 278
+ },
+ {
+  "index": 4180,
+  "label": "Golden-crowned Kinglet",
+  "scientific": "Regulus satrapa",
+  "group": "Birds",
+  "local_obs": 178
+ },
+ {
+  "index": 4186,
+  "label": "Red-breasted Nuthatch",
+  "scientific": "Sitta canadensis",
+  "group": "Birds",
+  "local_obs": 29
+ },
+ {
+  "index": 4187,
+  "label": "White-breasted Nuthatch",
+  "scientific": "Sitta carolinensis",
+  "group": "Birds",
+  "local_obs": 739
+ },
+ {
+  "index": 4189,
+  "label": "Brown-headed Nuthatch",
+  "scientific": "Sitta pusilla",
+  "group": "Birds",
+  "local_obs": 628
+ },
+ {
+  "index": 4202,
+  "label": "European Starling",
+  "scientific": "Sturnus vulgaris",
+  "group": "Birds",
+  "local_obs": 286
+ },
+ {
+  "index": 4257,
+  "label": "Marsh Wren",
+  "scientific": "Cistothorus palustris",
+  "group": "Birds",
+  "local_obs": 17
+ },
+ {
+  "index": 4261,
+  "label": "Carolina Wren",
+  "scientific": "Thryothorus ludovicianus",
+  "group": "Birds",
+  "local_obs": 1769
+ },
+ {
+  "index": 4262,
+  "label": "House Wren",
+  "scientific": "Troglodytes aedon",
+  "group": "Birds",
+  "local_obs": 103
+ },
+ {
+  "index": 4263,
+  "label": "Winter Wren",
+  "scientific": "Troglodytes hiemalis",
+  "group": "Birds",
+  "local_obs": 105
+ },
+ {
+  "index": 4266,
+  "label": "Veery",
+  "scientific": "Catharus fuscescens",
+  "group": "Birds",
+  "local_obs": 37
+ },
+ {
+  "index": 4267,
+  "label": "Hermit Thrush",
+  "scientific": "Catharus guttatus",
+  "group": "Birds",
+  "local_obs": 407
+ },
+ {
+  "index": 4268,
+  "label": "Gray-cheeked Thrush",
+  "scientific": "Catharus minimus",
+  "group": "Birds",
+  "local_obs": 17
+ },
+ {
+  "index": 4269,
+  "label": "Swainson's Thrush",
+  "scientific": "Catharus ustulatus",
+  "group": "Birds",
+  "local_obs": 125
+ },
+ {
+  "index": 4270,
+  "label": "Wood Thrush",
+  "scientific": "Hylocichla mustelina",
+  "group": "Birds",
+  "local_obs": 147
+ },
+ {
+  "index": 4271,
+  "label": "Varied Thrush",
+  "scientific": "Ixoreus naevius",
+  "group": "Birds",
+  "local_obs": 4
+ },
+ {
+  "index": 4275,
+  "label": "Eastern Bluebird",
+  "scientific": "Sialia sialis",
+  "group": "Birds",
+  "local_obs": 1978
+ },
+ {
+  "index": 4285,
+  "label": "American Robin",
+  "scientific": "Turdus migratorius",
+  "group": "Birds",
+  "local_obs": 2283
+ },
+ {
+  "index": 4293,
+  "label": "Olive-sided Flycatcher",
+  "scientific": "Contopus cooperi",
+  "group": "Birds",
+  "local_obs": 11
+ },
+ {
+  "index": 4296,
+  "label": "Eastern Wood-Pewee",
+  "scientific": "Contopus virens",
+  "group": "Birds",
+  "local_obs": 162
+ },
+ {
+  "index": 4298,
+  "label": "Alder Flycatcher",
+  "scientific": "Empidonax alnorum",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 4303,
+  "label": "Least Flycatcher",
+  "scientific": "Empidonax minimus",
+  "group": "Birds",
+  "local_obs": 15
+ },
+ {
+  "index": 4305,
+  "label": "Willow Flycatcher",
+  "scientific": "Empidonax traillii",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 4306,
+  "label": "Acadian Flycatcher",
+  "scientific": "Empidonax virescens",
+  "group": "Birds",
+  "local_obs": 49
+ },
+ {
+  "index": 4313,
+  "label": "Ash-throated Flycatcher",
+  "scientific": "Myiarchus cinerascens",
+  "group": "Birds",
+  "local_obs": 4
+ },
+ {
+  "index": 4314,
+  "label": "Great Crested Flycatcher",
+  "scientific": "Myiarchus crinitus",
+  "group": "Birds",
+  "local_obs": 162
+ },
+ {
+  "index": 4324,
+  "label": "Eastern Phoebe",
+  "scientific": "Sayornis phoebe",
+  "group": "Birds",
+  "local_obs": 1756
+ },
+ {
+  "index": 4334,
+  "label": "Eastern Kingbird",
+  "scientific": "Tyrannus tyrannus",
+  "group": "Birds",
+  "local_obs": 121
+ },
+ {
+  "index": 4335,
+  "label": "Western Kingbird",
+  "scientific": "Tyrannus verticalis",
+  "group": "Birds",
+  "local_obs": 5
+ },
+ {
+  "index": 4341,
+  "label": "Yellow-throated Vireo",
+  "scientific": "Vireo flavifrons",
+  "group": "Birds",
+  "local_obs": 39
+ },
+ {
+  "index": 4344,
+  "label": "White-eyed Vireo",
+  "scientific": "Vireo griseus",
+  "group": "Birds",
+  "local_obs": 191
+ },
+ {
+  "index": 4346,
+  "label": "Red-eyed Vireo",
+  "scientific": "Vireo olivaceus",
+  "group": "Birds",
+  "local_obs": 145
+ },
+ {
+  "index": 4347,
+  "label": "Philadelphia Vireo",
+  "scientific": "Vireo philadelphicus",
+  "group": "Birds",
+  "local_obs": 9
+ },
+ {
+  "index": 4349,
+  "label": "Blue-headed Vireo",
+  "scientific": "Vireo solitarius",
+  "group": "Birds",
+  "local_obs": 93
+ },
+ {
+  "index": 4355,
+  "label": "Great Egret",
+  "scientific": "Ardea alba",
+  "group": "Birds",
+  "local_obs": 345
+ },
+ {
+  "index": 4359,
+  "label": "Great Blue Heron",
+  "scientific": "Ardea herodias",
+  "group": "Birds",
+  "local_obs": 1868
+ },
+ {
+  "index": 4367,
+  "label": "American Bittern",
+  "scientific": "Botaurus lentiginosus",
+  "group": "Birds",
+  "local_obs": 35
+ },
+ {
+  "index": 4371,
+  "label": "Green Heron",
+  "scientific": "Butorides virescens",
+  "group": "Birds",
+  "local_obs": 345
+ },
+ {
+  "index": 4373,
+  "label": "Little Blue Heron",
+  "scientific": "Egretta caerulea",
+  "group": "Birds",
+  "local_obs": 83
+ },
+ {
+  "index": 4378,
+  "label": "Snowy Egret",
+  "scientific": "Egretta thula",
+  "group": "Birds",
+  "local_obs": 29
+ },
+ {
+  "index": 4379,
+  "label": "Tricolored Heron",
+  "scientific": "Egretta tricolor",
+  "group": "Birds",
+  "local_obs": 11
+ },
+ {
+  "index": 4384,
+  "label": "Yellow-crowned Night-Heron",
+  "scientific": "Nyctanassa violacea",
+  "group": "Birds",
+  "local_obs": 289
+ },
+ {
+  "index": 4386,
+  "label": "Black-crowned Night Heron",
+  "scientific": "Nycticorax nycticorax",
+  "group": "Birds",
+  "local_obs": 7
+ },
+ {
+  "index": 4392,
+  "label": "American White Pelican",
+  "scientific": "Pelecanus erythrorhynchos",
+  "group": "Birds",
+  "local_obs": 19
+ },
+ {
+  "index": 4399,
+  "label": "White Ibis",
+  "scientific": "Eudocimus albus",
+  "group": "Birds",
+  "local_obs": 24
+ },
+ {
+  "index": 4402,
+  "label": "Roseate Spoonbill",
+  "scientific": "Platalea ajaja",
+  "group": "Birds",
+  "local_obs": 21
+ },
+ {
+  "index": 4427,
+  "label": "Northern Flicker",
+  "scientific": "Colaptes auratus",
+  "group": "Birds",
+  "local_obs": 273
+ },
+ {
+  "index": 4442,
+  "label": "Downy Woodpecker",
+  "scientific": "Dryobates pubescens",
+  "group": "Birds",
+  "local_obs": 1101
+ },
+ {
+  "index": 4447,
+  "label": "Pileated Woodpecker",
+  "scientific": "Dryocopus pileatus",
+  "group": "Birds",
+  "local_obs": 360
+ },
+ {
+  "index": 4450,
+  "label": "Red-bellied Woodpecker",
+  "scientific": "Melanerpes carolinus",
+  "group": "Birds",
+  "local_obs": 893
+ },
+ {
+  "index": 4452,
+  "label": "Red-headed Woodpecker",
+  "scientific": "Melanerpes erythrocephalus",
+  "group": "Birds",
+  "local_obs": 354
+ },
+ {
+  "index": 4466,
+  "label": "Yellow-bellied Sapsucker",
+  "scientific": "Sphyrapicus varius",
+  "group": "Birds",
+  "local_obs": 337
+ },
+ {
+  "index": 4475,
+  "label": "Horned Grebe",
+  "scientific": "Podiceps auritus",
+  "group": "Birds",
+  "local_obs": 6
+ },
+ {
+  "index": 4480,
+  "label": "Pied-billed Grebe",
+  "scientific": "Podilymbus podiceps",
+  "group": "Birds",
+  "local_obs": 115
+ },
+ {
+  "index": 4526,
+  "label": "Budgerigar",
+  "scientific": "Melopsittacus undulatus",
+  "group": "Birds",
+  "local_obs": 10
+ },
+ {
+  "index": 4549,
+  "label": "Great Horned Owl",
+  "scientific": "Bubo virginianus",
+  "group": "Birds",
+  "local_obs": 119
+ },
+ {
+  "index": 4553,
+  "label": "Eastern Screech-Owl",
+  "scientific": "Megascops asio",
+  "group": "Birds",
+  "local_obs": 18
+ },
+ {
+  "index": 4560,
+  "label": "Barred Owl",
+  "scientific": "Strix varia",
+  "group": "Birds",
+  "local_obs": 1128
+ },
+ {
+  "index": 4564,
+  "label": "Anhinga",
+  "scientific": "Anhinga anhinga",
+  "group": "Birds",
+  "local_obs": 29
+ },
+ {
+  "index": 4654,
+  "label": "White-tailed Deer",
+  "scientific": "Odocoileus virginianus",
+  "group": "Mammals",
+  "local_obs": 2820
+ },
+ {
+  "index": 4666,
+  "label": "Wild Boar",
+  "scientific": "Sus scrofa",
+  "group": "Mammals",
+  "local_obs": 10
+ },
+ {
+  "index": 4669,
+  "label": "Domestic Dog",
+  "scientific": "Canis familiaris",
+  "group": "Mammals",
+  "local_obs": 4
+ },
+ {
+  "index": 4670,
+  "label": "Coyote",
+  "scientific": "Canis latrans",
+  "group": "Mammals",
+  "local_obs": 237
+ },
+ {
+  "index": 4675,
+  "label": "Gray Fox",
+  "scientific": "Urocyon cinereoargenteus",
+  "group": "Mammals",
+  "local_obs": 99
+ },
+ {
+  "index": 4677,
+  "label": "Red Fox",
+  "scientific": "Vulpes vulpes",
+  "group": "Mammals",
+  "local_obs": 169
+ },
+ {
+  "index": 4679,
+  "label": "Domestic Cat",
+  "scientific": "Felis catus",
+  "group": "Mammals",
+  "local_obs": 928
+ },
+ {
+  "index": 4681,
+  "label": "Bobcat",
+  "scientific": "Lynx rufus",
+  "group": "Mammals",
+  "local_obs": 14
+ },
+ {
+  "index": 4691,
+  "label": "Striped Skunk",
+  "scientific": "Mephitis mephitis",
+  "group": "Mammals",
+  "local_obs": 4
+ },
+ {
+  "index": 4693,
+  "label": "Northern River Otter",
+  "scientific": "Lontra canadensis",
+  "group": "Mammals",
+  "local_obs": 109
+ },
+ {
+  "index": 4719,
+  "label": "Common Raccoon",
+  "scientific": "Procyon lotor",
+  "group": "Mammals",
+  "local_obs": 575
+ },
+ {
+  "index": 4720,
+  "label": "American Black Bear",
+  "scientific": "Ursus americanus",
+  "group": "Mammals",
+  "local_obs": 12
+ },
+ {
+  "index": 4723,
+  "label": "Mexican Free-tailed Bat",
+  "scientific": "Tadarida brasiliensis",
+  "group": "Mammals",
+  "local_obs": 8
+ },
+ {
+  "index": 4726,
+  "label": "Big Brown Bat",
+  "scientific": "Eptesicus fuscus",
+  "group": "Mammals",
+  "local_obs": 24
+ },
+ {
+  "index": 4727,
+  "label": "Silver-haired Bat",
+  "scientific": "Lasionycteris noctivagans",
+  "group": "Mammals",
+  "local_obs": 3
+ },
+ {
+  "index": 4728,
+  "label": "Eastern Red Bat",
+  "scientific": "Lasiurus borealis",
+  "group": "Mammals",
+  "local_obs": 35
+ },
+ {
+  "index": 4730,
+  "label": "Tricolored Bat",
+  "scientific": "Perimyotis subflavus",
+  "group": "Mammals",
+  "local_obs": 15
+ },
+ {
+  "index": 4734,
+  "label": "Virginia Opossum",
+  "scientific": "Didelphis virginiana",
+  "group": "Mammals",
+  "local_obs": 529
+ },
+ {
+  "index": 4747,
+  "label": "Northern Short-tailed Shrew",
+  "scientific": "Blarina brevicauda",
+  "group": "Mammals",
+  "local_obs": 103
+ },
+ {
+  "index": 4749,
+  "label": "Eastern Mole",
+  "scientific": "Scalopus aquaticus",
+  "group": "Mammals",
+  "local_obs": 41
+ },
+ {
+  "index": 4757,
+  "label": "European Rabbit",
+  "scientific": "Oryctolagus cuniculus",
+  "group": "Mammals",
+  "local_obs": 9
+ },
+ {
+  "index": 4758,
+  "label": "Swamp Rabbit",
+  "scientific": "Sylvilagus aquaticus",
+  "group": "Mammals",
+  "local_obs": 43
+ },
+ {
+  "index": 4762,
+  "label": "Eastern Cottontail",
+  "scientific": "Sylvilagus floridanus",
+  "group": "Mammals",
+  "local_obs": 600
+ },
+ {
+  "index": 4794,
+  "label": "American Beaver",
+  "scientific": "Castor canadensis",
+  "group": "Mammals",
+  "local_obs": 187
+ },
+ {
+  "index": 4803,
+  "label": "Muskrat",
+  "scientific": "Ondatra zibethicus",
+  "group": "Mammals",
+  "local_obs": 73
+ },
+ {
+  "index": 4804,
+  "label": "White-footed Mouse",
+  "scientific": "Peromyscus leucopus",
+  "group": "Mammals",
+  "local_obs": 16
+ },
+ {
+  "index": 4806,
+  "label": "Hispid Cotton Rat",
+  "scientific": "Sigmodon hispidus",
+  "group": "Mammals",
+  "local_obs": 32
+ },
+ {
+  "index": 4813,
+  "label": "House Mouse",
+  "scientific": "Mus musculus",
+  "group": "Mammals",
+  "local_obs": 11
+ },
+ {
+  "index": 4814,
+  "label": "Norway Rat",
+  "scientific": "Rattus norvegicus",
+  "group": "Mammals",
+  "local_obs": 42
+ },
+ {
+  "index": 4815,
+  "label": "Black Rat",
+  "scientific": "Rattus rattus",
+  "group": "Mammals",
+  "local_obs": 22
+ },
+ {
+  "index": 4828,
+  "label": "Southern Flying Squirrel",
+  "scientific": "Glaucomys volans",
+  "group": "Mammals",
+  "local_obs": 35
+ },
+ {
+  "index": 4833,
+  "label": "Woodchuck",
+  "scientific": "Marmota monax",
+  "group": "Mammals",
+  "local_obs": 93
+ },
+ {
+  "index": 4844,
+  "label": "Eastern Gray Squirrel",
+  "scientific": "Sciurus carolinensis",
+  "group": "Mammals",
+  "local_obs": 3561
+ },
+ {
+  "index": 4847,
+  "label": "Fox Squirrel",
+  "scientific": "Sciurus niger",
+  "group": "Mammals",
+  "local_obs": 7
+ },
+ {
+  "index": 4851,
+  "label": "Eastern Chipmunk",
+  "scientific": "Tamias striatus",
+  "group": "Mammals",
+  "local_obs": 1179
+ }
+]
