@@ -1,12 +1,14 @@
 {
-  "name": "@nphil/wildlife-visits",
+  "name": "@nphil/kestrel",
   "version": "0.1.0",
-  "description": "Publishes animal visits from selected Scrypted cameras to Home Assistant over MQTT.",
+  "description": "Authenticated wildlife visits, camera health and BirdNET detections for Home Assistant.",
   "private": true,
   "scripts": {
     "scrypted-setup-project": "scrypted-setup-project",
     "prescrypted-setup-project": "scrypted-package-json",
     "build": "scrypted-webpack",
+    "test:learning": "node --experimental-strip-types --test test/learning.test.mjs",
+    "test:store": "node --experimental-strip-types --test test/store.test.mjs",
     "prepublishOnly": "NODE_ENV=production scrypted-webpack",
     "prescrypted-vscode-launch": "scrypted-webpack",
     "scrypted-vscode-launch": "scrypted-deploy-debug",
@@ -14,9 +16,9 @@
     "scrypted-deploy": "scrypted-deploy"
   },
   "scrypted": {
-    "name": "Wildlife Visits",
+    "name": "Kestrel",
     "type": "API",
-    "interfaces": ["Settings"]
+    "interfaces": ["Settings", "HttpRequestHandler"]
   },
   "dependencies": {
     "@scrypted/sdk": "^0.5.59",

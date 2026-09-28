@@ -7,3 +7,4 @@ __pycache__/
 .scrypted-cred
 node_modules/
 audio-eval/data/
+.kestrel-key
