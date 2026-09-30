@@ -88,11 +88,40 @@ const fakeHass: HomeAssistant = {
 
 if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
 if (!customElements.get("ha-icon")) customElements.define("ha-icon", class extends HTMLElement {});
+// Stand-in for Scrypted's card. Camera 168 never gets a picture; camera 240 renders no <video> at all.
 if (!customElements.get("scrypted-nvr-camera")) customElements.define("scrypted-nvr-camera", class extends HTMLElement {
+  hass?: unknown;
+  private config: Record<string, unknown> = {};
+  private timer?: number;
+  setConfig(config: Record<string, unknown>): void { this.config = config; }
   connectedCallback(): void {
-    const root = this.attachShadow({ mode: "open" });
-    root.innerHTML = `<style>:host{display:grid;place-items:center;width:100%;height:100%;min-height:inherit;color:var(--secondary-text-color);background:color-mix(in srgb,var(--primary-color) 12%,var(--card-background-color))}div{display:grid;gap:6px;padding:16px;text-align:center;font:500 13px system-ui}small{font-size:11px}</style><div><strong>Live fixture</strong><small>Camera ${this.getAttribute("id")} · ${this.getAttribute("destination")}</small></div>`;
+    const id = String(this.config.id);
+    const root = this.shadowRoot ?? this.attachShadow({ mode: "open" });
+    root.innerHTML = id === "240" ? `<style>:host{display:block}canvas{display:block;width:100%;aspect-ratio:16/9;background:#345}</style><canvas></canvas>` : `<style>:host{display:block}video{display:block;width:100%;aspect-ratio:16/9;background:#123}</style><video muted autoplay playsinline></video>`;
+    if (id === "240" || id === "168") return;
+    this.timer = window.setTimeout(() => {
+      const video = root.querySelector("video");
+      if (!video || !this.isConnected) return;
+      const canvas = document.createElement("canvas");
+      const sharp = this.config.destination === "local";
+      canvas.width = sharp ? 1280 : 640;
+      canvas.height = sharp ? 720 : 360;
+      const context = canvas.getContext("2d") as CanvasRenderingContext2D;
+      const draw = (): void => {
+        context.fillStyle = `hsl(${(Number(id) * 37) % 360} 45% 38%)`;
+        context.fillRect(0, 0, 640, 360);
+        context.fillStyle = "#fff";
+        context.font = "bold 36px system-ui";
+        context.fillText(`Camera ${id} · ${String(this.config.destination)}`, 24, 64);
+        context.fillRect((Date.now() / 6) % 600, 300, 40, 12);
+      };
+      draw();
+      video.srcObject = canvas.captureStream(10);
+      void video.play().catch(() => undefined);
+      this.timer = window.setInterval(draw, 100);
+    }, this.config.destination === "local" ? 1200 : 500);
   }
+  disconnectedCallback(): void { window.clearTimeout(this.timer); window.clearInterval(this.timer); }
 });
 
 const card = document.createElement("kestrel-cameras") as HTMLElement & { setConfig(config: { type: string; view: "live" }): void; hass: HomeAssistant };

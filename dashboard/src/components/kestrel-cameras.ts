@@ -6,6 +6,8 @@ import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
 import type { Camera, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, SpeciesDetail, Visit, VisitSuggestion } from "../types.ts";
 import "./kestrel-lazy-image.ts";
 import "./kestrel-lazy-audio.ts";
+import "./kestrel-live-player.ts";
+import type { KestrelLivePlayer } from "./kestrel-live-player.ts";
 
 type ToastState = { message: string; actionLabel?: string; action?: () => void; duration?: number };
 type PendingUndo = { visitId: string; before?: Visit | null };
@@ -94,10 +96,7 @@ export class KestrelCameras extends LitElement {
   private _generation = 0;
   private _toastTimer?: number;
   private _clipTimer?: number;
-  private _liveObserver?: IntersectionObserver;
   private _resizeObserver?: ResizeObserver;
-  private _liveElements = new Map<string, HTMLElement>();
-  private _pendingLiveMounts = new Set<string>();
   private _failedReferenceImages = new Set<string>();
   private static _nvrComponentsPromise: Promise<void> | undefined;
   private _pendingUndo: PendingUndo | null = null;
@@ -143,7 +142,7 @@ export class KestrelCameras extends LitElement {
   set hass(value: HomeAssistant) {
     const previous = this._hass;
     this._hass = value;
-    for (const player of this._liveElements.values()) (player as HTMLElement & { hass?: HomeAssistant }).hass = value;
+    for (const player of this.renderRoot?.querySelectorAll<KestrelLivePlayer>("kestrel-live-player") ?? []) player.hass = value;
     this.requestUpdate("hass", previous);
     if (this.isConnected) this._ensureConnection();
   }
@@ -164,7 +163,6 @@ export class KestrelCameras extends LitElement {
     this._generation++;
     window.addEventListener("location-changed", this._onLocationChanged);
     window.addEventListener("popstate", this._onLocationChanged);
-    document.addEventListener("visibilitychange", this._onVisibilityChanged);
     window.addEventListener("keydown", this._onGlobalKeydown);
     this._syncRoute(false);
     if (typeof ResizeObserver !== "undefined") {
@@ -182,11 +180,9 @@ export class KestrelCameras extends LitElement {
     this._generation++;
     window.removeEventListener("location-changed", this._onLocationChanged);
     window.removeEventListener("popstate", this._onLocationChanged);
-    document.removeEventListener("visibilitychange", this._onVisibilityChanged);
     window.removeEventListener("keydown", this._onGlobalKeydown);
     this._resizeObserver?.disconnect();
     this._resizeObserver = undefined;
-    this._stopLivePlayers();
     this._clearClipTimer();
     window.clearTimeout(this._toastTimer);
     this._toastTimer = undefined;
@@ -198,9 +194,6 @@ export class KestrelCameras extends LitElement {
   }
 
   protected updated(changed: PropertyValues<this>): void {
-    if (changed.has("_view") || changed.has("_containerWidth") || changed.has("_cameras") || changed.has("_selectedCamera")) {
-      this._syncLivePlayers();
-    }
     if (changed.has("_view") && this._view !== "visit") this._clearClipTimer();
   }
 
@@ -268,11 +261,6 @@ export class KestrelCameras extends LitElement {
   }
 
   private _onLocationChanged = (): void => { this._syncRoute(); };
-
-  private _onVisibilityChanged = (): void => {
-    if (document.visibilityState === "hidden") this._unmountAllLivePlayers();
-    else this._syncLivePlayers();
-  };
 
   private _onGlobalKeydown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -584,70 +572,17 @@ export class KestrelCameras extends LitElement {
 
   private _maxLive(): number { return this._containerWidth === 0 || this._containerWidth <= 680 ? 4 : 9; }
 
-  private _syncLivePlayers(): void {
-    if (this._view !== "live" || document.visibilityState === "hidden") {
-      this._stopLivePlayers();
-      return;
-    }
-    const slots = [...this.renderRoot.querySelectorAll<HTMLElement>(".stream-slot[data-camera-id]")];
-    const slotIds = new Set(slots.map((slot) => slot.dataset.cameraId ?? ""));
-    for (const id of [...this._liveElements.keys()]) if (!slotIds.has(id)) this._unmountLivePlayer(id);
-    this._liveObserver?.disconnect();
-    this._liveObserver = undefined;
-    if (typeof IntersectionObserver === "undefined") {
-      for (const slot of slots) this._mountLivePlayer(slot);
-      return;
-    }
-    this._liveObserver = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        const slot = entry.target as HTMLElement;
-        if (entry.isIntersecting && document.visibilityState !== "hidden") this._mountLivePlayer(slot);
-        else this._unmountLivePlayer(slot.dataset.cameraId ?? "");
-      }
-    }, { rootMargin: "120px" });
-    for (const slot of slots) this._liveObserver.observe(slot);
-  }
+  /** Copy the tile's picture as the press starts, so the focused view can open on it instantly. */
+  private _prewarmTile = (event: Event): void => {
+    if (event instanceof KeyboardEvent && event.key !== "Enter" && event.key !== " ") return;
+    (event.currentTarget as HTMLElement).querySelector<KestrelLivePlayer>("kestrel-live-player")?.capture();
+  };
 
-  private _mountLivePlayer(slot: HTMLElement): void {
-    const cameraId = slot.dataset.cameraId;
-    if (!cameraId || this._liveElements.has(cameraId) || this._pendingLiveMounts.has(cameraId)) return;
-    const camera = this._cameras.find((item) => String(item.id) === cameraId);
-    if (!camera?.nvrCardId || !camera.online) return;
-    const live = slot.dataset.live === "true";
-    this._pendingLiveMounts.add(cameraId);
-    // Scrypted's card only starts its video/snapshot pipeline when setConfig + hass are both
-    // present before it connects to the DOM; configuring an already-connected instance leaves
-    // it permanently blank, so build and configure it off-DOM first, then insert it.
-    void customElements.whenDefined("scrypted-nvr-camera").then(() => {
-      this._pendingLiveMounts.delete(cameraId);
-      if (this._liveElements.has(cameraId) || !this.isConnected) return;
-      const target = this.renderRoot.querySelector<HTMLElement>(`.stream-slot[data-camera-id="${cameraId}"]`);
-      if (!target) return;
-      const player = document.createElement("scrypted-nvr-camera") as HTMLElement & { hass?: HomeAssistant; setConfig?: (config: Record<string, unknown>) => void };
-      player.setConfig?.({ type: "custom:scrypted-nvr-camera", id: String(camera.nvrCardId), destination: "low-resolution", live, imageClick: "none", videoClick: "none" });
-      player.hass = this.hass;
-      player.setAttribute("aria-label", `${camera.name} ${live ? "live view" : "snapshot"}`);
-      player.style.display = "block";
-      player.style.width = "100%";
-      player.style.height = "100%";
-      target.replaceChildren(player);
-      this._liveElements.set(cameraId, player);
-    });
-  }
-
-  private _unmountLivePlayer(cameraId: string): void {
-    const player = this._liveElements.get(cameraId);
-    if (player) player.remove();
-    this._liveElements.delete(cameraId);
-  }
-
-  private _unmountAllLivePlayers(): void {
-    this._liveObserver?.disconnect();
-    this._liveObserver = undefined;
-    for (const id of [...this._liveElements.keys()]) this._unmountLivePlayer(id);
-  }
-
-  private _stopLivePlayers(): void { this._unmountAllLivePlayers(); }
+  /** Same for the way back: the focused picture becomes the tile's picture. */
+  private _prewarmFocus = (event: Event): void => {
+    if (event instanceof KeyboardEvent && event.key !== "Enter" && event.key !== " ") return;
+    this.renderRoot.querySelector<KestrelLivePlayer>("kestrel-live-player")?.capture();
+  };
 
   private _goTo(view: "live" | "wildlife" | "insights"): void { navigate(view); }
   private _openVisit(id: string): void { navigate("visit", `?v=${encodeURIComponent(id)}`); }
@@ -708,8 +643,8 @@ export class KestrelCameras extends LitElement {
     const selected = this._selectedCamera ? this._cameras.find((camera) => String(camera.id) === this._selectedCamera) : null;
     if (selected) {
       return html`<section class="focused-camera">
-        <div class="section-heading"><button class="back-inline" type="button" @click=${() => { this._selectedCamera = null; }}>All cameras</button><h1>${selected.name}</h1><span class="status-chip"><i class="status-dot ${this._statusKind(selected.health)}"></i>${this._healthLabel(selected)}</span></div>
-        ${selected.nvrCardId === null ? html`<div class="focused-snapshot"><kestrel-lazy-image class="snapshot-image" .src=${cameraSnapshotUrl(selected.id) ?? ""} alt=${`${selected.name} latest snapshot`} wide></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span></div>` : selected.online ? html`<div class="stream-slot focused-stream" data-camera-id=${String(selected.id)} data-live="true" aria-label=${`${selected.name} live view`}><span class="stream-placeholder">Connecting to live view…</span></div>` : html`<div class="unsupported-stream"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><strong>Camera is offline</strong><span>The last camera health state is offline.</span><a href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a></div>`}
+        <div class="section-heading"><button class="back-inline" type="button" @pointerdown=${this._prewarmFocus} @keydown=${this._prewarmFocus} @click=${() => { this._selectedCamera = null; }}>All cameras</button><h1>${selected.name}</h1><span class="status-chip"><i class="status-dot ${this._statusKind(selected.health)}"></i>${this._healthLabel(selected)}</span></div>
+        ${selected.nvrCardId === null ? html`<div class="focused-snapshot"><kestrel-lazy-image class="snapshot-image" .src=${cameraSnapshotUrl(selected.id) ?? ""} alt=${`${selected.name} latest snapshot`} wide></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span></div>` : selected.online ? html`<kestrel-live-player mode="focus" .cameraId=${String(selected.id)} .nvrCardId=${selected.nvrCardId} .label=${selected.name} .live=${true} .wide=${this._containerWidth > 680} .scryptedUrl=${SCRYPTED_URL} .hass=${this._hass}></kestrel-live-player>` : html`<div class="unsupported-stream"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><strong>Camera is offline</strong><span>The last camera health state is offline.</span><a href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a></div>`}
         <div class="camera-meta"><span>${selected.drops1h ?? 0} stream drops in the last hour</span>${this._cameraSighting(selected) ? html`<span class="sighting"><ha-icon .icon=${"mdi:paw"}></ha-icon>${this._cameraSighting(selected)}</span>` : html`<span class="muted">No current AI sighting</span>`}</div>
       </section>`;
     }
@@ -717,12 +652,12 @@ export class KestrelCameras extends LitElement {
     return html`<section class="live-view">
       <div class="section-heading"><div><h1>Your cameras</h1><p class="muted">Tap a view to make it the main picture.</p></div><span class="camera-count">${this._cameras.length} cameras</span></div>
       <div class="camera-grid">${this._cameras.slice(0, 32).map((camera) => html`
-        <button class="camera-tile" type="button" aria-label=${`Focus ${camera.name}`} @click=${() => { this._selectedCamera = String(camera.id); }}>
+        <button class="camera-tile" type="button" aria-label=${`Focus ${camera.name}`} @pointerdown=${this._prewarmTile} @keydown=${this._prewarmTile} @click=${() => { this._selectedCamera = String(camera.id); }}>
           <div class="camera-picture">
             ${camera.nvrCardId === null
               ? html`<kestrel-lazy-image class="camera-snapshot" .src=${cameraSnapshotUrl(camera.id) ?? ""} alt=${`${camera.name} latest snapshot`}></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span>`
               : camera.online
-                ? html`<div class="stream-slot" data-camera-id=${String(camera.id)} data-live=${liveIds.has(String(camera.id)) ? "true" : "false"} aria-label=${`${camera.name} ${liveIds.has(String(camera.id)) ? "live view" : "snapshot"}`}><span class="stream-placeholder">Connecting…</span></div>`
+                ? html`<kestrel-live-player .cameraId=${String(camera.id)} .nvrCardId=${camera.nvrCardId} .label=${camera.name} .live=${liveIds.has(String(camera.id))} .hass=${this._hass}></kestrel-live-player>`
                 : html`<div class="stream-placeholder static"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><span>Camera offline</span></div>`}
             <span class="camera-health"><i class="status-dot ${this._statusKind(camera.health)}"></i>${this._healthLabel(camera)}</span>
           </div>
@@ -940,9 +875,7 @@ export class KestrelCameras extends LitElement {
     .camera-tile { min-width: 0; overflow: hidden; padding: 0; border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-card); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; }
     .camera-tile:hover { background: var(--lu-tile); }
     .camera-picture { position: relative; overflow: hidden; aspect-ratio: 16 / 9; background: var(--lu-tile); }
-    .stream-slot { position: relative; display: grid; width: 100%; height: 100%; min-height: 160px; place-items: center; overflow: hidden; aspect-ratio: 16 / 9; background: var(--lu-tile); }
-    .camera-picture .stream-slot { position: absolute; inset: 0; min-height: 0; }
-    .focused-stream { aspect-ratio: 16 / 9; min-height: clamp(240px, 45cqi, 520px); border-radius: var(--lu-radius-card); }
+    .camera-picture kestrel-live-player { position: absolute; inset: 0; }
     .focused-snapshot { position: relative; }
     .focused-snapshot .snapshot-image { display: block; width: 100%; aspect-ratio: 16 / 9; min-height: clamp(240px, 45cqi, 520px); border-radius: var(--lu-radius-card); }
     .stream-placeholder { display: grid; place-items: center; min-height: 44px; padding: var(--lu-space-4); color: var(--lu-ink-3); font-size: var(--lu-type-caption); text-align: center; }
@@ -1076,7 +1009,6 @@ export class KestrelCameras extends LitElement {
       .nav-item span { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
       .open-scrypted { min-height: 48px; padding: 0 var(--lu-space-2); font-size: var(--lu-type-caption); }
       .visit-view { grid-template-columns: 1fr; gap: var(--lu-space-4); }
-      .focused-stream { min-height: 240px; }
       .health-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
       .scrim { padding: 0; }
       .correction-sheet, .species-sheet { width: 100%; max-height: min(90vh, 860px); padding: var(--lu-space-4); padding-bottom: calc(var(--lu-space-5) + env(safe-area-inset-bottom)); border-radius: var(--lu-radius-sheet) var(--lu-radius-sheet) 0 0; }
