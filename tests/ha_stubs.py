@@ -155,6 +155,9 @@ class FakeSession:
             raise item
         return item
 
+    def get(self, url: str, **kwargs: object) -> FakeResponse:
+        return self.request("GET", url, **kwargs)
+
     def calls_to(self, method: str, url: str) -> list[dict]:
         return [kwargs for call_method, call_url, kwargs in self.calls if (call_method, call_url) == (method, url)]
 
@@ -193,10 +196,55 @@ def _websocket_command(schema: dict) -> object:
     return decorate
 
 
+class _FlowBase:
+    """Just enough of Home Assistant's flow classes to run Kestrel's own form logic."""
+
+    hass: object = None
+
+    def __init_subclass__(cls, domain: str | None = None, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+
+    def async_show_form(self, **kwargs: object) -> dict:
+        return {"type": "form", **kwargs}
+
+    def async_create_entry(self, **kwargs: object) -> dict:
+        return {"type": "create_entry", **kwargs}
+
+
+class _TextSelectorType:
+    URL = "url"
+    PASSWORD = "password"
+
+
+class _TextSelectorConfig:
+    def __init__(self, type: object = None) -> None:
+        self.type = type
+
+
+class _TextSelector:
+    def __init__(self, config: object = None) -> None:
+        self.config = config
+
+    def __call__(self, value: object) -> object:
+        return value
+
+
 def _install_stubs() -> None:
     _module("homeassistant")
     _module("homeassistant.core", HomeAssistant=HomeAssistant, callback=lambda fn: fn)
-    _module("homeassistant.config_entries", ConfigEntry=type("ConfigEntry", (), {}))
+    _module(
+        "homeassistant.config_entries",
+        ConfigEntry=type("ConfigEntry", (), {}),
+        ConfigFlow=_FlowBase,
+        ConfigFlowResult=dict,
+        OptionsFlowWithReload=_FlowBase,
+    )
+    _module(
+        "homeassistant.helpers.selector",
+        TextSelector=_TextSelector,
+        TextSelectorConfig=_TextSelectorConfig,
+        TextSelectorType=_TextSelectorType,
+    )
     _module("homeassistant.components")
     _module("homeassistant.components.event", EventEntity=EventEntity)
     _module(
@@ -248,6 +296,7 @@ event_module = importlib.import_module("kestrel_pkg.event")
 websocket_module = importlib.import_module("kestrel_pkg.websocket_api")
 const_module = importlib.import_module("kestrel_pkg.const")
 audio_module = importlib.import_module("kestrel_pkg.audio")
+config_flow_module = importlib.import_module("kestrel_pkg.config_flow")
 
 FRONT = {"id": "55", "name": "Front Door Camera"}
 BACK = {"id": "88", "name": "Backyard Camera"}
