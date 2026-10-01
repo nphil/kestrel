@@ -7,7 +7,10 @@ import type { HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, 
 import { ScryptedDeviceBase, ScryptedInterface } from '@scrypted/sdk';
 import mqtt, { type MqttClient } from 'mqtt';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
+import { linkSeenAndHeard } from './link';
+import { parseLongPollTimeoutMs } from './longpoll';
 import { captureDetection, embedCrop, ensureMediaDirectories, saveCapture } from './media';
+import { KeyedQueue, SameMomentTracker, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
 import { KestrelStore, type EventItem, type EventsResponse, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
@@ -45,7 +48,7 @@ type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestam
 // health of any individual RTSP/rebroadcast stream under it. A stream (e.g. the NVR recording
 // stream) can be restarting repeatedly while Online stays true, because another stream on the
 // same camera (e.g. the low-res analysis stream) still has data -- that is not visible here.
-type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; lastDetection: { species: string; at: number; visitId: string } | null };
+type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; lastDetection: { species: string; at: number; visitId: string; kind: VisitKind; grp: VisitGroup } | null };
 type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[]; durationTotal: number; durationSamples: number };
 type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
 type DetectorSession = { sawObject: boolean; timer: NodeJS.Timeout };
@@ -171,6 +174,13 @@ const KNOWN_NON_BIRD_HEARD_SPECIES: Readonly<Record<string, VisitGroup | 'drop'>
     'japanese burrowing cricket': 'drop',
 };
 
+// One-time repair (found 2026-10-01 04:45 EDT): a single raccoon on the Front Door porch was filed
+// as two visits 0.75 s apart -- "Common Raccoon" 0.84 (no clip: the Events Recorder clip began after
+// its start) and "Southern Flying Squirrel" 0.82 (the READY clip). The squirrel visit is folded into
+// the raccoon one; see seen.ts for the cause and the grouping that now prevents it.
+const SPLIT_RACCOON_KEEP_ID = '43030c7c-38d3-47fc-9dc8-0374bb5cc7fc';
+const SPLIT_RACCOON_DROP_ID = '7c6dc9b9-b580-46d0-8d09-8403cebc7534';
+
 function headerValue(headers: HttpRequest['headers'], name: string): string | undefined {
     if (!headers) return undefined;
     const target = name.toLowerCase();
@@ -207,6 +217,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private cameras = new Map<string, { id: string; name: string; nvrCardId: string | null }>();
     private pending = new Map<string, PendingDetection>();
     private detectorSessions = new Map<string, DetectorSession>();
+    // Which seen visit an animal is currently "inside", per camera (one entry each), so labels that
+    // flip during a stay fold into that visit; and a per-camera queue so two detections of the same
+    // animal commit one after the other instead of both creating a visit.
+    private sameMoment = new SameMomentTracker();
+    private cameraQueue = new KeyedQueue();
     private onlineListeners = new Map<string, { removeListener(): void }>();
     private cameraRuntime = new Map<string, CameraRuntime>();
     private eventWaiters = new Set<() => void>();
@@ -247,6 +262,15 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             const { regrouped, dropped } = this.store.regroupHeardVisits(KNOWN_NON_BIRD_HEARD_SPECIES);
             this.console.log(`Regrouped ${regrouped} and dropped ${dropped} heard visit(s) using taxonomic classes instead of always 'bird'.`);
             this.store.setSetting('heardRegroupedAtV1', String(Date.now()));
+        }
+        if (!this.store.getSetting('splitSeenVisitRepairedAtV1')) {
+            const outcome = await this.store.repairSplitSeenVisit(SPLIT_RACCOON_KEEP_ID, SPLIT_RACCOON_DROP_ID);
+            this.console.log(`Split raccoon visit repair: ${outcome}.`);
+            if (outcome === 'merged') {
+                const kept = this.store.getVisit(SPLIT_RACCOON_KEEP_ID);
+                if (kept) this.publishEvent('visit_updated', kept);
+            }
+            this.store.setSetting('splitSeenVisitRepairedAtV1', String(Date.now()));
         }
         await this.copyBrokerCredentials();
         await this.reconfigure();
@@ -390,6 +414,9 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const animals = event.detections.filter(detection => detection.className === 'animal');
         if (!animals.length) return;
         runtime.lastDetectionAt = startedAt;
+        // Any animal detection near an open visit keeps that visit "current" -- including unlabelled
+        // ones -- so a label that flips mid-stay joins it rather than starting a second visit.
+        this.sameMoment.touch(cameraId, startedAt, this.cooldownMs());
         for (const detection of animals) {
             const detectionId = detection.id || event.detectionId;
             const pendingForCamera = [...this.pending.values()].filter(candidate => candidate.cameraId === cameraId);
@@ -463,7 +490,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private async finishDetection(pending: PendingDetection, species: string, detectionLabel: string): Promise<Visit | undefined> {
         const capture = await pending.capture;
         let finalSpecies = species;
-        let visitStatus: VisitStatus = 'auto';
+        let visitStatus: 'auto' | 'learned' = 'auto';
         try {
             const queryBuffer = await embedCrop(capture.crop);
             const query = queryBuffer && embeddingFromBuffer(queryBuffer);
@@ -479,8 +506,18 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         } catch (error) {
             this.console.warn(`CLIP learning lookup failed for camera ${pending.cameraId}: ${String(error)}`);
         }
-        const cooldown = Math.max(0, Number(this.db.getSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES)))) * 60_000;
-        if (this.db.findRecentVisit(pending.cameraId, finalSpecies, pending.startedAt - cooldown)) return undefined;
+        // One detection commits at a time per camera, so two reports of the same animal a moment apart
+        // see each other's visit instead of both creating one.
+        return this.cameraQueue.run(pending.cameraId, () => this.commitDetection(pending, capture, finalSpecies, visitStatus, detectionLabel));
+    }
+
+    private async commitDetection(pending: PendingDetection, capture: { snapshot: Buffer; crop: Buffer }, finalSpecies: string, visitStatus: 'auto' | 'learned', detectionLabel: string): Promise<Visit | undefined> {
+        // The same animal at the same moment is one visit whatever each detection is labelled; only
+        // after that does the per-species cooldown (earlier SEEN visits only) choose skip or create.
+        const decision = decideSeenCommit(this.db, this.sameMoment, this.cooldownMs(),
+            { cameraId: pending.cameraId, startedAt: pending.startedAt, species: finalSpecies });
+        if (decision.action === 'merge') return this.mergeDetection(decision.target, pending, capture, finalSpecies, visitStatus, detectionLabel);
+        if (decision.action === 'skip') return undefined;
         if (!this.mediaDirs) throw new Error('Media storage has not initialized');
         const id = randomUUID();
         const { snapshotFile, cropFile } = await saveCapture(this.mediaDirs, id, capture);
@@ -497,45 +534,47 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         visit.notify = !visit.muted;
         this.db.saveVisit(visit, { detectionLabel, snapshotFile, cropFile });
         this.db.considerSpeciesBest(visit, snapshotFile, cropFile);
+        this.sameMoment.remember(camera.id, id, pending.startedAt);
         await this.linkRelatedVisit(visit);
         const saved = this.db.getVisit(id) ?? visit;
         this.publishEvent('visit_new', saved);
         return saved;
     }
 
+    // Folds a detection into the visit that already covers its moment: the higher-scoring label
+    // keeps the species (ties: the earlier detection), the other label becomes a 'model'
+    // suggestion, and a better score also supplies the photo. The visit keeps its one clip, one
+    // visit_new, and only publishes visit_updated when the merge changed something.
+    private async mergeDetection(target: Visit, pending: PendingDetection, capture: { snapshot: Buffer; crop: Buffer }, finalSpecies: string, visitStatus: 'auto' | 'learned', detectionLabel: string): Promise<Visit> {
+        const merged = mergeSeenDetection({
+            store: this.db,
+            tracker: this.sameMoment,
+            groupFor: species => groupForSpecies(species, 'seen'),
+            usualSuggestions: (cameraId, species) => this.usualSuggestions(cameraId, species),
+            isMuted: species => this.mutedSpecies().includes(species),
+        }, target, { species: finalSpecies, score: pending.score, startedAt: pending.startedAt, status: visitStatus, detectionLabel });
+        if (!merged.changed) return merged.visit;
+        // The database change is complete before the photo is rewritten; the photo's file name is
+        // the visit's id, so the stored paths do not change.
+        if (merged.plan.replaceMedia && this.mediaDirs) {
+            try {
+                await saveCapture(this.mediaDirs, target.id, capture);
+            } catch (error) {
+                this.console.warn(`Could not replace the photo of visit ${target.id} after merging a better detection: ${String(error)}`);
+            }
+        }
+        if (merged.plan.speciesChanged) await this.linkRelatedVisit(merged.visit);
+        const saved = this.db.getVisit(target.id) ?? merged.visit;
+        this.publishEvent('visit_updated', saved);
+        return saved;
+    }
+
+    private cooldownMs(): number {
+        return Math.max(0, Number(this.db.getSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES)))) * 60_000;
+    }
+
     private async linkRelatedVisit(visit: Visit): Promise<void> {
-        const matches = this.db.findHeardOrSeen(visit.camera.id, visit.species, visit.kind, visit.startedAt);
-        const exact = matches.find(row => row.species === visit.species);
-        const disagreements = matches.filter(row => row.species !== visit.species);
-        if (exact) {
-            const other = this.db.getVisit(exact.id);
-            if (other && visit.kind === 'seen') {
-                const heardRaw = this.db.getRawVisit(other.id);
-                visit.heard = { visitId: other.id, species: other.species, hasAudio: heardRaw?.birdnet_detection_id != null,
-                    birdnetDetectionId: heardRaw?.birdnet_detection_id ?? null, birdnetClip: heardRaw?.birdnet_clip ?? null };
-                visit.suggestions.push({ species: other.species, why: 'heard' });
-                this.db.saveVisit(visit);
-                this.publishEvent('visit_updated', other);
-            } else if (other && visit.kind === 'heard' && other.kind === 'seen') {
-                const heardRaw = this.db.getRawVisit(visit.id);
-                other.heard = { visitId: visit.id, species: visit.species, hasAudio: heardRaw?.birdnet_detection_id != null,
-                    birdnetDetectionId: heardRaw?.birdnet_detection_id ?? null, birdnetClip: heardRaw?.birdnet_clip ?? null };
-                other.suggestions.push({ species: visit.species, why: 'heard' });
-                this.db.saveVisit(other);
-                this.publishEvent('visit_updated', other);
-            }
-        }
-        if (disagreements.length) {
-            visit.review = true;
-            this.db.saveVisit(visit, { review: true });
-            for (const row of disagreements) {
-                const other = this.db.getVisit(row.id);
-                if (!other) continue;
-                other.review = true;
-                this.db.saveVisit(other, { review: true });
-                this.publishEvent('visit_updated', other);
-            }
-        }
+        linkSeenAndHeard(this.db, visit, other => this.publishEvent('visit_updated', other));
     }
 
     private suggestionsFor(cameraId: string, species: string, modelLabel: string): Visit['suggestions'] {
@@ -582,7 +621,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             const latest = this.db.listVisits({ camera: camera.id, limit: 1 }).items[0];
             items.push({ id: camera.id, name: camera.name, nvrCardId: camera.nvrCardId, online, health: this.cameraHealth(camera.id, online),
                 drops1h: runtime.drops.length, wildlife: this.cameras.has(camera.id),
-                lastDetection: latest ? { species: latest.species, at: latest.startedAt, visitId: latest.id } : null });
+                lastDetection: latest ? { species: latest.species, at: latest.startedAt, visitId: latest.id, kind: latest.kind, grp: latest.grp } : null });
         }
         return items;
     }
@@ -713,7 +752,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const overlapping = clips.filter(clip => {
             const start = normalizedTime(clip.startTime);
             const duration = normalizedTime(clip.duration ?? 60_000);
-            return start <= startedAt && start + duration >= startedAt;
+            return clipCoversVisitStart(start, start + duration, startedAt);
         }).sort((a, b) => Math.abs(a.startTime - startedAt) - Math.abs(b.startTime - startedAt));
         for (const clip of overlapping) {
             const resource = clip.resources?.video?.file;
@@ -727,7 +766,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             if (!match) continue;
             const start = normalizedTime(Number(match[1]));
             const end = normalizedTime(Number(match[2]));
-            if (start <= startedAt && end >= startedAt) {
+            if (clipCoversVisitStart(start, end, startedAt)) {
                 const candidate = join(directory, file);
                 const gap = Math.abs(start - startedAt);
                 if (!best || gap < best.gap) best = { path: candidate, gap };
@@ -920,9 +959,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         for (const wake of this.eventWaiters) wake();
     }
 
-    private async waitForEvents(after: number, timeout: number): Promise<EventsResponse> {
+    // `timeoutMs` is how long to hold the request open when nothing is pending (callers pass
+    // parseLongPollTimeoutMs, already clamped to 0..25 s). Pending events return immediately.
+    private async waitForEvents(after: number, timeoutMs: number): Promise<EventsResponse> {
         let result = this.db.eventsAfter(after);
-        if (result.resync || result.events?.length || timeout <= 0) return result;
+        if (result.resync || result.events?.length || timeoutMs <= 0) return result;
         if (this.eventWaiters.size >= MAX_LONG_POLLS) throw Object.assign(new Error('Too many waiting event requests'), { status: 503 });
         await new Promise<void>(resolve => {
             let complete = false;
@@ -934,9 +975,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 resolve();
             };
             const wake = () => finish();
-            const timer = setTimeout(finish, Math.min(25_000, Math.max(0, timeout)));
+            const timer = setTimeout(finish, timeoutMs);
             this.eventWaiters.add(wake);
         });
+        // Woken by shutdown: the store is closed (or closing); answer empty and let the client retry.
+        if (this.released) return { seq: after, events: [] };
         result = this.db.eventsAfter(after);
         return result;
     }
@@ -1044,7 +1087,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             }
             if (method === 'GET' && route === 'events') {
                 const after = Math.max(0, Number(url.searchParams.get('after') || 0));
-                const timeout = Math.min(25_000, Math.max(0, Number(url.searchParams.get('timeout') || 25_000)));
+                // `timeout` is in SECONDS (0-25), per the plugin <-> integration contract.
+                const timeout = parseLongPollTimeoutMs(url.searchParams.get('timeout'));
                 jsonReply(response, 200, await this.waitForEvents(after, timeout)); return;
             }
             if (method === 'GET' && route === 'review') { jsonReply(response, 200, { items: this.db.listReview() }); return; }

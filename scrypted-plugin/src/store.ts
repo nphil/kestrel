@@ -42,6 +42,24 @@ export interface VisitMeta {
     lastCorrectionId?: number | null;
 }
 
+export interface SeenMergeUpdate {
+    species: string;
+    speciesChanged: boolean;
+    grp: VisitGroup;
+    status: VisitStatus;
+    score: number | null;
+    startedAt: number;
+    // Suggestions after the merge as planned (seen.ts planSeenMerge); 'usual' entries are only
+    // kept as-is when the species did not change.
+    suggestions: Visit['suggestions'];
+    // Fresh "usual" suggestions for the new species; used only when the species changed.
+    usual: Visit['suggestions'];
+    // New raw model label when the incoming detection won, otherwise null (keep the stored one).
+    detectionLabel: string | null;
+    // Whether the (new) species is muted; used only when the species changed.
+    muted: boolean;
+}
+
 export interface VisitFilters {
     camera?: string;
     species?: string;
@@ -353,13 +371,23 @@ export class KestrelStore {
         return this.getSetting('heardNotify', 'new_only') !== 'never' && visit.firstEver;
     }
 
-    findRecentVisit(cameraId: string, species: string, since: number): Visit | undefined {
-        const row = this.db.prepare('SELECT * FROM visits WHERE camera_id=? AND species=? AND started_at>=? ORDER BY started_at DESC LIMIT 1').get(cameraId, species, since) as RawVisit | undefined;
+    // The seen path's cooldown: was this species already SEEN on this camera since `since`? A bird
+    // that was only heard does not count -- the seen visit is still recorded, then linked to the call.
+    findRecentSeenVisit(cameraId: string, species: string, since: number): Visit | undefined {
+        const row = this.db.prepare("SELECT * FROM visits WHERE camera_id=? AND species=? AND kind='seen' AND started_at>=? ORDER BY started_at DESC LIMIT 1").get(cameraId, species, since) as RawVisit | undefined;
         return row ? this.decodeVisit(row) : undefined;
     }
 
     findRecentHeardVisit(cameraId: string, species: string, since: number): Visit | undefined {
         const row = this.db.prepare("SELECT * FROM visits WHERE camera_id=? AND species=? AND kind='heard' AND started_at>=? ORDER BY started_at DESC LIMIT 1").get(cameraId, species, since) as RawVisit | undefined;
+        return row ? this.decodeVisit(row) : undefined;
+    }
+
+    // The seen visit on this camera that started closest to `at`, within `windowMs` either side:
+    // the visit a detection at `at` belongs to if it is the same animal at the same moment.
+    findSeenNear(cameraId: string, at: number, windowMs: number): Visit | undefined {
+        const row = this.db.prepare("SELECT * FROM visits WHERE camera_id=? AND kind='seen' AND started_at BETWEEN ? AND ? ORDER BY ABS(started_at-?) ASC, started_at ASC LIMIT 1")
+            .get(cameraId, at - windowMs, at + windowMs, at) as RawVisit | undefined;
         return row ? this.decodeVisit(row) : undefined;
     }
 
@@ -445,6 +473,89 @@ export class KestrelStore {
         }
         this.recomputeFirstEver();
         return { regrouped, dropped };
+    }
+
+    // Applies a same-moment merge (see seen.ts) to an existing seen visit: the species/score of
+    // whichever detection won, the loser's label as a suggestion, and the bookkeeping that follows
+    // a species change -- first_ever, muted, heard link, review flag, best-photo cache. Returns the
+    // visit as stored. A replaced photo is the caller's job: it is rewritten in place, since the
+    // photo files are named by the visit's id and the stored paths never change.
+    applySeenMerge(visitId: string, update: SeenMergeUpdate): Visit | undefined {
+        const raw = this.getRawVisit(visitId);
+        if (!raw || raw.kind !== 'seen') return undefined;
+        const visit = this.decodeVisit(raw);
+        const shift = update.startedAt - visit.startedAt;
+        if (shift !== 0) {
+            visit.startedAt = update.startedAt;
+            if (visit.clip.state === 'pending' && visit.clip.expectedReadyAt !== null) visit.clip.expectedReadyAt += shift;
+        }
+        visit.score = update.score;
+        visit.status = update.status;
+        const meta: VisitMeta = {};
+        if (update.detectionLabel !== null) meta.detectionLabel = update.detectionLabel;
+        if (update.speciesChanged) {
+            const previous = visit.species;
+            visit.species = update.species;
+            visit.grp = update.grp;
+            visit.firstEver = !this.hasSpecies(update.species);
+            visit.muted = update.muted;
+            visit.heard = null;
+            visit.review = false;
+            meta.review = false;
+            const models = update.suggestions.filter(item => item.why === 'model');
+            visit.suggestions = [...models, ...update.usual.filter(item => item.species !== update.species && !models.some(model => model.species === item.species))];
+            this.saveVisit(visit, meta);
+            this.refreshSpeciesBestForVisit(visitId);
+            this.recomputeFirstEverForSpecies(previous);
+            this.recomputeFirstEverForSpecies(update.species);
+        } else {
+            visit.suggestions = update.suggestions;
+            this.saveVisit(visit, meta);
+        }
+        const stored = this.getRawVisit(visitId);
+        if (stored) this.considerSpeciesBest(this.decodeVisit(stored), stored.snapshot_file, stored.crop_file);
+        return this.getVisit(visitId);
+    }
+
+    // Removes a visit row and demotes/replaces any best-photo entry that pointed at it.
+    deleteVisitRow(visitId: string): void {
+        this.db.prepare('DELETE FROM visits WHERE id=?').run(visitId);
+        this.refreshSpeciesBestForVisit(visitId);
+    }
+
+    private recomputeFirstEverForSpecies(species: string): void {
+        this.db.prepare('UPDATE visits SET first_ever=0 WHERE species=?').run(species);
+        this.db.prepare('UPDATE visits SET first_ever=1 WHERE rowid=(SELECT rowid FROM visits WHERE species=? ORDER BY started_at ASC, rowid ASC LIMIT 1)').run(species);
+    }
+
+    // One-time repair for a raccoon that was filed twice (see seen.ts): folds `dropId` into
+    // `keepId` -- the kept visit keeps its species, adopts the dropped visit's READY clip if it has
+    // none, and offers the dropped visit's label as a 'model' suggestion -- then deletes the dropped
+    // visit, its best-photo entry and its photo files. Not a user correction, so no corrections row
+    // is written. 'absent' = one of the visits does not exist (nothing to repair); 'skipped' = they
+    // are not a plain same-camera seen pair, or a correction points at the dropped visit.
+    async repairSplitSeenVisit(keepId: string, dropId: string): Promise<'merged' | 'absent' | 'skipped'> {
+        const keepRaw = this.getRawVisit(keepId);
+        const dropRaw = this.getRawVisit(dropId);
+        if (!keepRaw || !dropRaw) return 'absent';
+        if (keepRaw.kind !== 'seen' || dropRaw.kind !== 'seen' || keepRaw.camera_id !== dropRaw.camera_id) return 'skipped';
+        if (this.db.prepare('SELECT 1 FROM corrections WHERE visit_id=? LIMIT 1').get(dropId)) return 'skipped';
+        const keep = this.decodeVisit(keepRaw);
+        const drop = this.decodeVisit(dropRaw);
+        let clipFile = keepRaw.clip_file;
+        if (keep.clip.state !== 'ready' && drop.clip.state === 'ready' && dropRaw.clip_file) {
+            keep.clip.state = 'ready';
+            clipFile = dropRaw.clip_file;
+        }
+        if (drop.species !== keep.species && drop.species !== 'Unidentified animal')
+            keep.suggestions = [{ species: drop.species, why: 'model' }, ...keep.suggestions.filter(item => item.species !== drop.species)];
+        this.saveVisit(keep, { clipFile });
+        const files = [dropRaw.snapshot_file, dropRaw.crop_file].filter((file): file is string => !!file);
+        this.deleteVisitRow(dropId);
+        this.recomputeFirstEverForSpecies(drop.species);
+        this.recomputeFirstEverForSpecies(keep.species);
+        await Promise.all(files.map(file => fs.rm(file, { force: true })));
+        return 'merged';
     }
 
     hasSpecies(species: string): boolean {
@@ -539,19 +650,31 @@ export class KestrelStore {
         const species = new Map<string, {
             species: string; grp: VisitGroup; seen: boolean; heard: boolean; first: number; last: number;
             count30d: number; hasPhoto: boolean; cameras: Record<string, number>; hours: number[]; newThisYear: boolean;
+            seenCount30d: number; heardCount30d: number;
+            lastSeenAt: number | null; lastHeardAt: number | null; lastSeenCamera: string | null; lastHeardCamera: string | null;
         }>();
+        const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
         for (const row of rows) {
             let item = species.get(row.species);
             if (!item) {
                 item = { species: row.species, grp: row.grp, seen: false, heard: false, first: row.started_at, last: row.started_at,
-                    count30d: 0, hasPhoto: false, cameras: {}, hours: Array(24).fill(0) as number[], newThisYear: row.started_at >= yearStart };
+                    count30d: 0, hasPhoto: false, cameras: {}, hours: Array(24).fill(0) as number[], newThisYear: row.started_at >= yearStart,
+                    seenCount30d: 0, heardCount30d: 0, lastSeenAt: null, lastHeardAt: null, lastSeenCamera: null, lastHeardCamera: null };
                 species.set(row.species, item);
             }
             item.seen ||= row.kind === 'seen';
             item.heard ||= row.kind === 'heard';
             item.first = Math.min(item.first, row.started_at);
             item.last = Math.max(item.last, row.started_at);
-            if (row.started_at >= now - 30 * 24 * 60 * 60 * 1000) item.count30d++;
+            const recent = row.started_at >= thirtyDaysAgo;
+            if (recent) item.count30d++;
+            if (row.kind === 'seen') {
+                if (recent) item.seenCount30d++;
+                if (item.lastSeenAt === null || row.started_at >= item.lastSeenAt) { item.lastSeenAt = row.started_at; item.lastSeenCamera = row.camera_id; }
+            } else {
+                if (recent) item.heardCount30d++;
+                if (item.lastHeardAt === null || row.started_at >= item.lastHeardAt) { item.lastHeardAt = row.started_at; item.lastHeardCamera = row.camera_id; }
+            }
             item.cameras[row.camera_id] = (item.cameras[row.camera_id] ?? 0) + 1;
             item.hours[new Date(row.started_at).getHours()]++;
         }

@@ -8,6 +8,7 @@
     "prescrypted-setup-project": "scrypted-package-json",
     "build": "scrypted-webpack",
     "test:learning": "node --experimental-strip-types --test test/learning.test.mjs",
+    "test:seen": "node --experimental-strip-types --test test/seen.test.mjs",
     "test:store": "node --experimental-strip-types --test test/store.test.mjs",
     "prepublishOnly": "NODE_ENV=production scrypted-webpack",
     "prescrypted-vscode-launch": "scrypted-webpack",
