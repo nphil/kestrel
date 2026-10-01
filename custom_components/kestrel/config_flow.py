@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
@@ -18,7 +19,10 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import KestrelApiError, KestrelClient
 from .const import (
+    AUDIO_KEY_HEADER,
     CONF_API_KEY,
+    CONF_AUDIO_KEY,
+    CONF_AUDIO_URL,
     CONF_POLL_TIMEOUT,
     CONF_URL,
     DEFAULT_POLL_TIMEOUT,
@@ -80,7 +84,7 @@ class KestrelConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class KestrelOptionsFlow(OptionsFlowWithReload):
-    """Configure the plugin's long-poll wait duration."""
+    """Configure the plugin's event wait and the optional bird-call preview service."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
@@ -88,22 +92,71 @@ class KestrelOptionsFlow(OptionsFlowWithReload):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            audio_url = str(user_input.get(CONF_AUDIO_URL) or "").strip().rstrip("/")
+            audio_key = str(user_input.get(CONF_AUDIO_KEY) or "").strip()
+            if audio_url or audio_key:
+                errors = await self._async_check_audio(audio_url, audio_key)
+            if not errors:
+                return self.async_create_entry(
+                    title="",
+                    data={
+                        CONF_POLL_TIMEOUT: user_input[CONF_POLL_TIMEOUT],
+                        CONF_AUDIO_URL: audio_url,
+                        CONF_AUDIO_KEY: audio_key,
+                    },
+                )
 
+        current = user_input or self._config_entry.options
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Required(
                         CONF_POLL_TIMEOUT,
-                        default=self._config_entry.options.get(
-                            CONF_POLL_TIMEOUT, DEFAULT_POLL_TIMEOUT
-                        ),
+                        default=current.get(CONF_POLL_TIMEOUT, DEFAULT_POLL_TIMEOUT),
                     ): vol.All(
                         vol.Coerce(int),
                         vol.Range(min=MIN_POLL_TIMEOUT, max=MAX_POLL_TIMEOUT),
-                    )
+                    ),
+                    vol.Optional(
+                        CONF_AUDIO_URL,
+                        description={"suggested_value": current.get(CONF_AUDIO_URL, "")},
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+                    ),
+                    vol.Optional(
+                        CONF_AUDIO_KEY,
+                        description={"suggested_value": current.get(CONF_AUDIO_KEY, "")},
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    ),
                 }
             ),
+            errors=errors,
         )
+
+    async def _async_check_audio(self, url: str, key: str) -> dict[str, str]:
+        """Check the audio service address and key; an empty dict means both are good."""
+        if not url.startswith(("http://", "https://")) or not key:
+            return {"base": "audio_incomplete"}
+        session = async_get_clientsession(self.hass)
+        timeout = aiohttp.ClientTimeout(total=8)
+        try:
+            async with session.get(f"{url}/healthz", timeout=timeout, allow_redirects=False) as health:
+                if health.status != 200:
+                    return {"base": "audio_cannot_connect"}
+            async with session.get(
+                f"{url}/v1/stats",
+                headers={AUDIO_KEY_HEADER: key},
+                timeout=timeout,
+                allow_redirects=False,
+            ) as stats:
+                if stats.status in (401, 403):
+                    return {"base": "audio_invalid_auth"}
+                if stats.status != 200:
+                    return {"base": "audio_cannot_connect"}
+        except (aiohttp.ClientError, TimeoutError, OSError):
+            return {"base": "audio_cannot_connect"}
+        return {}

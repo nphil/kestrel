@@ -45,6 +45,32 @@ def _signed_media_url(
     )
 
 
+def _apply_preview(
+    hass: HomeAssistant,
+    target: dict[str, Any],
+    url_key: str,
+    original: str | None,
+    detection_id: Any,
+    visit_id: Any,
+    refresh_token_id: str | None,
+) -> None:
+    """Add the bird-call preview fields when the audio service has a verdict for this call."""
+    previews = hass.data.get(DOMAIN, {}).get("audio")
+    if previews is None or not isinstance(detection_id, int) or isinstance(detection_id, bool):
+        return
+    previews.note_visit(visit_id, detection_id)
+    info = previews.fields(detection_id)
+    if info is None:
+        return
+    target["audioInfo"] = info.as_payload()
+    if info.state == "pending":
+        previews.track(detection_id, visit_id, target.get("startedAt"))
+    if info.state == "ready":
+        target[url_key] = _signed_media_url(hass, "birdnet_preview", str(detection_id), refresh_token_id)
+        if original is not None:
+            target["audioOriginal"] = original
+
+
 def _sign_media_paths(
     hass: HomeAssistant, value: Any, refresh_token_id: str | None
 ) -> Any:
@@ -78,21 +104,32 @@ def _sign_media_paths(
         audio = result.get("audio")
         if isinstance(audio, dict):
             detection_id = audio.get("birdnetDetectionId")
-            result["audio"] = (
+            original = (
                 _signed_media_url(hass, "birdnet_audio", str(detection_id), refresh_token_id)
                 if detection_id is not None
                 and birdnet_availability.audio_available_now(hass, str(detection_id)) is not False
                 else None
             )
+            result["audio"] = original
+            _apply_preview(
+                hass, result, "audio", original, detection_id,
+                result.get("id", result.get("visit_id")), refresh_token_id,
+            )
         heard = result.get("heard")
         if isinstance(heard, dict):
             heard_detection_id = heard.get("birdnetDetectionId")
+            heard_original = None
             if heard_detection_id is not None and birdnet_availability.audio_available_now(
                 hass, str(heard_detection_id)
             ) is not False:
-                heard["audio_url"] = _signed_media_url(
+                heard_original = _signed_media_url(
                     hass, "birdnet_audio", str(heard_detection_id), refresh_token_id
                 )
+                heard["audio_url"] = heard_original
+            _apply_preview(
+                hass, heard, "audio_url", heard_original, heard_detection_id,
+                heard.get("visitId"), refresh_token_id,
+            )
         clip = result.get("clip")
         visit_id = result.get("id", result.get("visit_id"))
         if isinstance(clip, dict) and clip.get("state") == "ready" and visit_id is not None:
@@ -122,6 +159,9 @@ async def _async_api_call(
         result = await _coordinator(hass).client.async_request(
             method, path, params=params, json=body
         )
+        previews = hass.data.get(DOMAIN, {}).get("audio")
+        if previews is not None:
+            await previews.async_prefetch(result)
         result = _sign_media_paths(hass, result, connection.refresh_token_id)
         if postprocess is not None:
             result = postprocess(result)

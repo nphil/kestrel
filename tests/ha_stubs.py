@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import importlib
 import sys
 import types
@@ -94,6 +95,72 @@ class HomeAssistant:
     def async_create_task(self, coro: object, name: str | None = None) -> asyncio.Future:
         return asyncio.ensure_future(coro)
 
+    def async_create_background_task(self, coro: object, name: str | None = None) -> asyncio.Future:
+        return asyncio.ensure_future(coro)
+
+
+class _FakeContent:
+    def __init__(self, data: bytes, hang: bool = False) -> None:
+        self._data = data
+        self._hang = hang
+
+    async def iter_chunked(self, size: int):
+        if self._hang:
+            await asyncio.Event().wait()  # never finishes: a stalled server
+        for start in range(0, len(self._data), size):
+            yield self._data[start : start + size]
+
+
+class FakeResponse:
+    """A response with a status, headers and a body streamed in chunks (JSON or raw bytes)."""
+
+    def __init__(
+        self,
+        status: int = 200,
+        json_data: object = None,
+        body: bytes = b"",
+        headers: dict | None = None,
+        hang: bool = False,
+    ) -> None:
+        self.status = status
+        self.headers = dict(headers or {})
+        data = json.dumps(json_data).encode() if json_data is not None else body
+        self.content = _FakeContent(data, hang)
+
+    async def __aenter__(self) -> "FakeResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class FakeSession:
+    """Serves scripted responses by (method, url) and records every call made."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+        self._routes: dict[tuple[str, str], list] = {}
+
+    def route(self, method: str, url: str, *responses: object) -> None:
+        """Responses are served in order; the last one repeats. An Exception is raised instead."""
+        self._routes[(method, url)] = list(responses)
+
+    def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+        self.calls.append((method, url, kwargs))
+        queue = self._routes.get((method, url))
+        if not queue:
+            return FakeResponse(404, {"error": "not_found"})
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def calls_to(self, method: str, url: str) -> list[dict]:
+        return [kwargs for call_method, call_url, kwargs in self.calls if (call_method, call_url) == (method, url)]
+
+
+SESSION: dict[str, FakeSession] = {"session": FakeSession()}
+
 
 class KestrelApiError(Exception):
     def __init__(self, message: str, *, status: int | None = None) -> None:
@@ -153,7 +220,7 @@ def _install_stubs() -> None:
         DataUpdateCoordinator=DataUpdateCoordinator,
         UpdateFailed=type("UpdateFailed", (Exception,), {}),
     )
-    _module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: None)
+    _module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: SESSION["session"])
     _module("homeassistant.helpers.storage", Store=Store)
     _module(
         "homeassistant.helpers.dispatcher",
@@ -180,6 +247,7 @@ coordinator_module = importlib.import_module("kestrel_pkg.coordinator")
 event_module = importlib.import_module("kestrel_pkg.event")
 websocket_module = importlib.import_module("kestrel_pkg.websocket_api")
 const_module = importlib.import_module("kestrel_pkg.const")
+audio_module = importlib.import_module("kestrel_pkg.audio")
 
 FRONT = {"id": "55", "name": "Front Door Camera"}
 BACK = {"id": "88", "name": "Backyard Camera"}

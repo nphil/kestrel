@@ -16,9 +16,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .announced import AnnouncedVisits
+from .audio import AudioPreviews
 from .client import KestrelClient
 from .const import (
     CONF_API_KEY,
+    CONF_AUDIO_KEY,
+    CONF_AUDIO_URL,
     CONF_URL,
     DOMAIN,
     INTEGRATION_VERSION,
@@ -72,6 +75,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     entry.runtime_data = coordinator
     domain_data = hass.data.setdefault(DOMAIN, {})
     domain_data["coordinator"] = coordinator
+    audio = AudioPreviews(hass, entry.options.get(CONF_AUDIO_URL), entry.options.get(CONF_AUDIO_KEY))
+    domain_data["audio"] = audio
+    audio.async_start()
 
     module_url = domain_data.get("frontend_module_url")
     if module_url and not domain_data.get("panel_registered"):
@@ -93,6 +99,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
 
     async def stop_on_shutdown(event: object) -> None:
         await coordinator.async_stop()
+        await audio.async_stop()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_on_shutdown))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -104,6 +111,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
     """Unload platforms and stop the event long-poll task."""
     coordinator = entry.runtime_data
     await coordinator.async_stop()
+    audio = hass.data.get(DOMAIN, {}).pop("audio", None)
+    if audio is not None:
+        await audio.async_stop()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         domain_data = hass.data.get(DOMAIN, {})

@@ -1,4 +1,4 @@
-"""Authenticated streaming media proxy for Kestrel plugin files and BirdNET-Go audio."""
+"""Authenticated streaming media proxy for Kestrel plugin files, BirdNET-Go audio and bird-call previews."""
 
 from __future__ import annotations
 
@@ -58,6 +58,19 @@ class KestrelMediaView(HomeAssistantView):
                 aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
             )
 
+        if kind == "birdnet_preview":
+            # The kestrel-audio service's loudness-matched (and where it helps, cleaned) preview.
+            previews = self._hass.data.get(DOMAIN, {}).get("audio")
+            if previews is None or not previews.enabled or not media_id.isdigit():
+                return web.Response(status=404, text="Media not found")
+            return await self._stream(
+                request,
+                async_get_clientsession(self._hass),
+                previews.preview_url(media_id),
+                {**previews.headers, **headers},
+                aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+            )
+
         if kind in ("species_ref", "species_ref_info"):
             # Static reference photo/attribution from BirdNET-Go's image cache
             # (wikimedia/avicommons), keyed by scientific name -- long cache, these
@@ -103,7 +116,7 @@ class KestrelMediaView(HomeAssistantView):
                 url, headers=headers, timeout=timeout, allow_redirects=False
             ) as upstream:
                 if upstream.status not in (200, 206, 416):
-                    if upstream.status == 404:
+                    if upstream.status in (202, 404):  # 202: the preview is still being made
                         return web.Response(status=404, text="Media not found")
                     _LOGGER.warning(
                         "Kestrel media request to %s returned HTTP %s", url, upstream.status

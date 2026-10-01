@@ -21,12 +21,19 @@
   "options": {
     "step": {
       "init": {
-        "title": "Kestrel connection",
-        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting.",
+        "title": "Kestrel settings",
+        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting. To get loud, clean bird-call previews, add the Kestrel audio service address and key; leave both empty to play BirdNET-Go's original recordings.",
         "data": {
-          "poll_timeout": "Event wait (seconds)"
+          "poll_timeout": "Event wait (seconds)",
+          "audio_url": "Audio service address",
+          "audio_key": "Audio service key"
         }
       }
+    },
+    "error": {
+      "audio_incomplete": "Enter both the audio service address (starting with http:// or https://) and its key, or leave both empty.",
+      "audio_cannot_connect": "Could not reach the Kestrel audio service. Check the address and that the service is running.",
+      "audio_invalid_auth": "The audio service key was not accepted."
     }
   },
   "entity": {

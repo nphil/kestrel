@@ -104,6 +104,14 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    30 days of recordings would otherwise grow every nightly backup by several GB.
    Perch hears more than birds: mammals and frogs are kept (event types `mammal` /
    `other`), insects are ignored.
+   **Bird-call previews** (optional): run the `kestrel-audio` service on a machine
+   with a GPU (or a few CPU cores), then enter its address and key under Settings →
+   Devices & Services → Kestrel → Configure. Each heard call is then played as the
+   moment the model matched, made loud and, only where a re-check proves it helps,
+   cleaned up, with an *Original* toggle to hear BirdNET-Go's full recording. Home
+   Assistant sends the service every new call and, after a restart, the last 30 days
+   gradually. If the service is off or unreachable, calls simply play the original
+   recording.
 5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first

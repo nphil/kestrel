@@ -6,6 +6,9 @@ DOMAIN = "kestrel"
 CONF_URL = "url"
 CONF_API_KEY = "api_key"
 CONF_POLL_TIMEOUT = "poll_timeout"
+CONF_AUDIO_URL = "audio_url"
+CONF_AUDIO_KEY = "audio_key"
+AUDIO_KEY_HEADER = "X-Kestrel-Audio-Key"
 
 DEFAULT_URL = "http://192.168.1.69:11080/endpoint/@nphil/kestrel/public"
 DEFAULT_POLL_TIMEOUT = 25
@@ -14,7 +17,7 @@ MAX_POLL_TIMEOUT = 25
 
 INTEGRATION_VERSION = "1.0.15"
 STATIC_PATH = "/kestrel-static"
-MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio", "species_ref", "species_ref_info"})
+MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio", "birdnet_preview", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
 
 # Each non-empty batch of plugin events is sent on this dispatcher signal. Dashboard

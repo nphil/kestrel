@@ -8,10 +8,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.redact import async_redact_data
 
-from .const import CONF_API_KEY
+from .const import CONF_API_KEY, CONF_AUDIO_KEY, DOMAIN
 from .coordinator import KestrelCoordinator
 
-TO_REDACT = {CONF_API_KEY, "X-Kestrel-Key", "authorization", "token"}
+TO_REDACT = {CONF_API_KEY, CONF_AUDIO_KEY, "X-Kestrel-Key", "X-Kestrel-Audio-Key", "authorization", "token"}
 
 
 async def async_get_config_entry_diagnostics(
@@ -19,7 +19,9 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return connection state and a redacted entry snapshot."""
     coordinator = entry.runtime_data
+    audio = hass.data.get(DOMAIN, {}).get("audio")
     return {
+        "audio_service": await audio.async_diagnostics() if audio is not None else {"configured": False},
         "entry": async_redact_data(entry.as_dict(), TO_REDACT),
         "connection": {
             "connected": coordinator.connected,
