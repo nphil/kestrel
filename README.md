@@ -121,6 +121,12 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
 - Microphones near doors hear people: choose which cameras BirdNET-Go listens to,
   and keep its web UI behind Home Assistant.
 
+## Development
+
+- Home Assistant integration tests need no Home Assistant install:
+  `python3 -m unittest discover -s tests -v`.
+- Plugin tests: see [scrypted-plugin/README.md](scrypted-plugin/README.md).
+
 ## Licences
 
 - Kestrel code: MIT ([LICENSE](LICENSE)).
