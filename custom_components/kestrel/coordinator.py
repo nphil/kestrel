@@ -11,6 +11,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .announced import AnnouncedVisits, new_visit_from_event, visit_id
@@ -21,6 +22,7 @@ from .const import (
     DEFAULT_POLL_TIMEOUT,
     DOMAIN,
     KNOWN_CAMERA_SLUGS,
+    SIGNAL_EVENTS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -254,6 +256,8 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             resync=resync,
         )
         self.async_set_updated_data(current)
+        if events:
+            async_dispatcher_send(self.hass, SIGNAL_EVENTS, events)
 
 
 def _new_visit_ids(events: list[Any]) -> list[str]:

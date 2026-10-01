@@ -13,10 +13,11 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from . import birdnet_availability
 from .client import KestrelApiError
-from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS
+from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS, SIGNAL_EVENTS
 from .coordinator import KestrelCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -160,11 +161,17 @@ async def ws_visits(hass: HomeAssistant, connection: websocket_api.ActiveConnect
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "kestrel/visit", vol.Required("visit_id"): str}
+    {vol.Required("type"): "kestrel/visit", vol.Optional("visit_id"): vol.Any(str, None)}
 )
 @websocket_api.async_response
 async def ws_visit(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
-    await _async_api_call(hass, connection, msg, "GET", f"visits/{quote(msg['visit_id'], safe='')}")
+    visit_id = msg.get("visit_id")
+    if not isinstance(visit_id, str) or not visit_id.strip():
+        # The schema leaves visit_id optional so a missing id is answered here with a plain
+        # error; a schema failure would make Home Assistant log an error for every attempt.
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, "A visit_id is required")
+        return
+    await _async_api_call(hass, connection, msg, "GET", f"visits/{quote(visit_id, safe='')}")
 
 
 @websocket_api.websocket_command(
@@ -295,24 +302,13 @@ async def ws_subscribe(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
     try:
-        coordinator = _coordinator(hass)
+        _coordinator(hass)
     except KestrelApiError as err:
         connection.send_error(msg["id"], err.code, str(err))
         return
 
-    last_generation = (coordinator.data or {}).get("event_generation", 0)
-
     @callback
-    def forward_batch() -> None:
-        nonlocal last_generation
-        data = coordinator.data or {}
-        generation = data.get("event_generation", 0)
-        if generation == last_generation:
-            return
-        last_generation = generation
-        events = data.get("events", [])
-        if not isinstance(events, list) or not events:
-            return
+    def forward_batch(events: list[dict[str, Any]]) -> None:
         hass.async_create_task(send_events(events), "kestrel websocket event batch")
 
     async def send_events(events: list[dict[str, Any]]) -> None:
@@ -320,13 +316,10 @@ async def ws_subscribe(
             signed_event = _sign_media_paths(hass, event, connection.refresh_token_id)
             connection.send_event(msg["id"], signed_event)
 
-    remove_listener = coordinator.async_add_listener(forward_batch)
-
-    @callback
-    def unsubscribe() -> None:
-        remove_listener()
-
-    connection.subscriptions[msg["id"]] = unsubscribe
+    # Listen on the hass-wide signal rather than on one coordinator: a config-entry reload
+    # replaces the coordinator, and this subscription must keep receiving from the new one.
+    # The disconnect callable it returns is what Home Assistant calls on unsubscribe or close.
+    connection.subscriptions[msg["id"]] = async_dispatcher_connect(hass, SIGNAL_EVENTS, forward_batch)
     connection.send_result(msg["id"], {"subscribed": True})
 
 

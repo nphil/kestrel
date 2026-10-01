@@ -1,7 +1,7 @@
 """Each visit is announced as a Home Assistant event once, and only when it is new.
 
 Runs the real announced.py, coordinator.py and event.py with Home Assistant itself
-stubbed out, so no Home Assistant install is needed:
+stubbed out (see ha_stubs.py), so no Home Assistant install is needed:
 
     python3 -m unittest discover -s tests -v
 """
@@ -9,203 +9,26 @@ stubbed out, so no Home Assistant install is needed:
 from __future__ import annotations
 
 import asyncio
-import copy
-import importlib
-import sys
-import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
-INTEGRATION = Path(__file__).resolve().parents[1] / "custom_components" / "kestrel"
-DISK: dict[str, object] = {}  # stands in for Home Assistant's .storage directory
-
-
-def _module(name: str, **attrs: object) -> types.ModuleType:
-    module = types.ModuleType(name)
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    sys.modules[name] = module
-    return module
-
-
-class Store:
-    def __init__(self, hass: object, version: int, key: str) -> None:
-        self.key = key
-
-    async def async_load(self) -> object:
-        return copy.deepcopy(DISK.get(self.key))
-
-    async def async_save(self, data: object) -> None:
-        DISK[self.key] = copy.deepcopy(data)
-
-    def async_delay_save(self, data_func: object, delay: float = 0) -> None:
-        pass  # Home Assistant writes later; the integration also flushes on stop
-
-    async def async_remove(self) -> None:
-        DISK.pop(self.key, None)
-
-
-class EventEntity:
-    def _trigger_event(self, event_type: str, event_attributes: dict | None = None) -> None:
-        assert event_type in self._attr_event_types, f"{event_type!r} is not a declared event type"
-        self.fired.append((event_type, dict(event_attributes or {})))
-
-    def async_write_ha_state(self) -> None:
-        pass
-
-
-class CoordinatorEntity:
-    def __class_getitem__(cls, item: object) -> type:
-        return cls
-
-    def __init__(self, coordinator: object) -> None:
-        self.coordinator = coordinator
-        self.fired: list[tuple[str, dict]] = []
-
-    def _handle_coordinator_update(self) -> None:
-        pass
-
-
-class DataUpdateCoordinator:
-    def __class_getitem__(cls, item: object) -> type:
-        return cls
-
-    def __init__(self, hass: object, logger: object, **kwargs: object) -> None:
-        self.hass = hass
-        self.data: dict | None = None
-        self.listeners: list = []
-
-    def async_set_updated_data(self, data: dict) -> None:
-        self.data = data
-        for listener in list(self.listeners):
-            listener()
-
-
-class HomeAssistant:
-    def __init__(self) -> None:
-        self.data: dict = {}
-
-
-class KestrelApiError(Exception):
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
-
-
-def _install_stubs() -> None:
-    _module("homeassistant")
-    _module("homeassistant.core", HomeAssistant=HomeAssistant, callback=lambda fn: fn)
-    _module("homeassistant.config_entries", ConfigEntry=type("ConfigEntry", (), {}))
-    _module("homeassistant.components")
-    _module("homeassistant.components.event", EventEntity=EventEntity)
-    _module("homeassistant.helpers")
-    _module("homeassistant.helpers.entity_platform", AddEntitiesCallback=type("AddEntitiesCallback", (), {}))
-    _module(
-        "homeassistant.helpers.update_coordinator",
-        CoordinatorEntity=CoordinatorEntity,
-        DataUpdateCoordinator=DataUpdateCoordinator,
-        UpdateFailed=type("UpdateFailed", (Exception,), {}),
-    )
-    _module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: None)
-    _module("homeassistant.helpers.storage", Store=Store)
-    _module("aiohttp")
-    package = types.ModuleType("kestrel_pkg")
-    package.__path__ = [str(INTEGRATION)]  # the real files, so relative imports resolve
-    sys.modules["kestrel_pkg"] = package
-    _module("kestrel_pkg.client", KestrelApiError=KestrelApiError, KestrelClient=object)
-    _module(
-        "kestrel_pkg.entity",
-        camera_slug=lambda camera: str(camera["id"]),
-        device_info=lambda coordinator: {},
-    )
-
-
-_install_stubs()
-announced_module = importlib.import_module("kestrel_pkg.announced")
-coordinator_module = importlib.import_module("kestrel_pkg.coordinator")
-event_module = importlib.import_module("kestrel_pkg.event")
-
-FRONT = {"id": "55", "name": "Front Door Camera"}
-BACK = {"id": "88", "name": "Backyard Camera"}
-STORAGE_KEY = "kestrel.announced.E1"
-
-
-def seen(visit_id: str, species: str, *, grp: str = "mammal", camera: dict = FRONT) -> dict:
-    return {
-        "id": visit_id, "species": species, "grp": grp, "kind": "seen", "score": 0.9,
-        "camera": dict(camera), "notify": True, "firstEver": True,
-    }
-
-
-def heard(visit_id: str, species: str, *, grp: str = "bird", camera: dict = BACK) -> dict:
-    return {
-        "id": visit_id, "species": species, "grp": grp, "kind": "heard", "score": 0.7,
-        "camera": dict(camera), "notify": False, "firstEver": False,
-    }
-
-
-def event(kind: str, visit: dict, *, wrapped: bool = False) -> dict:
-    return {"type": kind, "data": {"visit": visit} if wrapped else visit}
-
-
-def fired_ids(entity: CoordinatorEntity) -> list[str]:
-    return [attributes["visit_id"] for _, attributes in entity.fired]
-
-
-class BatchDelivery:
-    """Hands batches to entities the way KestrelCoordinator._publish does."""
-
-    def __init__(self, announced: object) -> None:
-        self.announced = announced
-        self.data: dict = {}
-        self._generation = 0
-
-    def deliver(self, entities: list, events: list[dict]) -> None:
-        self._generation += 1
-        self.data = {"events": events, "event_generation": self._generation}
-        for entity in entities:
-            entity._handle_coordinator_update()
-
-
-class FakeClient:
-    def __init__(self, script: list) -> None:
-        self.script = list(script)
-        self.calls: list[dict] = []
-
-    async def async_request(self, method: str, path: str, params: dict | None = None, **kwargs: object) -> object:
-        self.calls.append(dict(params or {}))
-        if not self.script:
-            raise asyncio.CancelledError  # ends the endless poll loop
-        item = self.script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    async def async_get_cameras(self) -> list[dict]:
-        return [FRONT, BACK]
-
-
-def new_announced(entry_id: str = "E1") -> object:
-    return announced_module.AnnouncedVisits(HomeAssistant(), entry_id)
-
-
-def new_coordinator(script: list) -> coordinator_module.KestrelCoordinator:
-    entry = types.SimpleNamespace(entry_id="E1", options={})
-    coordinator = coordinator_module.KestrelCoordinator(HomeAssistant(), entry, FakeClient(script))
-    coordinator._replace_cameras([FRONT, BACK])
-    return coordinator
-
-
-def attach(coordinator: object, *entities: CoordinatorEntity) -> None:
-    coordinator.listeners.extend(entity._handle_coordinator_update for entity in entities)
-
-
-async def run_poll_loop(coordinator: coordinator_module.KestrelCoordinator) -> None:
-    try:
-        await coordinator._async_poll_events()
-    except asyncio.CancelledError:
-        pass
+from ha_stubs import (
+    BACK,
+    DISK,
+    FRONT,
+    STORAGE_KEY,
+    BatchDelivery,
+    KestrelApiError,
+    attach,
+    event,
+    event_module,
+    fired_ids,
+    heard,
+    new_announced,
+    new_coordinator,
+    run_poll_loop,
+    seen,
+)
 
 
 class AnnouncedEventTests(unittest.IsolatedAsyncioTestCase):

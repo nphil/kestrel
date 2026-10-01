@@ -17,6 +17,11 @@ STATIC_PATH = "/kestrel-static"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
 
+# Each non-empty batch of plugin events is sent on this dispatcher signal. Dashboard
+# subscriptions listen to the signal rather than to a coordinator, so they keep working
+# when a config-entry reload replaces the coordinator.
+SIGNAL_EVENTS = f"{DOMAIN}_events"
+
 # BirdNET-Go runs as its own Home Assistant add-on. HA core reaches its API on the
 # internal add-on network directly (no auth needed there); the ingress path is HA's
 # own stable reverse-proxied route to the add-on's web UI, for a human "open it" link.
