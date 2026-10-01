@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .announced import AnnouncedVisits, new_visit_from_event, visit_id
 from .client import KestrelApiError, KestrelClient
 from .const import (
     BIRDNET_GO_INTERNAL_URL,
@@ -44,6 +45,8 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.connected = False
         self._seq = 0
         self._generation = 0
+        self.announced = AnnouncedVisits(hass, entry.entry_id)
+        self._announcements_ready = False
         self._camera_data: dict[str, dict[str, Any]] = {}
         self._camera_callbacks: set[CameraCallback] = set()
         self._poll_task: asyncio.Task[None] | None = None
@@ -114,6 +117,7 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except asyncio.CancelledError:
                 pass
             setattr(self, attr, None)
+        await self.announced.async_flush()
 
     @callback
     def async_register_camera_callback(self, add_cameras: CameraCallback) -> Callable[[], None]:
@@ -148,11 +152,37 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for add_cameras in tuple(self._camera_callbacks):
             add_cameras(cameras)
 
+    async def _async_prepare_announcements(self) -> None:
+        """Load the announced-visit memory before any event can reach an entity.
+
+        On the very first run there is no memory, yet the plugin still holds up to 500
+        past events and hands them all over on the first request. Those visits were never
+        announced by this code and must not be announced now: remember them as seen and
+        carry on from the plugin's current position.
+        """
+        if not await self.announced.async_load():
+            response = await self.client.async_request(
+                "GET", "events", params={"after": 0, "timeout": 0}
+            )
+            if not isinstance(response, dict):
+                raise KestrelApiError("Kestrel returned an invalid event response")
+            try:
+                self._seq = max(self._seq, int(response.get("seq", self._seq)))
+            except (TypeError, ValueError) as err:
+                raise KestrelApiError("Kestrel returned an invalid event sequence") from err
+            events = response.get("events", [])
+            if isinstance(events, list):
+                self.announced.record(_new_visit_ids(events))
+            await self.announced.async_save()
+        self._announcements_ready = True
+
     async def _async_poll_events(self) -> None:
         """Long-poll until HA unloads the integration; reconnect without losing events."""
         retry_delay = 1
         while True:
             try:
+                if not self._announcements_ready:
+                    await self._async_prepare_announcements()
                 response = await self.client.async_request(
                     "GET",
                     "events",
@@ -224,3 +254,14 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             resync=resync,
         )
         self.async_set_updated_data(current)
+
+
+def _new_visit_ids(events: list[Any]) -> list[str]:
+    """Ids of the visits that `visit_new` events in this batch announce."""
+    ids: list[str] = []
+    for event in events:
+        visit = new_visit_from_event(event) if isinstance(event, dict) else None
+        identifier = visit_id(visit) if visit is not None else None
+        if identifier is not None:
+            ids.append(identifier)
+    return ids

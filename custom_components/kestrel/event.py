@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .announced import new_visit_from_event, visit_id
 from .coordinator import KestrelCoordinator
 from .entity import camera_slug, device_info
 
@@ -41,7 +42,12 @@ async def async_setup_entry(
 
 
 class _KestrelEventBase(CoordinatorEntity[KestrelCoordinator], EventEntity):
-    """Keep event sensors available so connection loss remains diagnosable."""
+    """Keep event sensors available so connection loss remains diagnosable.
+
+    Only a plugin `visit_new` becomes a Home Assistant event, and only once per visit:
+    automations notify from these entities, so a clip finishing, a merge or a
+    correction (`visit_updated`) must never fire them again.
+    """
 
     _attr_has_entity_name = False
 
@@ -62,9 +68,14 @@ class _KestrelEventBase(CoordinatorEntity[KestrelCoordinator], EventEntity):
         events = data.get("events", [])
         return events if isinstance(events, list) else []
 
+    def _claim(self, visit: dict[str, Any]) -> bool:
+        """True only the first time this visit is announced, ever (even across restarts)."""
+        identifier = visit_id(visit)
+        return identifier is not None and self.coordinator.announced.claim(identifier)
+
 
 class KestrelAnimalEvent(_KestrelEventBase):
-    """A camera's latest animal visit as a Home Assistant event entity."""
+    """Fires once for each new animal visit seen by one camera."""
 
     _attr_translation_key = "animal"
     _attr_event_types = ["bird", "mammal", "unidentified"]
@@ -82,10 +93,12 @@ class KestrelAnimalEvent(_KestrelEventBase):
 
     def _handle_coordinator_update(self) -> None:
         for event in self._read_event_batch():
-            visit = _visit_from_event(event)
+            visit = new_visit_from_event(event)
             if visit is None or _visit_camera_id(visit) != self._camera_id:
                 continue
             if str(visit.get("kind", "seen")).lower() == "heard":
+                continue
+            if not self._claim(visit):
                 continue
             self._trigger_event(_event_type(visit), _event_attributes(visit, self._camera_name))
             self.async_write_ha_state()
@@ -93,7 +106,7 @@ class KestrelAnimalEvent(_KestrelEventBase):
 
 
 class KestrelHeardAnimalEvent(_KestrelEventBase):
-    """A BirdNET-linked heard-animal visit (bird, mammal, or other call)."""
+    """Fires once for each new BirdNET-linked heard-animal visit (bird, mammal, or other call)."""
 
     _attr_translation_key = "heard_animal"
     _attr_event_types = ["bird", "mammal", "other"]
@@ -108,25 +121,17 @@ class KestrelHeardAnimalEvent(_KestrelEventBase):
 
     def _handle_coordinator_update(self) -> None:
         for event in self._read_event_batch():
-            visit = _visit_from_event(event)
+            visit = new_visit_from_event(event)
             if visit is None or str(visit.get("kind", "")).lower() != "heard":
                 continue
             group = str(visit.get("grp", "")).lower()
             if group not in ("bird", "mammal", "other"):
                 continue
+            if not self._claim(visit):
+                continue
             self._trigger_event(group, _event_attributes(visit, _camera_name(visit)))
             self.async_write_ha_state()
         super()._handle_coordinator_update()
-
-
-def _visit_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
-    if event.get("type") not in ("visit_new", "visit_updated"):
-        return None
-    data = event.get("data")
-    if not isinstance(data, dict):
-        return None
-    visit = data.get("visit", data)
-    return visit if isinstance(visit, dict) else None
 
 
 def _visit_camera_id(visit: dict[str, Any]) -> str:

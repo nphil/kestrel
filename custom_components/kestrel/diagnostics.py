@@ -26,5 +26,6 @@ async def async_get_config_entry_diagnostics(
             "camera_count": len((coordinator.data or {}).get("cameras", [])),
             "event_sequence": coordinator._seq,
             "event_generation": coordinator._generation,
+            "announced_visits": len(coordinator.announced),
         },
     }

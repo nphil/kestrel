@@ -15,6 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
+from .announced import AnnouncedVisits
 from .client import KestrelClient
 from .const import (
     CONF_API_KEY,
@@ -111,6 +112,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
         if domain_data.pop("panel_registered", False):
             frontend.async_remove_panel(hass, PANEL_URL_PATH)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> None:
+    """Forget the announced-visit memory when the config entry is deleted."""
+    await AnnouncedVisits(hass, entry.entry_id).async_remove()
 
 
 async def async_remove_config_entry_device(

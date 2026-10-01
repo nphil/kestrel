@@ -106,7 +106,9 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    `other`), insects are ignored.
 5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
-   page is `/kestrel/visit?v=<visit_id>`.
+   page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first
+   created; later changes to that visit (its clip finishing, a correction, a merge)
+   never fire it again, not even after Home Assistant restarts.
 
 ## Privacy and footprint
 
