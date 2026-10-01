@@ -5,10 +5,10 @@ import type { Camera, Health, HomeAssistant, Settings, Species, Visit } from "..
 const now = Date.now();
 const media = "/dev/fixtures/placeholder.svg";
 const cameras: Camera[] = [
-  { id: 88, name: "Backyard", nvrCardId: 88, online: true, health: "ok", drops1h: 0, wildlife: true, lastDetection: { species: "Northern Cardinal", timestamp: now - 3_000 } },
-  { id: 103, name: "Back Door", nvrCardId: 103, online: true, health: "ok", drops1h: 1, wildlife: true, lastDetection: null },
-  { id: 104, name: "Front Door", nvrCardId: 104, online: true, health: "unstable", drops1h: 4, wildlife: true, lastDetection: { species: "Eastern Gray Squirrel", timestamp: now - 30_000 } },
-  { id: 105, name: "Plant Room", nvrCardId: 105, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: null },
+  { id: 88, name: "Backyard", nvrCardId: 88, online: true, health: "ok", drops1h: 0, wildlife: true, lastDetection: { species: "Northern Cardinal", at: now - 3_000, visitId: "fixture-visit-1", kind: "seen", grp: "bird" } },
+  { id: 103, name: "Back Door", nvrCardId: 103, online: true, health: "ok", drops1h: 1, wildlife: true, lastDetection: { species: "Blue Jay", at: now - 180_000, visitId: "fx-heard-blue-jay-0", kind: "heard", grp: "bird" } },
+  { id: 104, name: "Front Door", nvrCardId: 104, online: true, health: "unstable", drops1h: 4, wildlife: true, lastDetection: { species: "Eastern Gray Squirrel", at: now - 30_000, visitId: "fx-seen-eastern-gray-squirrel-0", kind: "seen", grp: "mammal" } },
+  { id: 105, name: "Plant Room", nvrCardId: 105, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: { species: "House Mouse", at: now - 30 * 3_600_000, visitId: "fx-seen-house-mouse-0", kind: "seen", grp: "mammal" } },
   { id: 106, name: "Bird", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: true, lastDetection: null },
   { id: 108, name: "Tool Room", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: null },
   { id: 128, name: "Office", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: null },
@@ -25,16 +25,43 @@ let visit = createVisit();
 let previousVisit: Visit | null = null;
 let settings: Settings = { mutedSpecies: [], heardNotify: "new_only" };
 const hours = Array.from({ length: 24 }, (_, hour) => hour >= 7 && hour <= 11 ? 3 : hour >= 17 && hour <= 20 ? 2 : 0);
+const iso = (ms: number): string => new Date(ms).toISOString();
 const species: Species[] = [
-  { species: "Northern Cardinal", grp: "bird", seen: true, heard: true, first: new Date(now - 2_000_000).toISOString(), last: new Date(now - 18_000).toISOString(), count30d: 12, hasPhoto: true, photo_url: media, cameras: { "88": 8, "104": 3, "103": 1 }, hours, newThisYear: true },
-  { species: "Eastern Gray Squirrel", grp: "mammal", seen: true, heard: false, first: new Date(now - 4_000_000).toISOString(), last: new Date(now - 30_000).toISOString(), count30d: 1, hasPhoto: true, photo_url: media, cameras: { "104": 5, "88": 2 }, hours: hours.map((n, i) => i < 8 ? n : 0), newThisYear: false },
-  { species: "Common Raccoon", grp: "mammal", seen: true, heard: true, first: new Date(now - 9_000_000).toISOString(), last: new Date(now - 86_000_000).toISOString(), count30d: 3, hasPhoto: false, referenceImage: media, cameras: { "88": 2, "103": 1 }, hours: hours.map((n, i) => i > 19 ? n + 2 : 0), newThisYear: false },
-  { species: "Eastern Screech-Owl", grp: "bird", seen: false, heard: true, first: new Date(now - 1_000_000).toISOString(), last: new Date(now - 500_000).toISOString(), count30d: 2, hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 20 ? 1 : 0), newThisYear: true },
-  { species: "Great Horned Owl", grp: "bird", seen: false, heard: true, first: new Date(now - 1_200_000).toISOString(), last: new Date(now - 600_000).toISOString(), count30d: 6, hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 19 ? 1 : 0), newThisYear: true },
+  { species: "Northern Cardinal", grp: "bird", seen: true, heard: true, first: iso(now - 2_000_000), last: iso(now - 18_000), count30d: 28, seenCount30d: 4, heardCount30d: 24, lastSeenAt: now - 18_000, lastHeardAt: now - 900_000, lastSeenCamera: "88", lastHeardCamera: "88", hasPhoto: true, photo_url: media, cameras: { "88": 8, "104": 3, "103": 1 }, hours, newThisYear: true },
+  { species: "Eastern Gray Squirrel", grp: "mammal", seen: true, heard: false, first: iso(now - 4_000_000), last: iso(now - 30_000), count30d: 5, seenCount30d: 5, heardCount30d: 0, lastSeenAt: now - 30_000, lastSeenCamera: "104", hasPhoto: true, photo_url: media, cameras: { "104": 5, "88": 2 }, hours: hours.map((n, i) => i < 8 ? n : 0), newThisYear: false },
+  { species: "Common Raccoon", grp: "mammal", seen: true, heard: true, first: iso(now - 9_000_000), last: iso(now - 86_000_000), count30d: 6, seenCount30d: 1, heardCount30d: 5, lastSeenAt: now - 86_000_000, lastHeardAt: now - 90_000_000, lastSeenCamera: "88", lastHeardCamera: "103", hasPhoto: false, referenceImage: media, cameras: { "88": 2, "103": 1 }, hours: hours.map((n, i) => i > 19 ? n + 2 : 0), newThisYear: false },
+  { species: "Eastern Screech-Owl", grp: "bird", seen: false, heard: true, first: iso(now - 1_000_000), last: iso(now - 500_000), count30d: 5, seenCount30d: 0, heardCount30d: 5, lastHeardAt: now - 500_000, lastHeardCamera: "103", hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 20 ? 1 : 0), newThisYear: true },
+  { species: "Great Horned Owl", grp: "bird", seen: false, heard: true, first: iso(now - 1_200_000), last: iso(now - 600_000), count30d: 8, seenCount30d: 0, heardCount30d: 8, lastHeardAt: now - 600_000, lastHeardCamera: "88", hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 19 ? 1 : 0), newThisYear: true },
+  { species: "Blue Jay", grp: "bird", seen: false, heard: true, first: iso(now - 3_000_000), last: iso(now - 180_000), count30d: 12, seenCount30d: 0, heardCount30d: 12, lastHeardAt: now - 180_000, lastHeardCamera: "103", hasPhoto: false, referenceImage: media, cameras: {}, hours, newThisYear: false },
+  { species: "Spring Peeper", grp: "other", seen: false, heard: true, first: iso(now - 5_000_000), last: iso(now - 7_200_000), count30d: 3, seenCount30d: 0, heardCount30d: 3, lastHeardAt: now - 7_200_000, lastHeardCamera: "88", hasPhoto: false, cameras: {}, hours: hours.map((n, i) => i > 20 ? 2 : 0), newThisYear: false },
+  { species: "House Mouse", grp: "mammal", seen: true, heard: false, first: iso(now - 40 * 3_600_000), last: iso(now - 30 * 3_600_000), count30d: 1, seenCount30d: 1, heardCount30d: 0, lastSeenAt: now - 30 * 3_600_000, lastSeenCamera: "105", hasPhoto: false, cameras: { "105": 1 }, hours: hours.map((n, i) => i === 2 ? 1 : 0), newThisYear: false },
 ];
+const slug = (name: string): string => name.toLowerCase().replace(/[^a-z]+/g, "-");
+/** Generated visits so the species sheet has something to page through. Newest first. */
+function generated(): Visit[] {
+  const out: Visit[] = [];
+  for (const item of species) {
+    const seen = item.seenCount30d ?? 0;
+    const heardCount = item.heardCount30d ?? 0;
+    for (let i = 0; i < seen; i += 1) {
+      if (item.species === "Northern Cardinal" && i === 0) continue; // the mutable visit stands in for this one
+      const at = Number(item.lastSeenAt) - i * 3_600_000;
+      out.push({ id: `fx-seen-${slug(item.species)}-${i}`, camera: { id: Number(item.lastSeenCamera ?? 88), name: cameras.find((camera) => String(camera.id) === String(item.lastSeenCamera))?.name ?? "Backyard" }, kind: "seen", startedAt: at, species: item.species, grp: item.grp, status: "auto", score: 0.88, snapshot: media, crop: media, clip: item.species === "Common Raccoon" ? { state: "none" } : { state: "ready", url: "/dev/fixtures/clip.mp4" }, heard: null, suggestions: [], firstEver: false, muted: false });
+    }
+    for (let i = 0; i < heardCount; i += 1) {
+      const at = Number(item.lastHeardAt) - i * 1_800_000;
+      out.push({ id: `fx-heard-${slug(item.species)}-${i}`, camera: { id: Number(item.lastHeardCamera ?? 88), name: cameras.find((camera) => String(camera.id) === String(item.lastHeardCamera))?.name ?? "Backyard" }, kind: "heard", startedAt: at, species: item.species, grp: item.grp, status: "auto", score: 0.55 + ((i * 7) % 40) / 100, snapshot: null, crop: null, clip: { state: "none" }, heard: null, audio: i === 3 ? null : "/dev/fixtures/call.mp3", ...(i % 3 === 0 ? { audioOriginal: "/dev/fixtures/call.mp3?original", audioInfo: { state: "ready", segment: { start: 3.2, end: 8.1 }, cleaned: true, method: "gate" } } : i % 3 === 1 ? { audioOriginal: "/dev/fixtures/call.mp3?original", audioInfo: { state: "ready", segment: { start: 1, end: 6.4 }, cleaned: false, method: "trim" } } : { audioInfo: { state: "pending" } }), suggestions: [], firstEver: false, muted: false });
+    }
+  }
+  return out;
+}
+const generatedVisits = generated();
+const startedMs = (item: Visit): number => typeof item.startedAt === "number" ? item.startedAt : Date.parse(item.startedAt);
 const health: Health = { detector: { name: "EVA Wildlife", provider: "ONNX", avgMs: 38, checksToday: 124 }, gpu: { usedMiB: 3900, totalMiB: 23040, util: 22 }, cameras: [{ id: 88, checksToday: 80, emptyChecksToday: 11, visitsToday: 4 }, { id: 103, checksToday: 26, emptyChecksToday: 5, visitsToday: 2 }, { id: 104, checksToday: 18, emptyChecksToday: 2, visitsToday: 1 }], storage: { dbMB: 41.4, mediaMB: 98.2, budgetMB: 300 }, birdnet: { online: true, lastHeardAt: new Date(now - 11 * 60_000).toISOString() }, corrections: { total: 18, sinceRetrain: 4 } };
 const subscribers = new Set<(message: { type: "event"; event: { type: "visit_new" | "visit_updated" | "camera"; data: unknown } }) => void>();
 let readyTimer: number | undefined;
+// Lets a test (or the fixture buttons) push an event the way the integration would.
+(window as unknown as { __emit: (event: { type: string; data: unknown }) => void }).__emit = (event) => { for (const callback of subscribers) callback({ type: "event", event: event as never }); };
 
 function readyClip(): void {
   visit = { ...visit, clip: { ...visit.clip, state: "ready", url: "/dev/fixtures/clip.mp4" } };
@@ -52,8 +79,18 @@ const fakeHass: HomeAssistant = {
     const type = String(message.type ?? "");
     let result: unknown;
     if (type === "kestrel/cameras") result = cameras;
-    else if (type === "kestrel/visits") result = { items: [visit], next: null };
-    else if (type === "kestrel/visit") result = message.visit_id === "fixture-heard-1" ? { ...visit, id: "fixture-heard-1", kind: "heard", species: "Common Raccoon", snapshot: null, crop: null, clip: { state: "none" }, audio: "/dev/fixtures/call.mp3", heard: null } : visit;
+    else if (type === "kestrel/visits") {
+      const wanted = typeof message.species === "string" ? message.species : null;
+      const kind = message.kind === "seen" || message.kind === "heard" ? message.kind : null;
+      const limit = Math.min(50, Math.max(1, Number(message.limit ?? 24)));
+      const before = message.before ? Number(message.before) : Infinity;
+      const all = [visit, ...generatedVisits].filter((item) => (!wanted || item.species === wanted) && (!kind || item.kind === kind) && startedMs(item) < before).sort((x, y) => startedMs(y) - startedMs(x));
+      const items = all.slice(0, limit);
+      result = { items, next: all.length > limit ? startedMs(items[items.length - 1]) : null };
+    }
+    else if (type === "kestrel/visit" && generatedVisits.some((item) => item.id === message.visit_id)) result = generatedVisits.find((item) => item.id === message.visit_id);
+    else if (type === "kestrel/visit" && message.visit_id !== visit.id && message.visit_id !== "fixture-heard-1" && !generatedVisits.some((item) => item.id === message.visit_id)) throw Object.assign(new Error("Not found"), { code: "not_found" });
+    else if (type === "kestrel/visit") result = message.visit_id === "fixture-heard-1" ? { ...visit, id: "fixture-heard-1", kind: "heard", species: "Common Raccoon", snapshot: null, crop: null, clip: { state: "none" }, audio: "/dev/fixtures/call.mp3", audioOriginal: "/dev/fixtures/call.mp3?original", audioInfo: { state: "ready", segment: { start: 3.2, end: 8.1 }, cleaned: true, method: "gate" }, heard: null } : visit;
     else if (type === "kestrel/visit/correct") {
       previousVisit = visit;
       const target = String(message.species ?? "unknown");

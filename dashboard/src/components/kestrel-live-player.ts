@@ -1,6 +1,5 @@
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { captureFrame, frameFor, noteRatio, pictureSize, ratioFor, type PictureSource } from "../live-frames.ts";
-import { TOKENS_CSS } from "../styles/tokens.ts";
 import type { HomeAssistant } from "../types.ts";
 
 type Card = HTMLElement & { hass?: HomeAssistant; setConfig?: (config: Record<string, unknown>) => void };
@@ -26,9 +25,33 @@ const DEFAULT_RATIO = 16 / 9;
 // connected (a quick tap, a tile scrolling away). Nothing is wrong, so keep that one expected
 // rejection out of the console instead of reporting it as a page error.
 window.addEventListener("unhandledrejection", (event) => {
-  const reason: unknown = event.reason;
-  if (reason instanceof Error && reason.message === "closed" && reason.stack?.includes("@scrypted/nvr")) event.preventDefault();
+  const reason = event.reason as { message?: unknown } | null;
+  if (reason && typeof reason === "object" && reason.message === "closed") event.preventDefault();
 });
+
+/** How long a tile that has left the screen keeps streaming before it stops. */
+const LEAVE_MS = 2000;
+
+/** Cards start one at a time, a short gap apart. Creating a Scrypted card takes real time; four at once
+ * would hold the page still for a fifth of a second, and a tab switch or a scroll must stay smooth. */
+const MOUNT_GAP_MS = 90;
+const mountQueue: Array<() => boolean> = [];
+let mountTimer: number | undefined;
+
+function drainMounts(): void {
+  mountTimer = undefined;
+  while (mountQueue.length) {
+    const mounted = mountQueue.shift()?.();
+    if (mounted) break; // one real mount per turn
+  }
+  if (mountQueue.length) mountTimer = window.setTimeout(drainMounts, MOUNT_GAP_MS);
+}
+
+/** Queues a mount; it runs after the next paint. The task returns true when it actually created a card. */
+function queueMount(task: () => boolean): void {
+  mountQueue.push(task);
+  if (mountTimer === undefined) mountTimer = window.setTimeout(() => window.requestAnimationFrame(() => window.setTimeout(drainMounts, 0)), 0);
+}
 
 // One observer serves every tile: tiles near the screen play, tiles far away stop.
 const watchers = new WeakMap<Element, (visible: boolean) => void>();
@@ -76,6 +99,7 @@ export class KestrelLivePlayer extends LitElement {
     label: { type: String },
     mode: { type: String, reflect: true },
     live: { type: Boolean },
+    paused: { type: Boolean },
     scryptedUrl: { type: String },
     phase: { type: String, reflect: true },
     _poster: { state: true },
@@ -86,6 +110,8 @@ export class KestrelLivePlayer extends LitElement {
   declare label: string;
   declare mode: "tile" | "focus";
   declare live: boolean;
+  /** The view this player is in is out of sight: stop the cards (keeping the last picture), start again when cleared. */
+  declare paused: boolean;
   declare scryptedUrl: string;
   declare phase: Phase;
   declare _poster: boolean;
@@ -106,6 +132,8 @@ export class KestrelLivePlayer extends LitElement {
   private _timer?: number;
   private _startedAt = 0;
   private _ratio = 0;
+  private _pauseTimer?: number;
+  private _leaveTimer?: number;
 
   constructor() {
     super();
@@ -114,6 +142,7 @@ export class KestrelLivePlayer extends LitElement {
     this.label = "";
     this.mode = "tile";
     this.live = true;
+    this.paused = false;
     this.scryptedUrl = "";
     this.phase = "idle";
     this._poster = false;
@@ -141,6 +170,8 @@ export class KestrelLivePlayer extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener("visibilitychange", this._sync);
+    window.clearTimeout(this._pauseTimer);
+    window.clearTimeout(this._leaveTimer);
     unwatch(this);
     this._stop(true);
     this._releasePoster();
@@ -158,6 +189,13 @@ export class KestrelLivePlayer extends LitElement {
 
   protected updated(changed: PropertyValues<this>): void {
     if (!this._seen) { this._seen = true; return; }
+    if (changed.has("paused") && !changed.has("cameraId") && !changed.has("nvrCardId") && !changed.has("live")) {
+      window.clearTimeout(this._pauseTimer);
+      // Tearing down a dozen cards in one task would stall the page, so each pauses at its own moment.
+      if (this.paused) this._pauseTimer = window.setTimeout(this._sync, Math.random() * 700);
+      else this._sync();
+      return;
+    }
     if (!changed.has("cameraId") && !changed.has("nvrCardId") && !changed.has("live")) return;
     const previous = changed.get("cameraId") as string | undefined;
     const switched = previous !== undefined && previous !== this.cameraId;
@@ -171,12 +209,18 @@ export class KestrelLivePlayer extends LitElement {
       this._inView = true;
       this._sync();
     } else {
-      watch(this, (visible) => { this._inView = visible; this._sync(); });
+      watch(this, (visible) => {
+        window.clearTimeout(this._leaveTimer);
+        if (visible) { this._inView = true; this._sync(); return; }
+        // Out of sight: keep going briefly, so flipping tabs or a small scroll doesn't restart the stream, and
+        // stop each tile at its own moment rather than all of them in one task.
+        this._leaveTimer = window.setTimeout(() => { this._inView = false; this._sync(); }, LEAVE_MS + Math.random() * 700);
+      });
     }
   }
 
   private _sync = (): void => {
-    if (this._inView && document.visibilityState !== "hidden") this._start();
+    if (this._inView && !this.paused && document.visibilityState !== "hidden") this._start();
     else this._stop(true);
   };
 
@@ -186,7 +230,13 @@ export class KestrelLivePlayer extends LitElement {
     const epoch = ++this._epoch;
     this._startedAt = performance.now();
     this.phase = "connecting";
-    void customElements.whenDefined("scrypted-nvr-camera").then(() => { if (epoch === this._epoch) this._mount(); });
+    // A tile starts after the next paint, so coming back to a view shows it before the cards go to work;
+    // the focused view is what the user just asked for and starts at once.
+    void customElements.whenDefined("scrypted-nvr-camera").then(() => {
+      if (epoch !== this._epoch) return;
+      if (this.mode === "focus") this._mount();
+      else queueMount(() => { if (epoch !== this._epoch) return false; this._mount(); return true; });
+    });
     this._schedule(POLL_MS);
   }
 
@@ -334,7 +384,7 @@ export class KestrelLivePlayer extends LitElement {
     this._sync();
   }
 
-  static styles = [TOKENS_CSS, css`
+  static styles = [css`
     :host { position: relative; display: block; overflow: hidden; background: var(--lu-tile); }
     :host([mode="focus"]) { width: min(100%, calc(min(70vh, 880px) * var(--ratio, 1.7778))); aspect-ratio: var(--ratio, 1.7778); margin-inline: auto; border-radius: var(--lu-radius-card); }
     .layer, .stage, .slot { position: absolute; inset: 0; }
@@ -346,10 +396,10 @@ export class KestrelLivePlayer extends LitElement {
     .slot.shown { opacity: 1; }
     :host([phase="live"]) .backdrop { visibility: hidden; transition: visibility 0s linear var(--lu-motion-layer); }
     :host([phase="failed"]) canvas { opacity: .4; filter: grayscale(1); }
-    .chip { position: absolute; left: var(--lu-space-2); bottom: var(--lu-space-2); display: inline-flex; min-height: 28px; align-items: center; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-card); font-size: var(--lu-type-caption); pointer-events: none; }
+    .chip { position: absolute; left: var(--lu-space-2); bottom: var(--lu-space-2); display: inline-flex; min-height: 28px; align-items: center; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-reading); font-size: var(--lu-type-caption); pointer-events: none; }
     .hint { position: absolute; inset: 0; display: grid; place-items: center; color: var(--lu-ink-3); font-size: var(--lu-type-caption); pointer-events: none; }
-    .failure { position: absolute; inset: 0; display: grid; align-content: center; justify-items: center; gap: var(--lu-space-3); padding: var(--lu-space-5); color: var(--lu-ink-2); background: color-mix(in srgb, var(--lu-card) 72%, transparent); text-align: center; }
-    .failure ha-icon { width: 32px; height: 32px; color: var(--lu-ink-3); }
+    .failure { position: absolute; inset: 0; display: grid; align-content: center; justify-items: center; gap: var(--lu-space-3); padding: var(--lu-space-5); color: var(--lu-ink-2); background: var(--lu-reading); text-align: center; }
+    .failure ha-icon { --mdc-icon-size: 32px; width: 32px; height: 32px; color: var(--lu-ink-3); }
     .failure strong { color: var(--lu-ink); font-size: var(--lu-type-title); font-weight: 600; }
     .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--lu-space-2); }
     .action { display: inline-flex; min-height: var(--lu-target); align-items: center; justify-content: center; padding: 0 var(--lu-space-5); border: 1px solid var(--lu-edge-raised); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-glass-raised); box-shadow: var(--lu-highlight-rest); font: 600 var(--lu-type-label) var(--lu-font); text-decoration: none; cursor: pointer; }

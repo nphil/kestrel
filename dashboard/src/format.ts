@@ -21,16 +21,36 @@ export function dateTime(value: string | number | null | undefined): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(ms);
 }
 
+/** "Just now", "3 min ago", "2 h ago", "5 d ago". */
 export function ago(value: string | number | null | undefined, now = Date.now()): string {
   const ms = timestamp(value);
   if (ms === null) return "Time unavailable";
   const seconds = Math.max(0, Math.round((now - ms) / 1000));
   if (seconds < 60) return "Just now";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+/** How long ago something happened, for the middle of a sentence: "just now", "3 min ago", "4:45 AM",
+ * "yesterday 4:45 PM", "Mon 4:45 PM", then a date. Start a sentence with `sentence(when(...))`. */
+export function when(value: string | number | null | undefined, now = Date.now()): string {
+  const ms = timestamp(value);
+  if (ms === null) return "time unknown";
+  if (now - ms < 3_600_000) return ago(ms, now).toLowerCase();
+  const startOfDay = (time: number): number => new Date(time).setHours(0, 0, 0, 0);
+  const days = Math.round((startOfDay(now) - startOfDay(ms)) / 86_400_000);
+  const clock = clockTime(ms);
+  if (days <= 0) return clock;
+  if (days === 1) return `yesterday ${clock}`;
+  if (days < 7) return `${new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(ms)} ${clock}`;
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(ms);
+}
+
+export function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 export function formatMiB(value: number): string {
