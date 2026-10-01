@@ -12,10 +12,13 @@ Detections of one animal at one moment are one visit, whatever each detection is
 
 Corrections can be undone. Undo removes the matching learning example and recomputes the best photo for each affected species.
 
-`GET events?after=<seq>&timeout=<seconds>` is a long poll: `timeout` is in seconds, clamped to 0-25 (missing or unparseable means 25), and the request returns as soon as an event is available. At most 100 requests can wait at once.
+`GET events?after=<seq>&timeout=<seconds>` is a long poll: `timeout` is in seconds, clamped to 0-25 (missing or unparseable means 25), and the request returns as soon as an event is available. At most 100 requests can wait at once. Events are `visit_new`, `visit_updated`, `visit_deleted` and `camera`:
+
+- `visit_deleted` (`{ "id": "<visit id>" }`) is sent for every visit row that is removed, so open dashboards can drop it: the split-visit repair, the duplicate and insect clean-ups, and the three-year retention prune. The row is already gone when the event is published.
+- `camera` carries the same list as `GET cameras`. Cameras are re-checked every 30 seconds, but the event is published only when the list differs from the one last published: at start-up, and then when a camera goes offline or comes back, its health or dropped-connection count changes, its name or wildlife flag changes, or its latest visit changes (a new visit, a merge that changes its species, a removed visit). An idle plugin publishes nothing.
 
 ## Local checks
 
-Run `npm run build`, `npm run test:store`, `npm run test:seen` and `npm run test:learning` from this directory.
+Run `npm run build`, `npm run test:store`, `npm run test:seen`, `npm run test:events` and `npm run test:learning` from this directory.
 
 Per-camera detector checks are stored in SQLite by America/New_York calendar day; visit totals are counted from persisted visits in that same day window. Daily check rows older than 30 days are pruned.

@@ -71,7 +71,7 @@ export interface VisitFilters {
 
 export interface EventItem {
     seq: number;
-    type: 'visit_new' | 'visit_updated' | 'camera';
+    type: 'visit_new' | 'visit_updated' | 'visit_deleted' | 'camera';
     data: unknown;
 }
 export interface EventsResponse {
@@ -171,6 +171,11 @@ export class KestrelStore {
     private readonly dbPath: string;
     private readonly recordDetectorCheckStatement: StatementSync;
     private readonly recordBirdnetIgnoredStatement: StatementSync;
+
+    // Told the ids of visit rows right after they are removed (one call per removal, never with an
+    // empty list). main.ts turns it into `visit_deleted` events so open dashboards drop them. It
+    // runs in the middle of the removing operation, so it must not throw.
+    onVisitsDeleted?: (ids: string[]) => void;
 
     constructor(path: string) {
         this.dbPath = path;
@@ -421,11 +426,7 @@ export class KestrelStore {
             }
             clusterStart = i;
         }
-        let removed = 0;
-        if (toDelete.length) {
-            const deleteOne = this.db.prepare('DELETE FROM visits WHERE id=?');
-            for (const id of toDelete) removed += Number(deleteOne.run(id).changes);
-        }
+        const removed = this.removeVisits(toDelete).length;
         this.recomputeFirstEver();
         return { removed };
     }
@@ -454,16 +455,14 @@ export class KestrelStore {
         const rows = this.db.prepare("SELECT id, species, grp FROM visits WHERE kind='heard'").all() as { id: string; species: string; grp: VisitGroup }[];
         const correctedIds = new Set((this.db.prepare('SELECT visit_id FROM corrections').all() as { visit_id: string }[]).map(r => r.visit_id));
         const updateGrp = this.db.prepare('UPDATE visits SET grp=? WHERE id=?');
-        const deleteVisit = this.db.prepare('DELETE FROM visits WHERE id=?');
+        const dropIds: string[] = [];
         let regrouped = 0;
-        let dropped = 0;
         for (const row of rows) {
             const resolved = knownNonBird[row.species.toLowerCase()];
             if (!resolved) continue;
             if (resolved === 'drop') {
                 if (correctedIds.has(row.id)) continue;
-                deleteVisit.run(row.id);
-                dropped++;
+                dropIds.push(row.id);
                 continue;
             }
             if (resolved !== row.grp) {
@@ -471,6 +470,7 @@ export class KestrelStore {
                 regrouped++;
             }
         }
+        const dropped = this.removeVisits(dropIds).length;
         this.recomputeFirstEver();
         return { regrouped, dropped };
     }
@@ -519,8 +519,18 @@ export class KestrelStore {
 
     // Removes a visit row and demotes/replaces any best-photo entry that pointed at it.
     deleteVisitRow(visitId: string): void {
-        this.db.prepare('DELETE FROM visits WHERE id=?').run(visitId);
+        this.removeVisits([visitId]);
         this.refreshSpeciesBestForVisit(visitId);
+    }
+
+    // The only place visit rows are deleted, so that every removal -- split-visit repair, duplicate
+    // cleanup, regrouping, retention -- reaches onVisitsDeleted and a future delete cannot forget to.
+    // Returns the ids that really were removed (an unknown id is skipped and not announced).
+    private removeVisits(ids: readonly string[]): string[] {
+        const deleteOne = this.db.prepare('DELETE FROM visits WHERE id=?');
+        const removed = ids.filter(id => Number(deleteOne.run(id).changes) > 0);
+        if (removed.length) this.onVisitsDeleted?.(removed);
+        return removed;
     }
 
     private recomputeFirstEverForSpecies(species: string): void {
@@ -824,7 +834,8 @@ export class KestrelStore {
                 }
             }
         }
-        this.db.prepare('DELETE FROM visits WHERE started_at<?').run(now - VISIT_RETENTION_MS);
+        const expired = (this.db.prepare('SELECT id FROM visits WHERE started_at<?').all(now - VISIT_RETENTION_MS) as { id: string }[]).map(row => row.id);
+        this.removeVisits(expired);
         const correctionCrops = this.db.prepare('SELECT id,visit_id,crop_file FROM corrections WHERE crop_file IS NOT NULL ORDER BY at DESC')
             .all() as { id: number; visit_id: string; crop_file: string }[];
         for (const correction of correctionCrops.slice(MAX_CORRECTION_CROPS)) {

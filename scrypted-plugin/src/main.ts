@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, SettingValue, VideoClip, VideoClips } from '@scrypted/sdk';
 import { ScryptedDeviceBase, ScryptedInterface } from '@scrypted/sdk';
 import mqtt, { type MqttClient } from 'mqtt';
+import { ChangeGate } from './changes';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
 import { parseLongPollTimeoutMs } from './longpoll';
@@ -222,6 +223,9 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     // animal commit one after the other instead of both creating a visit.
     private sameMoment = new SameMomentTracker();
     private cameraQueue = new KeyedQueue();
+    // The camera list as it was when it was last published: the 30 s refresh only publishes a `camera`
+    // event when the list now differs (online, health, drops, latest sighting, names).
+    private cameraGate = new ChangeGate();
     private onlineListeners = new Map<string, { removeListener(): void }>();
     private cameraRuntime = new Map<string, CameraRuntime>();
     private eventWaiters = new Set<() => void>();
@@ -244,6 +248,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         await mkdir(this.baseDir, { recursive: true });
         this.mediaDirs = await ensureMediaDirectories(this.baseDir);
         this.store = new KestrelStore(this.databasePath);
+        this.store.onVisitsDeleted = ids => this.announceDeletedVisits(ids);
         if (!this.store.getSetting('apiKey')) this.store.setSetting('apiKey', randomBytes(32).toString('hex'));
         if (!this.store.getSetting(CAMERA_SETTING)) this.store.setSetting(CAMERA_SETTING, JSON.stringify(DEFAULT_CAMERAS));
         if (!this.store.getSetting('cooldownMinutes')) this.store.setSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES));
@@ -271,6 +276,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 if (kept) this.publishEvent('visit_updated', kept);
             }
             this.store.setSetting('splitSeenVisitRepairedAtV1', String(Date.now()));
+        } else if (!this.store.getSetting('splitSeenVisitRemovalAnnouncedAtV1')) {
+            // That repair ran before visit_deleted existed, so the removal of the squirrel visit was never
+            // announced. Tell any dashboard that is still holding it, once.
+            if (!this.store.getVisit(SPLIT_RACCOON_DROP_ID)) this.announceDeletedVisits([SPLIT_RACCOON_DROP_ID]);
+            this.store.setSetting('splitSeenVisitRemovalAnnouncedAtV1', String(Date.now()));
         }
         await this.copyBrokerCredentials();
         await this.reconfigure();
@@ -348,7 +358,6 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         }
         this.cameras = cameras;
         await this.refreshCameraStatus();
-        this.publishEvent('camera', await this.cameraList());
     }
 
     private allVideoCameras(): Map<string, { id: string; name: string; nvrCardId: string | null }> {
@@ -626,14 +635,13 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         return items;
     }
 
+    // Re-reads every camera's state (a camera going offline, a dropped connection) and tells listeners
+    // only if the camera list now differs from the one they were last sent. Home Assistant and the
+    // dashboards re-read the list on every `camera` event, so a heartbeat with nothing new only costs them work.
     private async refreshCameraStatus(): Promise<void> {
-        const statuses: unknown[] = [];
-        for (const camera of this.allVideoCameras().values()) {
-            this.handleOnlineChange(camera.id);
-            const runtime = this.runtime(camera.id);
-            statuses.push({ id: camera.id, online: runtime.wasOnline !== false, health: this.cameraHealth(camera.id, runtime.wasOnline !== false) });
-        }
-        this.publishEvent('camera', statuses);
+        for (const camera of this.allVideoCameras().values()) this.handleOnlineChange(camera.id);
+        const cameras = await this.cameraList();
+        if (this.cameraGate.changed(cameras)) this.publishEvent('camera', cameras);
     }
 
     private connectBirdnet(): void {
@@ -959,6 +967,16 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         for (const wake of this.eventWaiters) wake();
     }
 
+    // A visit row was removed (split-visit repair, duplicate cleanup, regrouping, retention): tell the
+    // open dashboards so they drop it. The store calls this in the middle of the removal, so it must not throw.
+    private announceDeletedVisits(ids: string[]): void {
+        try {
+            for (const id of ids) this.publishEvent('visit_deleted', { id });
+        } catch (error) {
+            this.console.warn(`Could not announce ${ids.length} deleted visit(s): ${String(error)}`);
+        }
+    }
+
     // `timeoutMs` is how long to hold the request open when nothing is pending (callers pass
     // parseLongPollTimeoutMs, already clamped to 0..25 s). Pending events return immediately.
     private async waitForEvents(after: number, timeoutMs: number): Promise<EventsResponse> {
@@ -1146,7 +1164,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
 
     private startTimers(): void {
         this.clipTimer = setInterval(() => { void this.pollClips().catch(error => this.console.warn(`Clip maintenance failed: ${String(error)}`)); }, CLIP_POLL_MS);
-        this.healthTimer = setInterval(() => { void this.refreshCameraStatus(); }, 30_000);
+        this.healthTimer = setInterval(() => { void this.refreshCameraStatus().catch(error => this.console.warn(`Camera status refresh failed: ${String(error)}`)); }, 30_000);
         this.scheduleMaintenance();
     }
 
