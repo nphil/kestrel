@@ -1,0 +1,327 @@
+{
+  "_doc": "Regions are polygons of normalised [x,y] (0-1 of the saved frame). The polygon is where the animal's FEET (bottom centre of the cut-out) may land. u_top/u_bot = how many full-resolution pixels a 50 cm long animal measures at the polygon's top-most / bottom-most y (linear in between): this is what keeps the size consistent with perspective (smaller higher in the frame for ground animals). kind: air = flying animal (cut-outs with pose 'fly' only, no shadow), ground (gets a contact shadow) or perch (rail / ledge / feeder). weights: relative chance of birds / mammals. max_cm/min_cm: biggest / smallest animal (body length) that fits. occlude: 'bars' = redraw thin vertical bars (deck balusters) of the real frame over the animal.",
+  "buckets": [[10, 32], [32, 64], [64, 128], [128, 256], [256, 700]],
+  "bucket_names": ["<32", "32-64", "64-128", "128-256", ">=256"],
+  "bucket_weights": [1, 1.5, 1.5, 1.5, 1],
+  "slack": 1.35,
+  "body_cm": {
+    "Northern Cardinal": 22,
+    "American Robin": 25,
+    "Red-shouldered Hawk": 48,
+    "Canada Goose": 95,
+    "Eastern Bluebird": 17,
+    "Great Blue Heron": 120,
+    "Carolina Wren": 13,
+    "Eastern Phoebe": 16,
+    "Northern Mockingbird": 25,
+    "Mallard": 58,
+    "Red-tailed Hawk": 55,
+    "Brown Thrasher": 29,
+    "House Finch": 14,
+    "Eastern Towhee": 20,
+    "Chipping Sparrow": 13,
+    "Barred Owl": 50,
+    "Song Sparrow": 15,
+    "Downy Woodpecker": 16,
+    "Tufted Titmouse": 16,
+    "Mourning Dove": 30,
+    "American Goldfinch": 12,
+    "Red-bellied Woodpecker": 24,
+    "Ruby-throated Hummingbird": 9,
+    "Blue Jay": 28,
+    "White-breasted Nuthatch": 14,
+    "Carolina Chickadee": 12,
+    "Pine Warbler": 13,
+    "Yellow-rumped Warbler": 13,
+    "Brown-headed Nuthatch": 11,
+    "Red-winged Blackbird": 22,
+    "House Sparrow": 15,
+    "Gray Catbird": 22,
+    "Black Vulture": 62,
+    "White-throated Sparrow": 17,
+    "Brown-headed Cowbird": 19,
+    "Turkey Vulture": 70,
+    "Hermit Thrush": 17,
+    "Pileated Woodpecker": 45,
+    "Cedar Waxwing": 17,
+    "Red-headed Woodpecker": 22,
+    "Great Egret": 95,
+    "Green Heron": 45,
+    "Yellow-bellied Sapsucker": 20,
+    "Palm Warbler": 13,
+    "Killdeer": 25,
+    "Wild Turkey": 100,
+    "Yellow-crowned Night-Heron": 60,
+    "American Crow": 45,
+    "European Starling": 21,
+    "Blue-gray Gnatcatcher": 11,
+    "Northern Flicker": 31,
+    "Indigo Bunting": 13,
+    "Common Grackle": 30,
+    "Rose-breasted Grosbeak": 20,
+    "Dark-eyed Junco": 15,
+    "Swamp Sparrow": 15,
+    "Belted Kingfisher": 30,
+    "Northern Rough-winged Swallow": 13,
+    "Eastern Gray Squirrel": 45,
+    "White-tailed Deer": 160,
+    "Eastern Chipmunk": 22,
+    "Domestic Cat": 50,
+    "Eastern Cottontail": 40,
+    "Common Raccoon": 70,
+    "Virginia Opossum": 65,
+    "Coyote": 110,
+    "American Beaver": 90,
+    "Red Fox": 90,
+    "Northern River Otter": 100,
+    "Northern Short-tailed Shrew": 11,
+    "Gray Fox": 85,
+    "Woodchuck": 55,
+    "Muskrat": 55,
+    "Swamp Rabbit": 48,
+    "Norway Rat": 35,
+    "Eastern Mole": 15,
+    "Eastern Red Bat": 12,
+    "Southern Flying Squirrel": 22,
+    "Domestic Dog": 65,
+    "Striped Skunk": 60,
+    "Bobcat": 85,
+    "Fox Squirrel": 50
+  },
+  "not_on_ground": ["Ruby-throated Hummingbird", "Northern Rough-winged Swallow", "Belted Kingfisher", "Eastern Red Bat", "Pileated Woodpecker", "Downy Woodpecker", "Red-bellied Woodpecker", "Red-headed Woodpecker", "Yellow-bellied Sapsucker", "Brown-headed Nuthatch", "White-breasted Nuthatch", "Blue-gray Gnatcatcher", "Green Heron", "Great Blue Heron", "Yellow-crowned Night-Heron", "Great Egret", "Barred Owl"],
+  "cameras": {
+    "106": {
+      "camera_look": {"blur_sigma": 1.7, "jpeg_q": 55, "noise_gain": 1.0},
+      "exclude": [],
+      "regions": [
+        {
+          "name": "feeder_tray",
+          "kind": "perch",
+          "poly": [[0.83, 0.865], [0.995, 0.865], [0.995, 0.985], [0.83, 0.985]],
+          "u_top": 700,
+          "u_bot": 1000,
+          "weights": {"bird": 1.0, "mammal": 0.12},
+          "max_cm": 32
+        },
+        {
+          "name": "feeder_top",
+          "kind": "perch",
+          "poly": [[0.86, 0.6], [0.995, 0.595], [0.995, 0.625], [0.86, 0.63]],
+          "u_top": 450,
+          "u_bot": 520,
+          "weights": {"bird": 0.5, "mammal": 0.0},
+          "max_cm": 30
+        },
+        {
+          "name": "yard_mulch",
+          "kind": "ground",
+          "poly": [[0.13, 0.66], [0.265, 0.66], [0.275, 0.97], [0.2, 0.97], [0.2, 0.8], [0.13, 0.8]],
+          "u_top": 60,
+          "u_bot": 190,
+          "weights": {"bird": 0.5, "mammal": 1.0}
+        },
+        {
+          "name": "road_far",
+          "kind": "ground",
+          "poly": [[0.0, 0.585], [0.29, 0.585], [0.29, 0.64], [0.0, 0.64]],
+          "u_top": 22,
+          "u_bot": 45,
+          "weights": {"bird": 0.6, "mammal": 1.0}
+        },
+        {
+          "name": "air_canopy",
+          "kind": "air",
+          "poly": [[0.0, 0.02], [0.95, 0.02], [0.95, 0.36], [0.0, 0.36]],
+          "u_top": 30,
+          "u_bot": 90,
+          "weights": {"bird": 0.5, "mammal": 0.05}
+        }
+      ]
+    },
+    "103": {
+      "camera_look": {"blur_sigma": 1.4, "jpeg_q": 65, "noise_gain": 1.0},
+      "exclude": [[0.64, 0.955, 0.99, 1.0]],
+      "regions": [
+        {
+          "name": "deck_floor",
+          "kind": "ground",
+          "poly": [[0.46, 0.905], [0.58, 0.915], [0.62, 0.935], [0.64, 0.97], [0.6, 1.0], [0.46, 1.0]],
+          "u_top": 300,
+          "u_bot": 400,
+          "weights": {"bird": 0.35, "mammal": 1.0}
+        },
+        {
+          "name": "rail_top_back",
+          "kind": "perch",
+          "poly": [[0.345, 0.6], [0.733, 0.587], [0.733, 0.599], [0.345, 0.611]],
+          "u_top": 185,
+          "u_bot": 195,
+          "weights": {"bird": 1.0, "mammal": 0.25},
+          "max_cm": 50
+        },
+        {
+          "name": "rail_top_right",
+          "kind": "perch",
+          "poly": [[0.745, 0.592], [0.94, 0.636], [0.94, 0.648], [0.745, 0.604]],
+          "u_top": 195,
+          "u_bot": 260,
+          "weights": {"bird": 0.8, "mammal": 0.2},
+          "max_cm": 50
+        },
+        {
+          "name": "yard_beyond_rail",
+          "kind": "ground",
+          "poly": [[0.63, 0.705], [0.727, 0.7], [0.727, 0.765], [0.63, 0.77]],
+          "u_top": 95,
+          "u_bot": 125,
+          "weights": {"bird": 0.3, "mammal": 1.0},
+          "occlude": "bars",
+          "bars_box": [0.3, 0.6, 0.74, 0.9],
+          "max_px": 130
+        },
+        {
+          "name": "air_canopy",
+          "kind": "air",
+          "poly": [[0.05, 0.05], [0.95, 0.05], [0.95, 0.5], [0.05, 0.5]],
+          "u_top": 30,
+          "u_bot": 90,
+          "weights": {"bird": 0.5, "mammal": 0.05}
+        }
+      ]
+    },
+    "104": {
+      "camera_look": {"blur_sigma": 1.4, "jpeg_q": 65, "noise_gain": 1.0},
+      "exclude": [[0.53, 0.972, 0.98, 1.0], [0.575, 0.18, 0.7, 0.96]],
+      "regions": [
+        {
+          "name": "walkway",
+          "kind": "ground",
+          "poly": [[0.068, 0.622], [0.196, 0.629], [0.323, 0.7], [0.476, 0.778], [0.574, 0.848], [0.561, 0.893], [0.357, 0.883], [0.264, 0.829], [0.128, 0.74], [0.085, 0.676]],
+          "u_top": 75,
+          "u_bot": 235,
+          "weights": {"bird": 0.4, "mammal": 1.0}
+        },
+        {
+          "name": "mulch_lawn",
+          "kind": "ground",
+          "poly": [[0.28, 0.595], [0.61, 0.6], [0.61, 0.795], [0.544, 0.79], [0.44, 0.745], [0.34, 0.68]],
+          "u_top": 55,
+          "u_bot": 190,
+          "weights": {"bird": 0.4, "mammal": 1.0}
+        },
+        {
+          "name": "mulch_right",
+          "kind": "ground",
+          "poly": [[0.75, 0.848], [1.0, 0.815], [1.0, 0.975], [0.77, 0.955]],
+          "u_top": 200,
+          "u_bot": 330,
+          "weights": {"bird": 0.3, "mammal": 1.0}
+        },
+        {
+          "name": "porch_steps",
+          "kind": "ground",
+          "poly": [[0.23, 0.895], [0.59, 0.9], [0.608, 0.957], [0.15, 0.957]],
+          "u_top": 270,
+          "u_bot": 340,
+          "weights": {"bird": 0.3, "mammal": 1.0}
+        },
+        {
+          "name": "road_far",
+          "kind": "ground",
+          "poly": [[0.06, 0.567], [0.73, 0.595], [0.73, 0.615], [0.06, 0.6]],
+          "u_top": 30,
+          "u_bot": 45,
+          "weights": {"bird": 0.3, "mammal": 1.0}
+        },
+        {
+          "name": "far_hillside",
+          "kind": "ground",
+          "poly": [[0.07, 0.517], [0.43, 0.52], [0.43, 0.563], [0.07, 0.563]],
+          "u_top": 10,
+          "u_bot": 18,
+          "weights": {"bird": 0.2, "mammal": 1.0}
+        },
+        {
+          "name": "porch_rail_left",
+          "kind": "perch",
+          "poly": [[0.043, 0.727], [0.19, 0.757], [0.19, 0.77], [0.043, 0.74]],
+          "u_top": 300,
+          "u_bot": 340,
+          "weights": {"bird": 1.0, "mammal": 0.2},
+          "max_cm": 50
+        },
+        {
+          "name": "air_sky_right",
+          "kind": "air",
+          "poly": [[0.62, 0.1], [1.0, 0.1], [1.0, 0.36], [0.62, 0.36]],
+          "u_top": 25,
+          "u_bot": 70,
+          "weights": {"bird": 0.5, "mammal": 0.05}
+        },
+        {
+          "name": "air_tree_line",
+          "kind": "air",
+          "poly": [[0.08, 0.33], [0.58, 0.33], [0.58, 0.5], [0.08, 0.5]],
+          "u_top": 25,
+          "u_bot": 60,
+          "weights": {"bird": 0.5, "mammal": 0.05}
+        }
+      ]
+    },
+    "88": {
+      "camera_look": {"blur_sigma": 1.6, "jpeg_q": 60, "noise_gain": 1.0},
+      "exclude": [[0, 0, 0.16, 0.12], [0, 0.93, 0.46, 1.0], [0.6, 0, 0.75, 0.82]],
+      "regions": [
+        {
+          "name": "lawn_far",
+          "kind": "ground",
+          "poly": [[0.17, 0.14], [0.6, 0.14], [0.6, 0.34], [0.15, 0.34]],
+          "u_top": 22,
+          "u_bot": 90,
+          "weights": {"bird": 0.5, "mammal": 1.0}
+        },
+        {
+          "name": "lawn_mid",
+          "kind": "ground",
+          "poly": [[0.15, 0.34], [0.6, 0.34], [0.6, 0.62], [0.14, 0.62]],
+          "u_top": 90,
+          "u_bot": 185,
+          "weights": {"bird": 0.5, "mammal": 1.0}
+        },
+        {
+          "name": "lawn_near",
+          "kind": "ground",
+          "poly": [[0.18, 0.62], [0.6, 0.62], [0.62, 0.8], [0.3, 0.86], [0.2, 0.8]],
+          "u_top": 185,
+          "u_bot": 250,
+          "weights": {"bird": 0.4, "mammal": 1.0}
+        },
+        {
+          "name": "slope_right",
+          "kind": "ground",
+          "poly": [[0.77, 0.22], [0.88, 0.28], [0.89, 0.78], [0.78, 0.78]],
+          "u_top": 60,
+          "u_bot": 210,
+          "weights": {"bird": 0.3, "mammal": 0.7}
+        },
+        {
+          "name": "fence_top",
+          "kind": "perch",
+          "poly": [[0.21, 0.045], [0.6, 0.045], [0.6, 0.075], [0.21, 0.085]],
+          "u_top": 24,
+          "u_bot": 28,
+          "weights": {"bird": 1.0, "mammal": 0.1},
+          "max_cm": 50
+        },
+        {
+          "name": "air_canopy",
+          "kind": "air",
+          "poly": [[0.15, 0.02], [0.58, 0.02], [0.58, 0.3], [0.15, 0.3]],
+          "u_top": 15,
+          "u_bot": 60,
+          "weights": {"bird": 0.5, "mammal": 0.05}
+        }
+      ]
+    }
+  }
+}

@@ -10,7 +10,7 @@ import { readFileSync, readdirSync, statSync, mkdirSync } from 'node:fs';
 const out = process.env.OUT ?? '/tmp/kestrel-themes';
 mkdirSync(out, { recursive: true });
 const local = process.argv.includes('--local');
-const dir = '/data/home/kestrel/custom_components/kestrel/frontend/';
+const dir = '/data/home/Kestrel/custom_components/kestrel/frontend/';
 const newest = () => readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => dir + f).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
 const bundle = local ? readFileSync(newest()) : null;
 const token = readFileSync('/data/home/tmp/ha-token', 'utf8').trim();

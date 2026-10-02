@@ -124,7 +124,7 @@ def main() -> None:
     ap.add_argument("--species", type=Path, default=HERE / "species/atlanta.json")
     ap.add_argument("--name", default="wildlife-atlanta", help="model name under dist/ (and the staged folder)")
     ap.add_argument("--plugin")
-    ap.add_argument("--key-file", type=Path, default=Path("/data/home/kestrel/.kestrel-key"))
+    ap.add_argument("--key-file", type=Path, default=Path("/data/home/Kestrel/.kestrel-key"))
     ap.add_argument("--export-json", type=Path)
     ap.add_argument("--media-root", type=Path)
     ap.add_argument("--testset", type=Path, default=HERE / "data/testset", help="gate set (make_testset.py output)")

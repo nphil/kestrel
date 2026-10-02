@@ -9,3 +9,16 @@ node_modules/
 audio-eval/data/
 .kestrel-key
 .birdnet-admin
+
+# detector-eval: real camera footage, models, venvs and research scratch stay out of git
+detector-eval/data/
+detector-eval/models/
+detector-eval/.venv/
+detector-eval/.venv-*/
+detector-eval/research/
+detector-eval/node_modules
+
+# model weights and generated eval/screenshot output stay out of git
+weights/
+dashboard/out-*/
+audio-eval/preview_eval/proof/result-*/

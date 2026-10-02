@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en" data-lu-profile="phone" data-lu-tier="t1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Hear the animal: cleanup comparison</title>
+<style>
+/*__FONTS__*/
+/*__PALETTE__*/
+/*__TOKENS__*/
+
+/* ---- page layer: tokens only (the one raw colour is the playhead, drawn over always-dark spectrogram images) ---- */
+:root { --spec-ink: #fff; --spec-dark: rgba(0,0,0,.45); }
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 72px; }
+body { margin: 0; background: var(--lu-canvas); color: var(--lu-ink); font-family: var(--lu-font);
+  font-size: var(--lu-type-body); font-weight: var(--lu-type-body-weight); line-height: var(--lu-type-body-line); }
+.wrap { max-width: 1040px; margin: 0 auto;
+  padding: max(var(--lu-space-4), env(safe-area-inset-top)) max(var(--lu-layout-edge-inset), env(safe-area-inset-right)) calc(var(--lu-space-8) * 2) max(var(--lu-layout-edge-inset), env(safe-area-inset-left)); }
+h1, h2 { margin: 0; font-weight: var(--lu-type-title-weight); line-height: var(--lu-type-title-line); letter-spacing: var(--lu-type-title-tracking); font-size: var(--lu-type-title); }
+p { margin: 0; }
+.top { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--lu-space-3); padding: var(--lu-space-5) 0 var(--lu-space-3); }
+.top p { margin-top: var(--lu-space-2); max-width: 62ch; }
+.icon-btn { flex: none; width: var(--lu-target); height: var(--lu-target); display: grid; place-items: center; border-radius: var(--lu-radius-pill);
+  border: 1px solid var(--lu-edge-raised); background: transparent; color: var(--lu-ink); cursor: pointer; }
+.icon-btn svg, .play svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
+button:focus-visible, .spec:focus-visible, summary:focus-visible { outline: none; background-color: var(--lu-focus-wash); box-shadow: inset 0 -2px 0 var(--lu-ink); }
+.icon-btn:active, .play:active, .chip:active { transform: scale(var(--lu-scale-pressed)); transition: transform var(--lu-motion-press) var(--lu-ease-press); }
+
+.intro { padding: var(--lu-space-5); margin-top: var(--lu-space-3); }
+.intro ul { list-style: none; margin: var(--lu-space-3) 0 0; padding: 0; display: grid; gap: var(--lu-space-3); }
+.intro li { display: grid; grid-template-columns: 32px 1fr; gap: var(--lu-space-3); align-items: start; }
+.intro li strong { font-weight: 600; }
+.intro .tip { margin-top: var(--lu-space-4); font-size: var(--lu-type-label); font-weight: var(--lu-type-label-weight); }
+.badge { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: var(--lu-radius-pill); font-size: var(--lu-type-label); font-weight: 600;
+  background: var(--lu-material-selected-wash); border: 1px solid var(--lu-edge-raised); font-variant-numeric: tabular-nums; flex: none; }
+
+.filters { display: flex; gap: var(--lu-space-2); flex-wrap: wrap; margin: var(--lu-space-5) 0 var(--lu-space-3); }
+.chip { min-height: var(--lu-target); padding: 0 var(--lu-space-4); border-radius: var(--lu-radius-pill); border: 1px solid var(--lu-edge-raised);
+  background: transparent; font-size: var(--lu-type-label); font-weight: var(--lu-type-label-weight); cursor: pointer; display: inline-flex; align-items: center; gap: var(--lu-space-2); }
+.chip[aria-pressed="true"] { background: var(--lu-material-selected-wash); border-color: var(--lu-accent); }
+.chip[aria-pressed="true"]::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--lu-accent); }
+.chip .n { color: var(--lu-ink-2); font-variant-numeric: tabular-nums; }
+
+.clips { display: grid; gap: var(--lu-space-4); }
+.clip { padding: var(--lu-space-4) var(--lu-space-4) var(--lu-space-2); }
+.clip[hidden] { display: none; }
+.clip-head .meta { color: var(--lu-ink-2); font-size: var(--lu-type-label); margin-top: var(--lu-space-1); }
+.rows { margin-top: var(--lu-space-2); }
+.row { display: grid; grid-template-columns: var(--lu-target) minmax(0, 1fr) auto; grid-template-areas: "play title time" "spec spec spec";
+  gap: var(--lu-space-2) var(--lu-space-3); align-items: center; padding: var(--lu-space-3) 0; }
+.row + .row { border-top: 1px solid color-mix(in srgb, var(--lu-ink) 9%, transparent); }
+.play { grid-area: play; width: var(--lu-target); height: var(--lu-target); border-radius: var(--lu-radius-pill); border: 1px solid var(--lu-edge-raised);
+  background: transparent; display: grid; place-items: center; cursor: pointer; }
+.play .pause { display: none; }
+.row.playing .play { background: var(--lu-accent); color: var(--lu-accent-ink); border-color: transparent; }
+.row.playing .play .pause { display: block; }
+.row.playing .play .go { display: none; }
+.title { grid-area: title; min-width: 0; }
+.title .t { display: flex; align-items: center; gap: var(--lu-space-2); font-weight: 600; }
+.title .m { color: var(--lu-ink-2); font-size: var(--lu-type-caption); margin-top: 2px; letter-spacing: var(--lu-type-caption-tracking); }
+.warn { color: var(--lu-warning); font-weight: 600; }
+.ok { color: var(--lu-positive); font-weight: 600; }
+.pick { margin-left: 8px; padding: 2px 10px; border-radius: var(--lu-radius-pill); background: var(--lu-accent); color: var(--lu-accent-ink); font-size: var(--lu-type-label); font-weight: 700; white-space: nowrap; }
+.time { grid-area: time; font-size: var(--lu-type-caption); color: var(--lu-ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.spec { grid-area: spec; position: relative; border-radius: var(--lu-radius-control); overflow: hidden; cursor: pointer; touch-action: pan-y; line-height: 0; user-select: none; -webkit-user-select: none; }
+.spec img { width: 100%; height: auto; display: block; pointer-events: none; }
+.spec .played { position: absolute; top: 0; bottom: 0; left: 4%; width: 0; background: rgba(255,255,255,.10); pointer-events: none; }
+.spec .head { position: absolute; top: 0; bottom: 0; left: 4%; width: 2px; margin-left: -1px; background: var(--spec-ink); box-shadow: 0 0 0 1px var(--spec-dark); pointer-events: none; }
+
+details.numbers { margin-top: var(--lu-space-6); padding: var(--lu-space-4) var(--lu-space-5); }
+details.numbers summary { cursor: pointer; font-weight: 600; min-height: var(--lu-target); display: flex; align-items: center; }
+.tbl { overflow-x: auto; margin-top: var(--lu-space-3); }
+table { border-collapse: collapse; width: 100%; font-size: var(--lu-type-label); min-width: 640px; }
+th, td { text-align: left; padding: var(--lu-space-2) var(--lu-space-3); border-bottom: 1px solid color-mix(in srgb, var(--lu-ink) 9%, transparent); vertical-align: top; }
+thead th { font-weight: 600; color: var(--lu-ink); }
+tbody th { font-weight: 600; white-space: nowrap; }
+td { font-variant-numeric: tabular-nums; }
+.note { color: var(--lu-ink-2); font-size: var(--lu-type-label); margin-top: var(--lu-space-3); max-width: 70ch; }
+@media (min-width: 720px) {
+  .row { grid-template-columns: var(--lu-target) 230px minmax(0, 1fr) auto; grid-template-areas: "play title spec time"; }
+  .clip { padding: var(--lu-space-5) var(--lu-space-6) var(--lu-space-3); }
+}
+@media (prefers-reduced-motion: reduce) { .icon-btn:active, .play:active, .chip:active { transform: none; transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Hear the animal</h1>
+      <p>Real clips from your cameras. Row <strong>A</strong> is the whole 15 seconds, only made louder. Rows <strong>B to E</strong> are just the moment the Perch bird AI matched to the animal (the shaded part), made loud enough to hear, and cleaned up in different ways. Which one lets you hear the animal best?</p>
+    </div>
+    <button class="icon-btn" id="theme" aria-label="Switch light or dark theme" title="Light / dark">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
+    </button>
+  </header>
+
+  <section class="intro lu-sheet" aria-label="What the options are">
+    <ul id="legend"></ul>
+    <p class="tip">Tip: play row A, then tap B, C, D or E while it plays. It jumps to the same moment of the clip, so you hear exactly what changed. Tap a picture to jump around. The purple curve under A is how sure Perch was, window by window. A star marks the row the automatic checker would send: the cleanest one that Perch still agrees is the same animal.</p>
+  </section>
+
+  <nav class="filters" id="filters" aria-label="Filter clips"></nav>
+  <main class="clips" id="clips"></main>
+
+  <details class="numbers lu-sheet">
+    <summary>The numbers</summary>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Option</th><th>Perch still sure</th><th>Clips where Perch dropped</th><th>Background reduction</th><th>Time per preview</th><th>Where it can run</th></tr></thead>
+        <tbody>
+__TABLE__
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Averages over __NCLIPS__ real clips. Perch still sure = how confident Google's Perch bird AI is that the detected animal is in the preview, measured at the same volume the original had so the comparison is fair (the untouched original moment scores __RAWPERCH__ on average). Clips where Perch dropped = Perch is more than 2 points less sure than on the original moment (rows C, D and E show the setting that did best for each clip, even when none was safe). Background reduction = how much quieter the quiet parts got (0 = unchanged). Everything is finally normalised to -16 LUFS with peaks held to -1 dBTP and 75 ms fades.</p>
+  </details>
+</div>
+
+<script>
+const DATA = __DATA__;
+const LEG = __LEGEND__;
+const SPEC_L = 4.0, SPEC_R = 99.5;   // plot area inside the spectrogram image, in % of its width
+const GROUP_LABEL = { all: "All", low: "Owls, coyote, bullfrog", small: "Frogs and small mammals", bird: "Birds" };
+const svgPlay = '<svg class="go" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg><svg class="pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13M16 5.5v13"/></svg>';
+const $ = (s, r = document) => r.querySelector(s);
+const el = (h) => { const t = document.createElement("template"); t.innerHTML = h.trim(); return t.content.firstElementChild; };
+const fmt = (t) => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// profile follows the viewport (Lucent profiles), theme toggle is manual
+const root = document.documentElement;
+const prof = () => { root.dataset.luProfile = innerWidth < 720 ? "phone" : "desktop"; };
+prof(); addEventListener("resize", prof);
+$("#theme").addEventListener("click", () => {
+  const dark = (root.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")) === "dark";
+  root.dataset.theme = dark ? "light" : "dark";
+});
+
+// legend
+const legend = $("#legend");
+Object.entries(LEG).forEach(([k, v]) => legend.appendChild(el(`<li><span class="badge">${k}</span><div><strong>${esc(v.name)}</strong><br>${esc(v.desc)}</div></li>`)));
+
+// filters
+const filters = $("#filters");
+const counts = { all: DATA.length };
+DATA.forEach((c) => { counts[c.group] = (counts[c.group] || 0) + 1; });
+["all", "low", "small", "bird"].forEach((g, i) => {
+  const b = el(`<button class="chip" type="button" aria-pressed="${i === 0}" data-g="${g}">${GROUP_LABEL[g]} <span class="n">${counts[g] || 0}</span></button>`);
+  b.addEventListener("click", () => {
+    filters.querySelectorAll(".chip").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    document.querySelectorAll(".clip").forEach((s) => { s.hidden = !(g === "all" || s.dataset.group === g); });
+  });
+  filters.appendChild(b);
+});
+
+// clips
+const clipsEl = $("#clips");
+DATA.forEach((c) => {
+  const sec = el(`<section class="clip lu-sheet" data-group="${c.group}" id="clip-${c.name}"></section>`);
+  sec.appendChild(el(`<header class="clip-head"><h2>${esc(c.species)}</h2><p class="meta">${esc(c.camera)} \u00b7 ${esc(c.when)} \u00b7 BirdNET-Go ${c.bnet_score.toFixed(2)} (heard somewhere in 3\u201315 s) \u00b7 Perch matched ${c.s0.toFixed(1)}\u2013${c.s1.toFixed(1)} s${c.timing_ok ? "" : ` \u00b7 <span class="warn">\u26a0 ${esc(c.timing_note)}</span>`}</p></header>`));
+  const rows = el(`<div class="rows"></div>`);
+  c.cands.forEach((k) => {
+    const L = LEG[k.letter];
+    let meta;
+    if (k.letter === "A") {
+      meta = `whole clip \u00b7 Perch matched most at ${c.best_start.toFixed(1)}\u2013${(c.best_start + 5).toFixed(1)} s (${Math.round(c.best_conf * 100)}%)`;
+    } else if (k.letter === "B") {
+      meta = `${c.s0.toFixed(1)}\u2013${c.s1.toFixed(1)} s \u00b7 nothing removed \u00b7 Perch ${Math.round(c.perch_orig * 100)}%`;
+    } else {
+      const flag = k.ok ? ` \u00b7 <span class="ok">\u2713 Perch kept</span>` : ` \u00b7 <span class="warn">\u26a0 Perch dropped</span>`;
+      meta = `${esc(k.how)} \u00b7 background ${k.supp_db >= 0 ? "\u2212" : "+"}${Math.abs(k.supp_db).toFixed(0)} dB \u00b7 Perch ${Math.round(k.perch * 100)}% (was ${Math.round(c.perch_orig * 100)}%) \u00b7 at preview volume ${Math.round(k.perch_final * 100)}% (was ${Math.round(c.perch_orig_final * 100)}%)${flag}`;
+    }
+    const star = k.pick ? `<span class="pick" title="What the automatic checker would send">\u2605 pick</span>` : "";
+    const row = el(`<article class="row" data-letter="${k.letter}" data-dur="${k.dur}" data-s0="${k.s0}" data-src="audio/${c.name}__${k.letter}.m4a">
+      <button class="play" type="button" aria-label="Play ${k.letter}, ${esc(L.name)}, ${esc(c.species)}">${svgPlay}</button>
+      <div class="title"><div class="t"><span class="badge">${k.letter}</span><span>${esc(L.name)}</span>${star}</div>
+        <div class="m">${meta}</div></div>
+      <span class="time">0:00 / ${fmt(k.dur)}</span>
+      <div class="spec" tabindex="0" role="slider" aria-label="Position in ${k.letter}, ${esc(L.name)}" aria-valuemin="0" aria-valuemax="${Math.round(k.dur)}" aria-valuenow="0" aria-valuetext="0 seconds">
+        <img src="img/${c.name}__${k.letter}.jpg" alt="Spectrogram of option ${k.letter}" loading="lazy" width="800" height="${k.letter === "A" ? 310 : 200}">
+        <div class="played"></div><div class="head"></div>
+      </div></article>`);
+    rows.appendChild(row);
+  });
+  sec.appendChild(rows);
+  clipsEl.appendChild(sec);
+});
+
+// ---- playback: one row at a time; switching rows inside a clip keeps the playback position
+let lastStop = null;
+function getAudio(row, eager) {
+  if (!row._a) {
+    const a = new Audio();
+    a.preload = eager ? "auto" : "metadata";
+    a.src = row.dataset.src;
+    row._a = a;
+    a.addEventListener("timeupdate", () => paint(row));
+    a.addEventListener("ended", () => { setPlaying(row, false); a.currentTime = 0; paint(row); });
+    a.addEventListener("pause", () => { if (!a.ended) setPlaying(row, false); });
+    a.addEventListener("play", () => setPlaying(row, true));
+  } else if (eager && row._a.preload !== "auto") { row._a.preload = "auto"; row._a.load(); }
+  return row._a;
+}
+function setPlaying(row, on) {
+  row.classList.toggle("playing", on);
+  const b = $(".play", row); const base = b.getAttribute("aria-label").replace(/^(Play|Pause)/, "");
+  b.setAttribute("aria-label", (on ? "Pause" : "Play") + base);
+  if (on) tick(row);
+}
+const durOf = (row) => parseFloat(row.dataset.dur);
+const s0Of = (row) => parseFloat(row.dataset.s0);
+function paint(row) {
+  const a = row._a, t = a ? a.currentTime : 0, p = Math.min(1, t / durOf(row));
+  const x = SPEC_L + p * (SPEC_R - SPEC_L);
+  $(".head", row).style.left = x + "%";
+  $(".played", row).style.width = (x - SPEC_L) + "%";
+  $(".time", row).textContent = fmt(t) + " / " + fmt(durOf(row));
+  const s = $(".spec", row); s.setAttribute("aria-valuenow", String(Math.round(t))); s.setAttribute("aria-valuetext", Math.round(t) + " seconds");
+}
+function tick(row) { if (row.classList.contains("playing")) { paint(row); requestAnimationFrame(() => tick(row)); } }
+function pauseOthers(except) {
+  document.querySelectorAll(".row.playing").forEach((r) => {
+    if (r === except) return;
+    lastStop = { clip: r.closest(".clip"), clipTime: s0Of(r) + r._a.currentTime, at: performance.now() };
+    r._a.pause();
+  });
+}
+async function toggle(row) {
+  const a = getAudio(row, true);
+  if (!a.paused) { a.pause(); return; }
+  const clip = row.closest(".clip");
+  clip.querySelectorAll(".row").forEach((r) => getAudio(r, true));          // pre-load the siblings so A/B switching is instant
+  let t = a.currentTime || 0;
+  const other = clip.querySelector(".row.playing");
+  // switch at the same moment of the CLIP: row time = clip time - row start offset (previews start at the matched segment)
+  let clipT = null;
+  if (other && other !== row) clipT = s0Of(other) + other._a.currentTime;
+  else if (lastStop && lastStop.clip === clip && performance.now() - lastStop.at < 2500) clipT = lastStop.clipTime;
+  if (clipT !== null) { const r = clipT - s0Of(row); t = r >= 0 && r < durOf(row) - 0.05 ? r : 0; }
+  pauseOthers(row);
+  const go = () => { a.currentTime = Math.min(t, durOf(row) - 0.05); return a.play(); };
+  try {
+    if (a.readyState < 1) await new Promise((res) => { a.addEventListener("loadedmetadata", res, { once: true }); a.load(); });
+    await go();
+  } catch (e) { setPlaying(row, false); }
+}
+function seek(row, clientX) {
+  const s = $(".spec", row), r = s.getBoundingClientRect();
+  const x = ((clientX - r.left) / r.width) * 100;
+  const p = Math.min(1, Math.max(0, (x - SPEC_L) / (SPEC_R - SPEC_L)));
+  const a = getAudio(row, false);
+  const set = () => { a.currentTime = p * durOf(row); paint(row); };
+  if (a.readyState < 1) { a.addEventListener("loadedmetadata", set, { once: true }); a.load(); } else set();
+}
+document.querySelectorAll(".row").forEach((row) => {
+  $(".play", row).addEventListener("click", () => toggle(row));
+  const s = $(".spec", row); let down = false;
+  s.addEventListener("pointerdown", (e) => { down = true; s.setPointerCapture(e.pointerId); seek(row, e.clientX); });
+  s.addEventListener("pointermove", (e) => { if (down) seek(row, e.clientX); });
+  s.addEventListener("pointerup", () => { down = false; });
+  s.addEventListener("pointercancel", () => { down = false; });
+  s.addEventListener("keydown", (e) => {
+    const a = getAudio(row, false);
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (step) { e.preventDefault(); const set = () => { a.currentTime = Math.min(durOf(row), Math.max(0, a.currentTime + step)); paint(row); }; a.readyState < 1 ? (a.addEventListener("loadedmetadata", set, { once: true }), a.load()) : set(); }
+    else if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(row); }
+  });
+});
+</script>
+</body>
+</html>

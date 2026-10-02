@@ -15,7 +15,7 @@ const context = await browser.newContext({ viewport: { width: W, height: H }, ha
 await context.addInitScript(([secret, b]) => { try { if (!localStorage.getItem('hassTokens')) localStorage.setItem('hassTokens', JSON.stringify({ access_token: secret, token_type: 'Bearer', expires_in: 1800, hassUrl: b, clientId: b + '/', expires: Date.now() + 365 * 864e5, refresh_token: '' })); } catch {} }, [token, base]);
 let localName = null;
 if (process.argv.includes('--local')) {
-  const dir = '/data/home/kestrel/custom_components/kestrel/frontend/';
+  const dir = '/data/home/Kestrel/custom_components/kestrel/frontend/';
   const newest = readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => dir + f).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
   const body = readFileSync(newest);
   localName = newest.split('/').pop();
