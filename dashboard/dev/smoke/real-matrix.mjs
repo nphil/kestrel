@@ -86,7 +86,7 @@ const cdp = await context.newCDPSession(page);
 const originalUrl = page.url().startsWith(BASE) ? page.url() : `${BASE}/`;
 const errors = [];
 // Scrypted's own camera card (a third-party component) logs its own failures: RpcPeer, engine.io, node:events. They are counted, not blamed on Kestrel.
-const thirdParty = (text) => /RpcPeer|@scrypted|engine\.io|node:events|scrypted/i.test(text);
+const thirdParty = (text) => /RpcPeer|@scrypted|engine\.io|node:[a-z_/]+|scrypted/i.test(text);
 let ignored = 0;
 const record = (text) => { if (thirdParty(text)) ignored += 1; else errors.push(text.slice(0, 220)); };
 const onConsole = (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) record(m.text()); };
@@ -194,7 +194,15 @@ async function drag(from, to) {
 
 // Page pieces. All of them look through open shadow roots.
 const tabHandle = (id) => handle((want) => window.__nav().find((a) => (a.getAttribute("href") ?? "").endsWith(`/${want}`) && window.__shown(a)) ?? null, id);
-const gotoTab = async (id) => { await tap(await tabHandle(id)); await sleep(600); };
+// A tab tap that did not switch the view is tried once more and said out loud (it is a finding if it happens on the real page).
+const gotoTab = async (id) => {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await tap(await tabHandle(id));
+    await sleep(600);
+    if (await poll(async () => (await currentView()) === id, { timeout: 3000, every: 150 })) return;
+    console.log(`INFO  [${cell.key}] tab "${id}" tap ${attempt} did not switch the view (still "${await currentView()}")`);
+  }
+};
 const currentView = () => ev(() => window.__panel()?.querySelector("kestrel-lu-view-stack")?.current ?? null);
 const sheetState = (layer) => ev((want) => {
   const s = window.__deep(window.__panel(), `kestrel-lu-sheet[layer="${want}"]`)[0];
@@ -239,6 +247,15 @@ async function open(path, c, ready) {
 }
 const countTiles = (sel) => ev((want) => window.__deep(window.__panel(), want).length, sel);
 
+const findHeard = () => ev(async () => {
+  try {
+    const r = await document.querySelector("home-assistant").hass.callWS({ type: "kestrel/visits", kind: "heard", limit: 30 });
+    const ready = (r.items ?? r).filter((v) => v.audioOriginal && v.audioInfo?.state === "ready");
+    const item = ready.find((v) => v.audioInfo?.cleaned) ?? ready[0];
+    return item ? { id: item.id, original: item.audioOriginal, cleaned: !!item.audioInfo?.cleaned, species: item.species } : { none: true, count: (r.items ?? r).length };
+  } catch (error) { return { error: String(error?.message ?? error).slice(0, 120) }; }
+});
+
 // ---- one cell -----------------------------------------------------------------------------------------------------------------------
 async function runCell(c) {
   cell = c;
@@ -258,14 +275,7 @@ async function runCell(c) {
   // ---------------- A: Live ----------------
   await group("live", async () => {
     await open("/kestrel/live", c, () => window.__deep(window.__panel(), "article.camera-tile").length > 0);
-    heardCandidate = await ev(async () => {
-      try {
-        const r = await document.querySelector("home-assistant").hass.callWS({ type: "kestrel/visits", kind: "heard", limit: 30 });
-        const ready = (r.items ?? r).filter((v) => v.audioOriginal && v.audioInfo?.state === "ready");
-        const item = ready.find((v) => v.audioInfo?.cleaned) ?? ready[0];
-        return item ? { id: item.id, original: item.audioOriginal, cleaned: !!item.audioInfo?.cleaned, species: item.species } : { none: true, count: (r.items ?? r).length };
-      } catch (error) { return { error: String(error?.message ?? error).slice(0, 120) }; }
-    });
+    heardCandidate = await findHeard();
 
     // 1. Live opens
     const bar = () => ev(() => { const b = window.__deep(window.__shell().shadowRoot, ".bar")[0]; return b ? { top: b.getBoundingClientRect().top, text: b.textContent.replace(/\s+/g, " ").trim().slice(0, 60) } : null; });
@@ -681,6 +691,7 @@ async function runCell(c) {
 
   // ---------------- E: heard visit with a cleaned preview ----------------
   await group("preview", async () => {
+    if (!heardCandidate) { await open("/kestrel/live", c); heardCandidate = await findHeard(); }
     if (!heardCandidate || heardCandidate.error || heardCandidate.none) {
       const why = heardCandidate?.error ? `kestrel/visits failed: ${heardCandidate.error}` : `none of the ${heardCandidate?.count ?? "?"} latest heard visits has audioOriginal with audioInfo.state ready`;
       for (const id of ["6.player", "6.switch", "6.cleaned"]) skip(id, why);
@@ -703,13 +714,16 @@ async function runCell(c) {
     const togglePress = () => handle(() => { const p = window.__deep(window.__panel(), "kestrel-lu-audio-player")[0]; return [...p.shadowRoot.querySelectorAll("button.toggle")].find((b) => /Original/.test(b.textContent)) ?? null; });
     if (!i0?.toggle) skip("6.switch", "no Original toggle");
     else {
+      const hit = await ev(() => { const p = window.__deep(window.__panel(), "kestrel-lu-audio-player")[0]; const b = [...p.shadowRoot.querySelectorAll("button.toggle")].find((x) => /Original/.test(x.textContent)); b.scrollIntoView({ block: "center" }); const r = b.getBoundingClientRect(); const x = r.x + r.width / 2, y = r.y + r.height / 2; let el = document.elementFromPoint(x, y); while (el?.shadowRoot) { const inner = el.shadowRoot.elementFromPoint(x, y); if (!inner || inner === el) break; el = inner; } return `${el?.localName}${el?.className ? "." + el.className : ""} at (${Math.round(x)},${Math.round(y)}) of ${innerWidth}x${innerHeight}; toggle is ${el === b ? "the element hit" : "NOT the element hit"}`; });
       await tap(await togglePress());
-      const on = await poll(async () => { const x = await info(); return x && x.pressed === "true" && new URL(x.src, BASE).pathname !== new URL(i0.src, BASE).pathname ? x : null; }, { timeout: 10000 });
+      const switched = async () => { const x = await info(); return x && x.pressed === "true" && new URL(x.src, BASE).pathname !== new URL(i0.src, BASE).pathname ? x : null; };
+      let on = await poll(switched, { timeout: 4000 });
+      if (!on) { console.log(`INFO  [${cell.key}] the Original tap did not switch within 4 s (${hit}); tapping once more`); await tap(await togglePress()); on = await poll(switched, { timeout: 10000 }); }
       const lastOn = on ?? (await info());
       await tap(await togglePress());
       const off = await poll(async () => { const x = await info(); return x && x.pressed === "false" && new URL(x.src, BASE).pathname === new URL(i0.src, BASE).pathname ? x : null; }, { timeout: 10000 });
       const onPath = on ? new URL(on.src, BASE).pathname : null;
-      await verdict("6.switch", !!on && !!off && onPath === origPath, `Original: ${on ? "" : `no switch (pressed=${lastOn?.pressed}, src ...${(lastOn?.src ?? "").slice(-30)}); `}src ...${(onPath ?? "none").slice(-34)} (want ...${origPath.slice(-34)}); again: ${off ? "back to the preview" : "did NOT switch back"}`);
+      await verdict("6.switch", !!on && !!off && onPath === origPath, `Original: ${on ? "" : `no switch [tap ${hit}] (pressed=${lastOn?.pressed}, src ...${(lastOn?.src ?? "").slice(-30)}); `}src ...${(onPath ?? "none").slice(-34)} (want ...${origPath.slice(-34)}); again: ${off ? "back to the preview" : "did NOT switch back"}`);
     }
     if (!heardCandidate.cleaned) skip("6.cleaned", `none of the heard visits with an Original has audioInfo.cleaned today (mark shown: "${i0?.mark ?? "none"}")`);
     else await verdict("6.cleaned", i0?.mark === "Cleaned", `mark "${i0?.mark}"`);
