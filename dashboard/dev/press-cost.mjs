@@ -159,6 +159,6 @@ if (opened) {
 const loadAfter = loadavg()[0];
 await browser.close();
 const over = results.filter((r) => !r.skipped && !r.pass);
-console.log(`\nhost load ${loadBefore.toFixed(1)} -> ${loadAfter.toFixed(1)} (CPU time is nearly load-proof; wall-clock timings need load under 8)`);
+console.log(`\nhost load ${loadBefore.toFixed(1)} -> ${loadAfter.toFixed(1)} (CPU time is nearly load-proof; wall-clock timings are judged by perf-check against its load limit)`);
 console.log(over.length ? `${over.length} control(s) over the ${BUDGET_MS} ms budget` : "Every pressed control is within the budget.");
 process.exit(over.length ? 1 : 0);

@@ -37,16 +37,20 @@
  *   layout     no horizontal overflow; the shell's profile matches the device; a short screen (<= 500 px tall)
  *              has the left rail and no bottom bar
  *
- * Wall-clock gates (press, tabs, open, sheet, layer back, scroll, audio, video) are PASS or FAIL on a quiet host (one-minute load
- * under 8 before and after the size) and PROVISIONAL on a busy one: the miss is printed but does not fail the run,
- * because a busy machine only ever makes times longer. A control with no pressed feedback, layout shift, a layout
- * problem, a dead tap and every other correctness check fail whatever the load. --correctness-only prints the
- * timings without judging any of them. Nothing is "fixed" by repeating a run until it is green.
+ * Wall-clock gates (press, tabs, open, sheet, layer back, scroll, audio, video) are PASS or FAIL while the one-minute load is under a limit before
+ * and after the size, and PROVISIONAL above it: the miss is printed but does not fail the run, because a busy machine only ever makes times longer.
+ * The limit is PERF_MAX_LOAD and defaults to 64 (this host's normal state is 15-25 on 16 cores, so numbers are judged at NORMAL load; PERF_MAX_LOAD=8
+ * brings back "a truly quiet host only"). The load is printed with every size and kept in the report. A control with no pressed feedback, layout shift,
+ * a layout problem, a dead tap and every other correctness check fail whatever the load. --correctness-only prints the timings without judging any
+ * of them. Nothing is "fixed" by repeating a run until it is green.
  *
  * Options: --target ha|harness  --base URL (default http://127.0.0.1:8124)  --cdp URL (attach to a running
  * Chromium; otherwise one is launched)  --bundle FILE (serve this build instead of the newest local one)
  * --installed (ha: serve what Home Assistant serves instead of the newest local bundle)
- * --theme NAME (harness: flat-light default, flat-dark, glass-light, glass-dark)
+ * --theme NAME (harness: flat-light default, flat-dark, glass-light, glass-dark; ha: flat-light = Neumorphism light, flat-dark, glass-dark = Caule
+ * Black Blue Glass, set for the test browser only through its own localStorage, never on the server)
+ * --only a,b (open, layout, press, sheet, picker, tabs, scroll, media, keys: measure only these groups; default all)  --repeats N (default 3: how many
+ * times a press or a sheet opening is measured; the median is judged)
  * --token-file FILE (default /data/home/tmp/ha-token)  --sizes a,b  --throttle N  --out DIR  --no-shots  --json
  * --retries N (default 1): a size that fails is measured again and the better run is kept, because a busy
  * machine inflates timings; the report records the host load and a CPU probe so a noisy run can be recognised.
@@ -79,11 +83,19 @@ const opts = {
   out: flag("out", "/tmp/kestrel-perf"),
   shots: !argv.includes("--no-shots"),
   retries: flag("retries") ? Number(flag("retries")) : 1,
+  // Groups to measure (default all): open, layout, press, sheet, picker, tabs, scroll, media, keys. A quick loop on one gate does not need the rest.
+  only: flag("only") ? new Set(String(flag("only")).split(",")) : null,
+  // How many times a press or a sheet opening is measured (the median is judged). 3 is the gate; more is for studying a number.
+  repeats: flag("repeats") ? Number(flag("repeats")) : 3,
   json: argv.includes("--json"),
   // Judge only what does not depend on how busy the machine is (layout, feedback shown, targets, dead taps, Back, audio
   // one at a time, keyboard, console errors). Timing gates are still measured and printed, but they do not fail the run.
   correctnessOnly: argv.includes("--correctness-only"),
 };
+const GROUPS = ["open", "layout", "press", "sheet", "picker", "tabs", "scroll", "media", "keys"];
+const want = (group) => !opts.only || opts.only.has(group);
+for (const group of opts.only ?? []) if (!GROUPS.includes(group)) { console.error(`unknown group ${group}; choose from ${GROUPS.join(", ")}`); process.exit(2); }
+if (!Number.isInteger(opts.repeats) || opts.repeats < 1 || opts.repeats % 2 === 0) { console.error("--repeats needs an odd whole number (the median of an odd count is one of the measurements)"); process.exit(2); }
 
 // Device sizes (Lucent profiles: LANGUAGE.md section 7). `throttle` approximates his iPhone on touch devices.
 const SIZES = {
@@ -102,7 +114,13 @@ const SIZES = {
 };
 
 const GATE = { pressOverFloorMs: 12, tabFirstMs: 100, tabStableMs: 300, pressMs: 50, tabMs: 100, openMs: 1000, sheetOpenMs: 220, layerBackMs: 100, longTaskMs: 50, cls: 0.02, audioMs: 300, videoMs: 1500, targetPx: 44, scrollDrift: 3 };
-const QUIET_LOAD = 8;
+// Load at or above which a size is PROVISIONAL (timing misses reported, not failed). 8 was the "quiet host" limit; this host's normal state is
+// 15-25 (Nitin, 2026-10-02: a quiet window is never coming), so the default is 64 and numbers are judged at normal load. The load is printed for
+// every size. A value that is not a positive number means the default (a typo must not turn every size PROVISIONAL).
+const LOAD_LIMIT = Number(process.env.PERF_MAX_LOAD) > 0 ? Number(process.env.PERF_MAX_LOAD) : 64;
+// The real Home Assistant's themes for the sizes' --theme names (the test browser's own localStorage; the server's theme is never touched).
+const HA_THEMES = { "flat-light": { theme: "Neumorphism", dark: false }, "flat-dark": { theme: "Neumorphism", dark: true }, "glass-dark": { theme: "Caule Black Blue Glass", dark: true } };
+if (opts.target === "ha" && !HA_THEMES[opts.theme]) { console.error(`--theme ${opts.theme}: the real Home Assistant has ${Object.keys(HA_THEMES).join(", ")}`); process.exit(2); }
 const TAB_ID = { Live: "live", Wildlife: "wildlife", "AI check-up": "insights" };
 
 // ---------------------------------------------------------------------------------------------- in-page helpers
@@ -279,7 +297,24 @@ async function gotoPanel(ctx, view = "live", { cold = false } = {}) {
     await page.goto(`${opts.base}/kestrel/${view}`, { waitUntil: "domcontentloaded" });
   }
   await page.waitForFunction(() => window.__kp?.marks.content !== undefined, null, { timeout: 45000 });
+  await wearTheme(page);
   await page.waitForTimeout(400);
+}
+
+/** Puts the test browser in the theme chosen with --theme (real panel only). Home Assistant keeps the chosen theme in the user's profile on the
+ * server, and its own "settheme" would overwrite that profile (a test must never change the theme of whoever the token belongs to), so this does what
+ * the setting does to the page (update the page's own state, apply the theme) and leaves out the save. Needs a fresh load to wear it again. */
+async function wearTheme(page) {
+  if (opts.target !== "ha") return;
+  const worn = await page.evaluate((theme) => {
+    const ha = document.querySelector("home-assistant");
+    if (!ha || typeof ha._updateHass !== "function" || typeof ha._applyTheme !== "function") return false;
+    ha._updateHass({ selectedTheme: { ...ha.hass.selectedTheme, ...theme } });
+    ha._applyTheme(false);
+    return true;
+  }, HA_THEMES[opts.theme]);
+  if (!worn) throw new Error("this Home Assistant does not offer the page's theme hooks (_updateHass, _applyTheme); the --theme option cannot be used");
+  await page.waitForTimeout(700); // the new theme's colours reach every element
 }
 
 // ---------------------------------------------------------------------------------------------- measurements
@@ -288,13 +323,13 @@ const INERT = `(k) => k.shell()?.shadowRoot.querySelector('h1.title')`;
 /** The same inside an open sheet (the sheet's own modal layer is above the bar). */
 const SHEET_INERT = (layer) => `(k) => k.sheetTitle(k.sheet('${layer}'))`;
 
-/** Presses the control three times, each right after pressing something inert in the same state, and keeps the
+/** Presses the control `--repeats` times (3), each right after pressing something inert in the same state, and keeps the
  * median of both. One scheduling hiccup of the test browser doesn't decide a gate, and "what an inert press costs
  * right now" is measured under the same load and scroll position as the control, not at some other moment. */
 async function press(ctx, name, find, inert = INERT) {
   const runs = [];
   const floors = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < opts.repeats; i++) {
     const floor = await pressOnce(ctx, "inert", inert);
     const run = await pressOnce(ctx, name, find);
     if (run.skipped) return run;
@@ -303,8 +338,9 @@ async function press(ctx, name, find, inert = INERT) {
   }
   runs.sort((a, b) => a.ms - b.ms);
   floors.sort((a, b) => a - b);
-  const median = runs[1];
-  return { ...median, maxMs: runs[2].ms, floorMs: floors.length ? floors[1] ?? floors[0] : 0, pass: median.ms <= GATE.pressMs && median.changed };
+  const middle = opts.repeats >> 1;
+  const median = runs[middle];
+  return { ...median, maxMs: runs[runs.length - 1].ms, floorMs: floors.length ? floors[middle] ?? floors[0] : 0, samples: runs.map((run) => run.ms), floorSamples: floors, pass: median.ms <= GATE.pressMs && median.changed };
 }
 
 /** Press (pointer down, no release) on the first element matching `find`, report time to painted feedback. */
@@ -643,14 +679,14 @@ async function backRestores(ctx, needle) {
   return { start: opened.y, sheetOpened: opened.sheet && opened.path.includes("?s="), onVisit: visit.path.includes("/visit"), backToSheet: back1.sheet && back1.path.includes("?s="), sheetScroll: back1.y, closed: !back2.sheet && !back2.path.includes("?s="), finalScroll: back2.y, drift, pass: opened.sheet && visit.path.includes("/visit") && back1.sheet && !back2.sheet && drift <= GATE.scrollDrift };
 }
 
-/** Sheet-open and Back-closes-the-top-layer, three times each. `find` taps the control that opens the sheet `layer`;
+/** Sheet-open and Back-closes-the-top-layer, `--repeats` times each (3). `find` taps the control that opens the sheet `layer`;
  * the tap's click event starts the clock. OPEN ends at the first animation-frame callback in which the sheet is open
  * and drawn (its enter motion may still run); the finished motion is recorded too but not judged. BACK starts at
  * `history.back()` and ends at the first frame in which the sheet has begun to close. */
 async function sheetBudgets(ctx, layer, find) {
   const { page } = ctx;
   const opens = []; const finished = []; const backs = []; const entering = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < opts.repeats; i++) {
     await page.evaluate(([name, giveUp]) => {
       window.__sheetOpen = new Promise((resolve) => {
         window.addEventListener("click", (e) => {
@@ -691,7 +727,7 @@ async function sheetBudgets(ctx, layer, find) {
     await page.waitForFunction((name) => !window.__kp.sheet(name)?.hasAttribute("open") && !window.__kp.sheet(name)?.shadowRoot?.querySelector("dialog[open]"), layer, { timeout: 4000 }).catch(() => undefined);
     await page.waitForTimeout(500);
   }
-  const median = (list) => [...list].sort((a, b) => a - b)[1];
+  const median = (list) => [...list].sort((a, b) => a - b)[opts.repeats >> 1];
   const appeared = opens.every((ms) => ms >= 0);
   const closed = backs.every((ms) => ms >= 0);
   return {
@@ -787,100 +823,123 @@ async function runSize(browser, key, size, harnessUrl) {
   const ctx = await openContext(browser, size, harnessUrl);
   ctx.size = size;
   await ctx.page.bringToFront();
-  const report = { size: key, viewport: `${size.w}x${size.h}`, throttle: `${ctx.throttle}x`, touch: size.touch, loadBefore: +loadavg()[0].toFixed(1), checks: {} };
+  const report = { size: key, theme: opts.theme, viewport: `${size.w}x${size.h}`, throttle: `${ctx.throttle}x`, touch: size.touch, loadBefore: +loadavg()[0].toFixed(1), checks: {} };
   const c = report.checks;
   try {
     // A fixed piece of work, timed under this size's throttle: if it is slow, the machine is busy and the other numbers are inflated.
     report.cpuProbeMs = await ctx.page.evaluate(() => { const t0 = performance.now(); let x = 0; for (let i = 0; i < 3e6; i++) x += Math.sqrt(i) % 7; return Math.round(performance.now() - t0 + (x < 0 ? 1 : 0)); });
     // open: cold start, then the saved copy of the lists makes the next one warm
-    await gotoPanel(ctx, "live", { cold: true });
-    const cold = await ctx.page.evaluate(() => window.__kp.marks);
-    c.open = { coldPanelToContentMs: Math.round(cold.content - cold.panel), coldSkeletonMs: cold.skeleton === undefined ? null : Math.round(cold.skeleton - cold.panel), spinnerSeen: cold.spinner !== undefined };
-    // Either real content or a shaped skeleton within a second, never a lone spinner; a cold open's real content depends on the network.
-    c.open.firstPaintMs = Math.min(c.open.coldPanelToContentMs, c.open.coldSkeletonMs ?? Infinity);
-    c.open.pass = c.open.firstPaintMs <= GATE.openMs && !c.open.spinnerSeen;
+    if (want("open")) {
+      await gotoPanel(ctx, "live", { cold: true });
+      const cold = await ctx.page.evaluate(() => window.__kp.marks);
+      c.open = { coldPanelToContentMs: Math.round(cold.content - cold.panel), coldSkeletonMs: cold.skeleton === undefined ? null : Math.round(cold.skeleton - cold.panel), spinnerSeen: cold.spinner !== undefined };
+      // Either real content or a shaped skeleton within a second, never a lone spinner; a cold open's real content depends on the network.
+      c.open.firstPaintMs = Math.min(c.open.coldPanelToContentMs, c.open.coldSkeletonMs ?? Infinity);
+      c.open.pass = c.open.firstPaintMs <= GATE.openMs && !c.open.spinnerSeen;
+    }
     await gotoPanel(ctx, "live");
-    const warm = await ctx.page.evaluate(() => window.__kp.marks);
-    c.open.warmPanelToContentMs = Math.round(warm.content - warm.panel);
-    c.open.pass = c.open.pass && c.open.warmPanelToContentMs <= GATE.openMs; // from the saved copy: real content at once
+    if (c.open) {
+      const warm = await ctx.page.evaluate(() => window.__kp.marks);
+      c.open.warmPanelToContentMs = Math.round(warm.content - warm.panel);
+      c.open.pass = c.open.pass && c.open.warmPanelToContentMs <= GATE.openMs; // from the saved copy: real content at once
+    }
     await shot(ctx, `${key}-live`);
 
-    c.layoutLive = await layoutChecks(ctx, size, "live");
-    c.pressLive = await pressSuite(ctx, "live");
-    Object.assign(c, { staticLive: await staticChecks(ctx) });
+    if (want("layout")) c.layoutLive = await layoutChecks(ctx, size, "live");
+    if (want("press")) c.pressLive = await pressSuite(ctx, "live");
+    if (want("layout")) Object.assign(c, { staticLive: await staticChecks(ctx) });
 
     await gotoPanel(ctx, "wildlife");
     await shot(ctx, `${key}-wildlife`);
-    c.layoutWildlife = await layoutChecks(ctx, size, "wildlife");
-    c.pressWildlife = await pressSuite(ctx, "wildlife");
-    c.staticWildlife = await staticChecks(ctx);
+    if (want("layout")) c.layoutWildlife = await layoutChecks(ctx, size, "wildlife");
+    if (want("press")) c.pressWildlife = await pressSuite(ctx, "wildlife");
+    if (want("layout")) c.staticWildlife = await staticChecks(ctx);
 
     // The other two screens get the same static checks: the check-up, and a visit opened from a camera's sighting chip.
-    await ctx.page.evaluate(() => window.__kp.navItem("insights")?.click());
-    await ctx.page.waitForFunction(() => { const p = window.__kp; return p.stack().current === "insights" && p.view("insights")?.querySelector(".health-tile"); }, null, { timeout: 15000 }).catch(() => undefined);
-    await ctx.page.waitForTimeout(500);
-    await shot(ctx, `${key}-insights`);
-    c.staticInsights = await staticChecks(ctx);
-    await gotoPanel(ctx, "live");
-    if (await clickAt(ctx, SIGHTING_CHIP)) {
-      await ctx.page.waitForFunction(() => window.__kp.view("visit")?.querySelector(".visit-title-row"), null, { timeout: 15000 }).catch(() => undefined);
-      await ctx.page.waitForTimeout(700);
-      await shot(ctx, `${key}-visit`);
-      c.staticVisit = await staticChecks(ctx);
-      c.pressVisit = await pressSuite(ctx, "visit");
-      // The picker ("Wrong?") opens a sheet of its own with its own history entry.
-      c.sheetPicker = await sheetBudgets(ctx, "wrong-picker", VISIT_BUTTON("Wrong?"));
-      await clickVisitBack(ctx);
-      await ctx.page.waitForFunction(() => !location.pathname.endsWith("/visit"), null, { timeout: 8000 }).catch(() => undefined);
-    } else c.pressVisit = [{ name: "visit", skipped: "no camera has a sighting" }];
+    if (want("layout")) {
+      await ctx.page.evaluate(() => window.__kp.navItem("insights")?.click());
+      await ctx.page.waitForFunction(() => { const p = window.__kp; return p.stack().current === "insights" && p.view("insights")?.querySelector(".health-tile"); }, null, { timeout: 15000 }).catch(() => undefined);
+      await ctx.page.waitForTimeout(500);
+      await shot(ctx, `${key}-insights`);
+      c.staticInsights = await staticChecks(ctx);
+    }
+    if (want("layout") || want("press") || want("picker")) {
+      await gotoPanel(ctx, "live");
+      if (await clickAt(ctx, SIGHTING_CHIP)) {
+        await ctx.page.waitForFunction(() => window.__kp.view("visit")?.querySelector(".visit-title-row"), null, { timeout: 15000 }).catch(() => undefined);
+        await ctx.page.waitForTimeout(700);
+        await shot(ctx, `${key}-visit`);
+        if (want("layout")) c.staticVisit = await staticChecks(ctx);
+        if (want("press")) c.pressVisit = await pressSuite(ctx, "visit");
+        // The picker ("Wrong?") opens a sheet of its own with its own history entry.
+        if (want("picker")) c.sheetPicker = await sheetBudgets(ctx, "wrong-picker", VISIT_BUTTON("Wrong?"));
+        await clickVisitBack(ctx);
+        await ctx.page.waitForFunction(() => !location.pathname.endsWith("/visit"), null, { timeout: 8000 }).catch(() => undefined);
+      } else if (want("press")) c.pressVisit = [{ name: "visit", skipped: "no camera has a sighting" }];
+    }
 
     await gotoPanel(ctx, "wildlife");
     const pick = await pickSpecies(ctx);
-    if (pick.heard) {
+    if (pick.heard && want("sheet")) {
       c.sheetSpecies = await sheetBudgets(ctx, "species", SPECIES_TILE(pick.heard));
       await ctx.page.waitForTimeout(300);
     }
-    if (pick.heard && await openSpecies(ctx, pick.heard)) {
-      await shot(ctx, `${key}-sheet`);
-      c.pressSheet = await pressSuite(ctx, "sheet");
-      c.staticSheet = await staticChecks(ctx);
-      await closeSpecies(ctx);
-    } else c.pressSheet = [{ name: "sheet", skipped: "no species with recordings" }];
-
-    if (size.full) {
-      c.tabs = await tabTimes(ctx);
-      await gotoPanel(ctx, "wildlife");
-      c.scrollGrid = await scrollWindow(ctx);
-      c.scrollGrid.pass = c.scrollGrid.ownWorstMs <= GATE.longTaskMs && c.scrollGrid.cls <= GATE.cls;
-      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    if (want("press") || want("layout")) {
       if (pick.heard && await openSpecies(ctx, pick.heard)) {
-        for (let i = 0; i < 4; i++) { if (!await clickAt(ctx, `(k) => k.sheet('species')?.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.text-button:not(:disabled)')`)) break; await ctx.page.waitForTimeout(700); }
-        const rows = await ctx.page.evaluate(() => window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list")?.rows?.length ?? 0);
-        c.scrollRecordings = { rows, ...await scrollSheetList(ctx) };
-        c.scrollRecordings.pass = (c.scrollRecordings.ownWorstMs ?? 0) <= GATE.longTaskMs && (c.scrollRecordings.cls ?? 0) <= GATE.cls;
-        await ctx.page.evaluate(() => { const list = window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list"); window.__kp.scroller(list)?.scrollTo(0, 0); });
-        c.audio = await audioStart(ctx);
-        c.oneAtATime = await oneAtATime(ctx);
+        await shot(ctx, `${key}-sheet`);
+        if (want("press")) c.pressSheet = await pressSuite(ctx, "sheet");
+        if (want("layout")) c.staticSheet = await staticChecks(ctx);
         await closeSpecies(ctx);
-      }
-      if (pick.seen) {
-        await gotoPanel(ctx, "wildlife");
-        await setFilter(ctx, "On camera"); // a species seen only now and then isn't among the first tiles of the full list
-        if (await openSpecies(ctx, pick.seen)) c.video = await videoStart(ctx);
-        else c.video = { skipped: "the species with videos wasn't on screen" };
-        await gotoPanel(ctx, "wildlife");
-        await setFilter(ctx, "All");
-      } else c.video = { skipped: "no species with videos" };
-      c.back = await backRestores(ctx, pick.deep ?? pick.heard ?? "");
+      } else if (want("press")) c.pressSheet = [{ name: "sheet", skipped: "no species with recordings" }];
     }
 
-    if (!size.touch) {
+    if (size.full) {
+      if (want("tabs")) c.tabs = await tabTimes(ctx);
+      if (want("scroll") || want("media")) {
+        await gotoPanel(ctx, "wildlife");
+        if (want("scroll")) {
+          c.scrollGrid = await scrollWindow(ctx);
+          c.scrollGrid.pass = c.scrollGrid.ownWorstMs <= GATE.longTaskMs && c.scrollGrid.cls <= GATE.cls;
+          await ctx.page.evaluate(() => window.scrollTo(0, 0));
+        }
+        if (pick.heard && await openSpecies(ctx, pick.heard)) {
+          if (want("scroll")) {
+            for (let i = 0; i < 4; i++) { if (!await clickAt(ctx, `(k) => k.sheet('species')?.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.text-button:not(:disabled)')`)) break; await ctx.page.waitForTimeout(700); }
+            const rows = await ctx.page.evaluate(() => window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list")?.rows?.length ?? 0);
+            c.scrollRecordings = { rows, ...await scrollSheetList(ctx) };
+            c.scrollRecordings.pass = (c.scrollRecordings.ownWorstMs ?? 0) <= GATE.longTaskMs && (c.scrollRecordings.cls ?? 0) <= GATE.cls;
+            await ctx.page.evaluate(() => { const list = window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list"); window.__kp.scroller(list)?.scrollTo(0, 0); });
+          }
+          if (want("media")) {
+            c.audio = await audioStart(ctx);
+            c.oneAtATime = await oneAtATime(ctx);
+          }
+          await closeSpecies(ctx);
+        }
+      }
+      if (want("media")) {
+        if (pick.seen) {
+          await gotoPanel(ctx, "wildlife");
+          await setFilter(ctx, "On camera"); // a species seen only now and then isn't among the first tiles of the full list
+          if (await openSpecies(ctx, pick.seen)) c.video = await videoStart(ctx);
+          else c.video = { skipped: "the species with videos wasn't on screen" };
+          await gotoPanel(ctx, "wildlife");
+          await setFilter(ctx, "All");
+        } else c.video = { skipped: "no species with videos" };
+        c.back = await backRestores(ctx, pick.deep ?? pick.heard ?? "");
+      }
+    }
+
+    if (!size.touch && want("keys")) {
       // keyboard: shortcuts, visible focus
       await gotoPanel(ctx, "live");
       await ctx.page.keyboard.press("2");
       await ctx.page.waitForTimeout(500);
       const went = await ctx.page.evaluate(() => location.pathname.endsWith("/wildlife"));
-      await ctx.page.keyboard.press("?");
+      // Kestrel's list of keys opens from the keyboard button in the app bar, reached and pressed with the keyboard. (The "?" key is not Kestrel's
+      // since 1.1.0: Home Assistant owns it for its own shortcut list.)
+      const found = await ctx.page.evaluate(() => { const button = window.__kp.shell()?.querySelector("kestrel-lu-button.shortcuts")?.shadowRoot?.querySelector("button"); button?.focus(); return Boolean(button); });
+      await ctx.page.keyboard.press("Enter");
       await ctx.page.waitForTimeout(500);
       const help = await ctx.page.evaluate(() => Boolean(window.__kp.sheet("help")?.hasAttribute("open")));
       await ctx.page.keyboard.press("Escape");
@@ -889,7 +948,7 @@ async function runSize(browser, key, size, harnessUrl) {
       await ctx.page.evaluate(() => window.__kp.navItem("live")?.focus());
       await ctx.page.keyboard.press("Tab");
       const ring = await ctx.page.evaluate(() => { let a = document.activeElement; while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement; return a && a !== document.body ? getComputedStyle(a).boxShadow !== "none" || getComputedStyle(a).outlineStyle !== "none" : false; });
-      c.keyboard = { shortcutSwitchesView: went, helpOpens: help, escapeClosesHelp: helpShut, focusRingVisible: ring, pass: went && help && helpShut && ring };
+      c.keyboard = { shortcutSwitchesView: went, shortcutButtonFound: found, helpOpens: help, escapeClosesHelp: helpShut, focusRingVisible: ring, pass: went && found && help && helpShut && ring };
     }
   } catch (error) {
     c.fatal = String(error?.stack ?? error).slice(0, 500);
@@ -907,11 +966,11 @@ function judge(report) {
   const provisional = [];
   const push = (gate, detail) => fails.push(`${report.size}: ${gate} - ${detail}`);
   const c = report.checks;
-  // Timing gates fail on a quiet host only; a busy one is reported as PROVISIONAL. --correctness-only judges none of them.
-  const quiet = report.loadBefore < QUIET_LOAD && (report.loadAfter ?? 0) < QUIET_LOAD;
+  // Timing gates fail while the load is under the limit (default 64: normal for this host); above it they are reported as PROVISIONAL. --correctness-only judges none of them.
+  const quiet = report.loadBefore < LOAD_LIMIT && (report.loadAfter ?? 0) < LOAD_LIMIT;
   const timing = (gate, detail) => {
     if (opts.correctnessOnly) return;
-    (quiet ? fails : provisional).push(`${report.size}: ${gate} - ${detail}${quiet ? "" : " [PROVISIONAL: the host was busy]"}`);
+    (quiet ? fails : provisional).push(`${report.size}: ${gate} - ${detail}${quiet ? "" : ` [PROVISIONAL: the load was ${report.loadBefore} -> ${report.loadAfter}, limit ${LOAD_LIMIT}]`}`);
   };
   if (c.fatal) push("run", c.fatal.split("\n")[0]);
   if (c.open && !c.open.pass) timing("open", JSON.stringify(c.open));
@@ -980,15 +1039,15 @@ for (const key of wanted) {
 if (launched) await browser.close(); else await browser.close().catch(() => undefined);
 await harness?.server.close();
 mkdirSync(opts.out, { recursive: true });
-writeFileSync(join(opts.out, "perf-check.json"), JSON.stringify({ at: new Date().toISOString(), target: opts.target, gates: GATE, reports, failures, provisional: provisionals }, null, 1));
+writeFileSync(join(opts.out, "perf-check.json"), JSON.stringify({ at: new Date().toISOString(), target: opts.target, theme: opts.theme, repeats: opts.repeats, loadLimit: LOAD_LIMIT, gates: GATE, reports, failures, provisional: provisionals }, null, 1));
 if (opts.json) console.log(JSON.stringify({ reports, failures, provisional: provisionals }, null, 1));
 else {
   for (const r of reports) {
     const c = r.checks;
     const worst = (rows) => rows?.filter((x) => !x.skipped).map((x) => `${x.name} ${x.ms}ms${x.ms > GATE.pressMs ? ` (inert ${x.floorMs})` : ""}${x.foreign ? " (Home Assistant's own dialog, not judged)" : x.changed ? "" : "!"}${x.limitedByHost ? "~" : ""}`).join(", ");
-    // Timings only mean something on a quiet machine (1-minute load under 8 before and after); otherwise they are provisional.
-    const quiet = r.loadBefore < QUIET_LOAD && (r.loadAfter ?? 0) < QUIET_LOAD;
-    console.log(`\n== ${r.size} ${r.viewport} (${r.throttle} CPU; host load ${r.loadBefore} -> ${r.loadAfter ?? "?"} on ${cpus().length} cores, 3M-op probe ${r.cpuProbeMs} ms${quiet ? "" : "; PROVISIONAL, the host was busy"}) ==`);
+    // Timings are judged while the 1-minute load is under the limit before and after the size; otherwise they are provisional.
+    const quiet = r.loadBefore < LOAD_LIMIT && (r.loadAfter ?? 0) < LOAD_LIMIT;
+    console.log(`\n== ${r.size} ${r.viewport} (${r.throttle} CPU, theme ${r.theme ?? opts.theme}; host load ${r.loadBefore} -> ${r.loadAfter ?? "?"} on ${cpus().length} cores, limit ${LOAD_LIMIT}, 3M-op probe ${r.cpuProbeMs} ms${quiet ? "" : "; PROVISIONAL, the load is over the limit"}) ==`);
     if (c.layoutLive) console.log(`layout    profile=${c.layoutLive.profile} short=${c.layoutLive.short} nav=${c.layoutLive.navMode} panel=${c.layoutLive.panelW}px columns=${c.layoutLive.columns} overflowX=${c.layoutLive.overflowX}`);
     if (c.open) console.log(`open      cold ${c.open.coldPanelToContentMs} ms (skeleton ${c.open.coldSkeletonMs} ms, spinner ${c.open.spinnerSeen}), warm ${c.open.warmPanelToContentMs} ms`);
     console.log(`press     (each control is compared with an inert press taken just before it; ~ = over 50 ms but within ${GATE.pressOverFloorMs * (r.throttle === "1x" ? 1 : 2)} ms of that, i.e. the machine, not the control)\n          live: ${worst(c.pressLive) ?? "-"} | wildlife: ${worst(c.pressWildlife) ?? "-"} | visit: ${worst(c.pressVisit) ?? "-"} | sheet: ${worst(c.pressSheet) ?? "-"}`);
@@ -1009,7 +1068,7 @@ else {
     if (r.foreignRejections) console.log(`note      ${r.foreignRejections} bare "closed" rejection(s) from Scrypted's live cards being torn down (not Kestrel's, not counted)`);
     if (c.fatal) console.log(`FATAL     ${c.fatal.split("\n")[0]}`);
   }
-  if (provisionals.length) console.log(`\nPROVISIONAL ${provisionals.length} timing miss(es) on a busy host (not failures; measure again when the host load is under ${QUIET_LOAD}):\n- ${provisionals.join("\n- ")}`);
+  if (provisionals.length) console.log(`\nPROVISIONAL ${provisionals.length} timing miss(es) with the load at or above ${LOAD_LIMIT} (not failures; measure again when it is lower):\n- ${provisionals.join("\n- ")}`);
   console.log(failures.length ? `\nFAILED ${failures.length} gate(s):\n- ${failures.join("\n- ")}` : `\nAll gates passed${opts.correctnessOnly ? " (correctness only: timing was measured but not judged)" : provisionals.length ? " (timing misses are provisional)" : ""}.`);
   console.log(`\nReport: ${join(opts.out, "perf-check.json")}${opts.shots ? ` (screenshots in ${opts.out})` : ""}`);
 }
