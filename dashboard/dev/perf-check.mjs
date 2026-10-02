@@ -191,6 +191,15 @@ function installProbe() {
     }
     return null;
   };
+  /** Every audio and video element on the page (through shadow roots) and how it is doing, for the report of a media check that went wrong. */
+  probe.media = () => {
+    try {
+      return deep(document, "audio, video").map((m) => ({
+        el: m.localName + (m.className ? `.${m.className}` : ""), src: (m.currentSrc || m.getAttribute("src") || "").replace(/^https?:\/\/[^/]+/, "").replace(/\?.*$/, "").slice(-44),
+        paused: m.paused, ended: m.ended, ready: m.readyState, network: m.networkState, error: m.error?.code ?? null, time: +m.currentTime.toFixed(2),
+      }));
+    } catch { return []; } // report detail only: it must never be what fails a gate
+  };
   /** After a scroll: layout shift, and the long frames split into the panel's own share and everyone else's. */
   probe.report = () => {
     const own = probe.frames.map((f) => f.ownMs + f.renderMs);
@@ -271,7 +280,7 @@ async function openContext(browser, size, harnessUrl) {
   if (throttle > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: throttle });
   const errors = [];
   page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(m.text().slice(0, 200)); });
-  page.on("response", (r) => { if (r.status() >= 400 && !r.url().endsWith("/favicon.ico") && !(r.status() === 404 && r.url().includes("/media/live/")) && !/\/(api\/websocket|auth\/)/.test(r.url())) errors.push(`${r.status()} ${new URL(r.url()).pathname.slice(0, 80)}`); });
+  page.on("response", (r) => { if (r.status() >= 400 && !r.url().endsWith("/favicon.ico") && !(r.status() === 404 && r.url().includes("/media/live/")) && !/\/(api\/websocket|auth\/)/.test(r.url())) errors.push(`${r.status()} ${new URL(r.url()).pathname.slice(0, 80)}${r.request().resourceType() === "media" ? " (asked for by an audio/video element)" : ""}`); });
   // Scrypted's live cards reject with the bare string "closed" (no Error, no stack) when they are torn down while still
   // connecting; Kestrel only ever throws Errors, so those are counted and reported, but they are not the panel's failure.
   const foreign = [];
@@ -618,29 +627,58 @@ async function audioStart(ctx) {
   });
   if (!await clickAt(ctx, find)) return { skipped: "no playable recording" };
   const result = await page.evaluate(() => window.__audio);
-  return { ...result, pass: result.ms >= 0 && result.ms <= GATE.audioMs };
+  return { ...result, pass: result.ms >= 0 && result.ms <= GATE.audioMs, elements: await page.evaluate(() => window.__kp.media()).catch(() => []) };
 }
 
+/** Taps the SECOND playable recording and counts what plays. `target` and `failedRows` are for the report: which row was tapped, and whether
+ * the list ended up saying "Couldn't load this recording." for some row (a recording that cannot be loaded plays nothing). */
 async function oneAtATime(ctx) {
   const { page } = ctx;
-  await clickAt(ctx, `(k) => [...k.sheet('species').querySelector('kestrel-lu-audio-list').shadowRoot.querySelectorAll('.play:not(:disabled)')][1]`);
+  const second = `(k) => [...k.sheet('species').querySelector('kestrel-lu-audio-list').shadowRoot.querySelectorAll('.play:not(:disabled)')][1]`;
+  const target = await page.evaluate(`(() => { try { return (${second})(window.__kp)?.getAttribute('aria-label') ?? null; } catch { return null; } })()`);
+  await clickAt(ctx, second);
   await page.waitForTimeout(800);
-  return page.evaluate(() => {
+  return page.evaluate((label) => {
     const playing = window.__kp.deep(document, "audio").filter((a) => !a.paused && !a.ended).length;
-    return { playing, pass: playing === 1 };
-  });
+    let failedRows = [];
+    try { failedRows = [...(window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list")?.shadowRoot.querySelectorAll("li:has(.note.failed) .play") ?? [])].map((b) => b.getAttribute("aria-label")); } catch { /* report detail only */ }
+    return { playing, pass: playing === 1, target: label, failedRows, elements: window.__kp.media() };
+  }, target);
 }
 
 async function videoStart(ctx) {
   const { page } = ctx;
   await page.evaluate(() => {
+    window.__kp.longTasks.length = 0; window.__kp.frames.length = 0;
     window.__video = new Promise((resolve) => {
       let down = 0;
+      // Where the time went, from the press: the visit page drawn, the video element there, its first data, playing (browser event times, so a
+      // busy page cannot make a start look later than it was), and the clip's request as the browser saw it.
+      const marks = {};
+      const at = (name, time = performance.now()) => { if (down && marks[name] === undefined) marks[name] = Math.round(time - down); };
       window.addEventListener("pointerdown", (e) => { down = e.timeStamp; }, { capture: true, once: true });
+      let watched = null;
+      const finish = (ms) => {
+        let busy = null;
+        try { // report detail only: it must never be what fails the gate
+          const request = performance.getEntriesByType("resource").filter((entry) => entry.name.includes("/media/clip/")).pop();
+          if (request) Object.assign(marks, { clipAsked: Math.round(request.startTime - down), clipSent: Math.round(request.requestStart - down), clipFirstByte: Math.round(request.responseStart - down), clipDone: Math.round(request.responseEnd - down) });
+          const { longFrames, ownWorstMs, hostWorstMs, longTasks } = window.__kp.report();
+          busy = { longFrames, ownWorstMs, hostWorstMs, longTasks };
+        } catch { /* nothing to add */ }
+        resolve({ ms, marks, busy });
+      };
       const tick = () => {
-        const video = window.__kp.view("visit")?.querySelector(".visit-video");
-        if (video && video.readyState >= 3 && !video.paused && video.currentTime > 0) resolve({ ms: Math.round(performance.now() - down) });
-        else if (down && performance.now() - down > 8000) resolve({ ms: -1 });
+        const view = window.__kp.view("visit");
+        const video = view?.querySelector(".visit-video");
+        if (view?.querySelector(".visit-title-row")) at("page");
+        if (video && video !== watched) {
+          watched = video;
+          at("element");
+          for (const name of ["loadedmetadata", "loadeddata", "canplay", "playing"]) video.addEventListener(name, (e) => at(name, e.timeStamp), { once: true });
+        }
+        if (video && video.readyState >= 3 && !video.paused && video.currentTime > 0) finish(Math.round(performance.now() - down));
+        else if (down && performance.now() - down > 8000) finish(-1);
         else requestAnimationFrame(tick);
       };
       requestAnimationFrame(tick);
@@ -649,8 +687,18 @@ async function videoStart(ctx) {
   const find = `(k) => [...k.sheet('species').querySelector('kestrel-lu-media-rail').shadowRoot.querySelectorAll('.item')].find((i) => i.querySelector('.glyph'))`;
   if (!await clickAt(ctx, find)) return { skipped: "no video thumbnail" };
   const result = await page.evaluate(() => window.__video);
-  return { ...result, pass: result.ms >= 0 && result.ms <= GATE.videoMs };
+  return { ...result, pass: result.ms >= 0 && result.ms <= GATE.videoMs, elements: await page.evaluate(() => window.__kp.media()).catch(() => []) };
 }
+
+/** "page 280 · element 292 · ..." : the milestones of a video start, in ms from the press. */
+const videoMarks = (video) => {
+  const marks = video?.marks ?? {};
+  const names = [["page", "visit page"], ["element", "video element"], ["loadedmetadata", "metadata"], ["loadeddata", "first frame"], ["canplay", "can play"], ["playing", "playing event"], ["clipAsked", "clip asked"], ["clipSent", "clip sent"], ["clipFirstByte", "clip first byte"], ["clipDone", "clip done"]];
+  const shown = names.filter(([key]) => marks[key] !== undefined).map(([key, label]) => `${label} ${marks[key]}`);
+  const busy = video?.busy;
+  const main = busy ? `; main thread: ${busy.longFrames} long frames, the panel's worst ${busy.ownWorstMs} ms, others' worst ${busy.hostWorstMs} ms, long tasks ${busy.longTasks.join("/") || "none"}` : "";
+  return shown.length ? `${shown.join(" · ")} ms after the press${main}` : `no milestones seen${main}`;
+};
 
 /** The visit page's back arrow (in the app bar), as a tap would use it. */
 const clickVisitBack = (ctx) => ctx.page.evaluate(() => window.__kp.shell()?.shadowRoot.querySelector("button.back")?.click());
@@ -1000,8 +1048,8 @@ function judge(report) {
   if (c.scrollGrid && !c.scrollGrid.pass) { if (c.scrollGrid.cls > GATE.cls) push("scroll grid", JSON.stringify(c.scrollGrid)); else timing("scroll grid", JSON.stringify(c.scrollGrid)); }
   if (c.scrollRecordings && !c.scrollRecordings.pass) { if (c.scrollRecordings.cls > GATE.cls) push("scroll recordings", JSON.stringify(c.scrollRecordings)); else timing("scroll recordings", JSON.stringify(c.scrollRecordings)); }
   if (c.audio && !c.audio.skipped && !c.audio.pass) timing("audio", `${c.audio.ms} ms`);
-  if (c.oneAtATime && !c.oneAtATime.pass) push("one at a time", `${c.oneAtATime.playing} playing`);
-  if (c.video && !c.video.skipped && !c.video.pass) timing("video", `${c.video.ms} ms`);
+  if (c.oneAtATime && !c.oneAtATime.pass) push("one at a time", `${c.oneAtATime.playing} playing; tapped "${c.oneAtATime.target}"; rows that could not be loaded: ${c.oneAtATime.failedRows?.join(", ") || "none"}; media elements: ${JSON.stringify(c.oneAtATime.elements)}`);
+  if (c.video && !c.video.skipped && !c.video.pass) timing("video", `${c.video.ms} ms (${videoMarks(c.video)})`);
   if (c.back && !c.back.skipped && !c.back.pass) push("back", JSON.stringify(c.back));
   if (c.keyboard && !c.keyboard.pass) push("keyboard", JSON.stringify(c.keyboard));
   if (report.consoleErrors.length) push("console", report.consoleErrors.join(" | "));
@@ -1060,8 +1108,8 @@ else {
     }
     if (c.tabs) console.log(`tabs      first visit ${["first visit Wildlife", "first visit AI check-up", "first visit Live"].map((k) => c.tabs[k]).join("/")} ms; revisits (first/stable ms): ${c.tabs.revisits.join(", ")}; budget ${c.tabs.budgetFirst}/${c.tabs.budgetStable}; panel's own worst frame ${c.tabs.panelWorstMs} ms${c.tabs.limitedByOthers ? " (over budget only because Home Assistant / Scrypted keep the page busy)" : ""}`);
     if (c.scrollGrid) console.log(`scroll    grid: panel's worst frame ${c.scrollGrid.ownWorstMs} ms (others ${c.scrollGrid.hostWorstMs} ms, ${c.scrollGrid.longFrames} long frames), CLS ${c.scrollGrid.cls}; recordings (${c.scrollRecordings?.rows ?? 0} rows): panel ${c.scrollRecordings?.ownWorstMs} ms (others ${c.scrollRecordings?.hostWorstMs} ms), CLS ${c.scrollRecordings?.cls}`);
-    if (c.audio) console.log(`audio     ${c.audio.skipped ?? `${c.audio.ms} ms`}; playing at once: ${c.oneAtATime?.playing}`);
-    if (c.video) console.log(`video     ${c.video.skipped ?? `${c.video.ms} ms`}`);
+    if (c.audio) console.log(`audio     ${c.audio.skipped ?? `${c.audio.ms} ms`}; playing at once: ${c.oneAtATime?.playing}${c.oneAtATime && !c.oneAtATime.pass ? ` (tapped "${c.oneAtATime.target}"; could not be loaded: ${c.oneAtATime.failedRows?.join(", ") || "none"})` : ""}`);
+    if (c.video) console.log(`video     ${c.video.skipped ?? `${c.video.ms} ms (${videoMarks(c.video)})`}`);
     if (c.back) console.log(`back      ${c.back.skipped ?? `scroll ${c.back.start} -> ${c.back.finalScroll} (drift ${c.back.drift}px); sheet reopens ${c.back.backToSheet}; closes ${c.back.closed}`}`);
     for (const key of ["staticLive", "staticWildlife", "staticSheet", "staticInsights", "staticVisit"]) if (c[key]) console.log(`static    ${key.slice(6)}: ${c[key].interactive} controls, ${c[key].small.length} under ${GATE.targetPx}px, ${c[key].dead.length} dead-looking, ${c[key].hoverOutsideMedia.length} hover-only rules`);
     if (c.keyboard) console.log(`keyboard  shortcut ${c.keyboard.shortcutSwitchesView}, help ${c.keyboard.helpOpens}, Escape closes help ${c.keyboard.escapeClosesHelp}, focus ring ${c.keyboard.focusRingVisible}`);

@@ -11,9 +11,12 @@ This checks real availability once per item, in the background, and caches
 the verdict -- positive and negative, with independently tunable TTLs per
 kind -- so a later request is a synchronous, no-network cache hit. The two
 *_available_now() functions are the only entry points websocket_api.py
-needs: neither ever blocks, and an item with no cached verdict yet is
-simply left out of the response (no 404 risk) while a check is scheduled
-for next time.
+needs: neither ever blocks, and an item with no cached verdict yet (cold
+start, an expired verdict, BirdNET-Go unreachable) is treated as available
+-- websocket_api.py signs its link, so a transient failure cannot hide a
+real photo or clip -- while a check is scheduled; only a confirmed 404
+hides the link. (The detection ids that cannot exist, see detection_id_of,
+are not "unknown": they never get a link.)
 """
 
 from __future__ import annotations
@@ -40,6 +43,16 @@ _LOGGER = logging.getLogger(__name__)
 _IMAGE_POSITIVE_TTL = timedelta(days=BIRDNET_IMAGE_POSITIVE_CACHE_DAYS)
 _IMAGE_NEGATIVE_TTL = timedelta(days=BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS)
 _AUDIO_NEGATIVE_TTL = timedelta(minutes=BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES)
+
+
+def detection_id_of(value: object) -> int | None:
+    """BirdNET-Go's number for a detection, or None when `value` is not one.
+
+    Its numbers start at 1. Some detections reach Kestrel announced with id 0 (and a real clip name), and 0 names
+    nothing: BirdNET-Go answers 404 for its recording, always. So a 0 gets no link, no availability check and no
+    preview job -- a link signed for it would be requested by the panel (and logged as a failed request) for nothing.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def image_available_now(hass: HomeAssistant, scientific_name: str) -> bool | None:

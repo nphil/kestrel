@@ -38,7 +38,17 @@ for (const size of sizes) {
       await page.goto(base + path, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(`(() => { ${HELPERS} const h = host(); return Boolean(h && h.shadowRoot && ${ready}); })()`, null, { timeout: 60000 });
       if (t.theme && !(await page.evaluate(() => window.__themed))) {
-        await page.evaluate(([name, dark]) => { window.__themed = true; document.querySelector('home-assistant').dispatchEvent(new CustomEvent('settheme', { detail: { theme: name, dark }, bubbles: true, composed: true })); }, [t.theme, t.dark]);
+        // Worn on the PAGE only (what the setting does to the page, minus the save): Home Assistant's `settheme` event would overwrite the theme
+        // profile it keeps on the server for the token's user. A fresh load wears the profile's theme again, so every open() does this.
+        const worn = await page.evaluate(([name, dark]) => {
+          const ha = document.querySelector('home-assistant');
+          if (!ha || typeof ha._updateHass !== 'function' || typeof ha._applyTheme !== 'function') return false;
+          window.__themed = true;
+          ha._updateHass({ selectedTheme: { ...ha.hass.selectedTheme, theme: name, dark } });
+          ha._applyTheme(false);
+          return true;
+        }, [t.theme, t.dark]);
+        if (!worn) throw new Error("this Home Assistant does not offer the page's theme hooks (_updateHass, _applyTheme)");
       }
       await page.waitForTimeout(1800);
     };

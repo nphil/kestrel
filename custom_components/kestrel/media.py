@@ -11,6 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .birdnet_availability import detection_id_of
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INTERNAL_URL, DOMAIN, MEDIA_KINDS
 from .coordinator import KestrelCoordinator
@@ -27,6 +28,11 @@ _FORWARD_HEADERS = (
 # Live camera pictures are only current for moments: the browser may ask "has it changed?" and the
 # plugin answers 304, but nothing may be cached on our side.
 _LIVE_CONDITIONAL_HEADERS = ("If-None-Match", "If-Modified-Since")
+
+
+def _detection_number(media_id: str) -> int | None:
+    """The BirdNET-Go detection a recording link names, or None (its numbers start at 1, so "0" names nothing)."""
+    return detection_id_of(int(media_id)) if media_id.isascii() and media_id.isdigit() else None
 
 
 class KestrelMediaView(HomeAssistantView):
@@ -51,7 +57,7 @@ class KestrelMediaView(HomeAssistantView):
 
         if kind == "birdnet_audio":
             # BirdNET-Go's own add-on API, independent of the Kestrel plugin's connectivity.
-            if not media_id.isdigit():
+            if _detection_number(media_id) is None:
                 return web.Response(status=404, text="Media not found")
             return await self._stream(
                 request,
@@ -64,7 +70,7 @@ class KestrelMediaView(HomeAssistantView):
         if kind == "birdnet_preview":
             # The kestrel-audio service's loudness-matched (and where it helps, cleaned) preview.
             previews = self._hass.data.get(DOMAIN, {}).get("audio")
-            if previews is None or not previews.enabled or not media_id.isdigit():
+            if previews is None or not previews.enabled or _detection_number(media_id) is None:
                 return web.Response(status=404, text="Media not found")
             return await self._stream(
                 request,
@@ -91,6 +97,7 @@ class KestrelMediaView(HomeAssistantView):
                 headers,
                 aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
                 cache_control="public, max-age=2592000",
+                optional=True,
             )
 
         coordinator: KestrelCoordinator | None = self._hass.data.get(DOMAIN, {}).get("coordinator")
@@ -120,7 +127,12 @@ class KestrelMediaView(HomeAssistantView):
         *,
         cache_control: str = "private, max-age=300",
         live: bool = False,
+        optional: bool = False,
     ) -> web.StreamResponse:
+        """Stream `url`. `optional` is for decoration the source may simply not have (a reference photo): the
+        source saying "not found" or "still working on it" (404, 202, 503) is an ordinary answer, so it is
+        passed on as 204 No Content, which a browser's image element treats as "no picture" without logging
+        a failed request, instead of as an error."""
         try:
             async with session.get(
                 url, headers=headers, timeout=timeout, allow_redirects=False
@@ -135,6 +147,9 @@ class KestrelMediaView(HomeAssistantView):
                         },
                     )
                 if upstream.status not in (200, 206, 416):
+                    if optional and upstream.status in (202, 404, 503):
+                        _LOGGER.debug("Kestrel optional media %s: upstream answered HTTP %s", url, upstream.status)
+                        return web.Response(status=204, headers={"Cache-Control": "private, max-age=300"})
                     if upstream.status in (202, 404):  # 202: the preview is still being made
                         return web.Response(status=404, text="Media not found")
                     _LOGGER.warning(

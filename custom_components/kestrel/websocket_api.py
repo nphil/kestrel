@@ -103,7 +103,7 @@ def _sign_media_paths(
                 )
         audio = result.get("audio")
         if isinstance(audio, dict):
-            detection_id = audio.get("birdnetDetectionId")
+            detection_id = birdnet_availability.detection_id_of(audio.get("birdnetDetectionId"))
             original = (
                 _signed_media_url(hass, "birdnet_audio", str(detection_id), refresh_token_id)
                 if detection_id is not None
@@ -117,7 +117,7 @@ def _sign_media_paths(
             )
         heard = result.get("heard")
         if isinstance(heard, dict):
-            heard_detection_id = heard.get("birdnetDetectionId")
+            heard_detection_id = birdnet_availability.detection_id_of(heard.get("birdnetDetectionId"))
             heard_original = None
             if heard_detection_id is not None and birdnet_availability.audio_available_now(
                 hass, str(heard_detection_id)

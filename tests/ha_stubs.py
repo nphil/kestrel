@@ -91,12 +91,21 @@ class DataUpdateCoordinator:
 class HomeAssistant:
     def __init__(self) -> None:
         self.data: dict = {}
+        self._tasks: set[asyncio.Future] = set()  # the tasks Home Assistant's own startup waits for
 
     def async_create_task(self, coro: object, name: str | None = None) -> asyncio.Future:
-        return asyncio.ensure_future(coro)
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     def async_create_background_task(self, coro: object, name: str | None = None) -> asyncio.Future:
-        return asyncio.ensure_future(coro)
+        return asyncio.ensure_future(coro)  # not tracked: startup does not wait for it
+
+    async def async_block_till_done(self) -> None:
+        """What Home Assistant's startup does after the integrations are set up: wait for every ordinary task."""
+        while self._tasks:
+            await asyncio.wait(list(self._tasks))
 
 
 class _FakeContent:

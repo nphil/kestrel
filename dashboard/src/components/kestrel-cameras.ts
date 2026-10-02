@@ -1266,7 +1266,7 @@ export class KestrelCameras extends LitElement {
 
   private _renderPickerSheet() {
     if (!this._pickerMounted) return nothing;
-    return html`<kestrel-lu-sheet .open=${this._pickerOpen} .history=${this._isPanel} layer="wrong-picker" heading="What was it?" subheading="Choose a better match or search the species list." @lu-close=${this._onPickerClose}>
+    return html`<kestrel-lu-sheet .open=${this._pickerOpen} .history=${this._isPanel} engine="native" layer="wrong-picker" heading="What was it?" subheading="Choose a better match or search the species list." @lu-close=${this._onPickerClose}>
       ${this._visit ? this._renderPickerBody(this._visit) : nothing}
       <div slot="footer" class="special-choices"><kestrel-lu-button kind="secondary" label="Not an animal" @click=${() => this._correctVisit("not_animal")}></kestrel-lu-button><kestrel-lu-button kind="secondary" label="Can't tell" @click=${() => this._correctVisit("unknown")}></kestrel-lu-button></div>
     </kestrel-lu-sheet>`;
@@ -1301,7 +1301,7 @@ export class KestrelCameras extends LitElement {
   private _renderHelpSheet() {
     if (!this._helpMounted) return nothing;
     const rows = [...TABS.map((tab, index) => [String(index + 1), tab.label] as const), ["Esc", "Close a sheet, or go back"]];
-    return html`<kestrel-lu-sheet .open=${this._helpOpen} .history=${this._isPanel} layer="help" heading="Keyboard shortcuts" subheading="Single keys work anywhere in Kestrel." @lu-close=${this._onHelpClose}>
+    return html`<kestrel-lu-sheet .open=${this._helpOpen} .history=${this._isPanel} engine="native" layer="help" heading="Keyboard shortcuts" subheading="Single keys work anywhere in Kestrel." @lu-close=${this._onHelpClose}>
       ${rows.map(([key, label]) => html`<kestrel-lu-row .heading=${label}><kbd slot="trailing">${key}</kbd></kestrel-lu-row>`)}
     </kestrel-lu-sheet>`;
   }

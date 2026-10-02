@@ -29,6 +29,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 
 from .announced import new_visit_from_event
+from .birdnet_availability import detection_id_of
 from .client import KestrelApiError
 from .const import AUDIO_KEY_HEADER, BIRDNET_GO_INTERNAL_URL, DEFAULT_AUDIO_BACKFILL_DAYS, DOMAIN, SIGNAL_EVENTS
 
@@ -107,13 +108,9 @@ class _Original:
     content_type: str
 
 
-def _detection_id(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _visit_detection_id(visit: dict[str, Any]) -> int | None:
     audio = visit.get("audio")
-    return _detection_id(audio.get("birdnetDetectionId")) if isinstance(audio, dict) else None
+    return detection_id_of(audio.get("birdnetDetectionId")) if isinstance(audio, dict) else None
 
 
 def detection_ids(value: Any, found: list[int] | None = None) -> list[int]:
@@ -125,7 +122,7 @@ def detection_ids(value: Any, found: list[int] | None = None) -> list[int]:
     elif isinstance(value, dict):
         for key in ("audio", "heard"):
             part = value.get(key)
-            if isinstance(part, dict) and (identifier := _detection_id(part.get("birdnetDetectionId"))) is not None:
+            if isinstance(part, dict) and (identifier := detection_id_of(part.get("birdnetDetectionId"))) is not None:
                 found.append(identifier)
         for item in value.values():
             if isinstance(item, (list, dict)):
@@ -699,7 +696,7 @@ class AudioPreviews:
         status, stats = await self._request("GET", "/v1/stats")
         queue = stats.get("queue") if status == 200 and isinstance(stats, dict) else None
         depth = queue.get("depth") if isinstance(queue, dict) else None
-        return _detection_id(depth)
+        return depth if isinstance(depth, int) and not isinstance(depth, bool) else None
 
     # --- diagnostics -------------------------------------------------------------------------
 

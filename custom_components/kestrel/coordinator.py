@@ -67,13 +67,19 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {"cameras": self._camera_list(), "events": [], "event_generation": 0}
 
     def async_start(self) -> None:
-        """Start the long-poll task after entities and websocket handlers are ready."""
+        """Start the long-poll task after entities and websocket handlers are ready.
+
+        Both are BACKGROUND tasks: Home Assistant's startup waits for every ordinary task created while it
+        sets integrations up, and the long poll never ends, so as an ordinary task it kept every start
+        waiting for the whole 300 s bootstrap timeout ("Setup timed out for bootstrap"). `async_stop`
+        cancels them on unload and on shutdown.
+        """
         if self._poll_task is None:
-            self._poll_task = self.hass.async_create_task(
+            self._poll_task = self.hass.async_create_background_task(
                 self._async_poll_events(), "kestrel event long poll"
             )
         if self._species_map_task is None:
-            self._species_map_task = self.hass.async_create_task(
+            self._species_map_task = self.hass.async_create_background_task(
                 self._async_load_species_map(), "kestrel birdnet species map"
             )
 

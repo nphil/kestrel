@@ -303,7 +303,7 @@ export class KestrelSpeciesSheet extends LitElement {
     const showChip = picture.isReference && !this._photoFailed;
     const group = GROUP_LABEL[species.grp] ?? GROUP_LABEL.unknown;
     const subheading = `${group}${species.first ? ` · First detected ${dateTime(species.first)}` : ""}`;
-    return html`<kestrel-lu-sheet .open=${this.open} .history=${false} layer="species" .heading=${species.species} .subheading=${subheading} @lu-close=${this._onClose}>
+    return html`<kestrel-lu-sheet .open=${this.open} .history=${false} engine="native" layer="species" .heading=${species.species} .subheading=${subheading} @lu-close=${this._onClose}>
       <div class="hero">
         <div class="photo">
           <kestrel-lu-image .src=${picture.url ?? ""} ratio="16/10" alt=${species.species} @lu-image-error=${() => { this._photoFailed = true; }}>${species.heard ? heardHero(KIND.heard.icon, "fallback") : nothing}</kestrel-lu-image>
