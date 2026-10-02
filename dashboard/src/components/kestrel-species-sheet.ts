@@ -4,13 +4,9 @@ import { clamp, dateTime, sentence, timestamp, when } from "../format.ts";
 import { BASE_CSS, CONTROLS_CSS } from "../styles/tokens.ts";
 import type { Camera, HomeAssistant, Species, Visit, VisitKind } from "../types.ts";
 import { sameMedia } from "../urls.ts";
-import type { AudioRow } from "../ui/audio-list.ts";
-import type { RailItem } from "../ui/media-rail.ts";
+import type { AudioListRow, RailItem } from "lucent-ha";
 import { GROUP_LABEL, KIND, evidenceWord, recordingNotes } from "../vocab.ts";
-import "../ui/audio-list.ts";
 import "../ui/lazy-image.ts";
-import "../ui/media-rail.ts";
-import "../ui/section.ts";
 import "../ui/sheet.ts";
 
 interface Section { items: Visit[]; next: string | null; state: "loading" | "ready" | "error" }
@@ -74,7 +70,7 @@ export class KestrelSpeciesSheet extends LitElement {
   private _loadedFor = "";
   private _requests: Record<VisitKind, number> = { seen: 0, heard: 0 };
   private _rail: RailItem[] = [];
-  private _rows: AudioRow[] = [];
+  private _rows: AudioListRow[] = [];
 
   constructor() {
     super();
@@ -131,7 +127,7 @@ export class KestrelSpeciesSheet extends LitElement {
     };
   }
 
-  private _audioRow(visit: Visit): AudioRow {
+  private _audioRow(visit: Visit): AudioListRow {
     const time = sentence(when(visit.startedAt));
     const score = typeof visit.score === "number" ? `${Math.round(visit.score * 100)}%` : undefined;
     const { mark } = recordingNotes(visit.audioInfo);
@@ -220,11 +216,11 @@ export class KestrelSpeciesSheet extends LitElement {
     const [one, many] = NOUN[kind];
     const summary = total > 0 ? `${total} ${total === 1 ? one : many}` : "";
     const loadingMore = section.state === "loading" && section.items.length > 0;
-    return html`<kestrel-section .icon=${KIND[kind].icon} .heading=${TITLE[kind]} .summary=${summary} .state=${section.state} .count=${section.items.length} .empty=${EMPTY[kind]} .noun=${many} .variant=${kind === "seen" ? "thumbs" : "rows"} @retry=${() => this._load(kind, section.items.length > 0)}>
+    return html`<kestrel-lu-section .icon=${KIND[kind].icon} .heading=${TITLE[kind]} .summary=${summary} .state=${section.state} .count=${section.items.length} .empty=${EMPTY[kind]} .noun=${many} .variant=${kind === "seen" ? "thumbs" : "rows"} @lu-retry=${() => this._load(kind, section.items.length > 0)}>
       ${kind === "seen"
-        ? html`<kestrel-media-rail .items=${this._rail} .more=${section.next !== null} .loading=${loadingMore} @select=${(event: Event) => this._open(event, "seen")} @warm=${this._warm} @more=${() => this._load("seen", true)}></kestrel-media-rail>`
-        : html`<kestrel-audio-list .rows=${this._rows} .more=${section.next !== null} .loading=${loadingMore} @select=${(event: Event) => this._open(event, "heard")} @more=${() => this._load("heard", true)}></kestrel-audio-list>`}
-    </kestrel-section>`;
+        ? html`<kestrel-lu-media-rail .items=${this._rail} .more=${section.next !== null} .loading=${loadingMore} @lu-select=${(event: Event) => this._open(event, "seen")} @lu-warm=${this._warm} @lu-more=${() => this._load("seen", true)}></kestrel-lu-media-rail>`
+        : html`<kestrel-lu-audio-list .rows=${this._rows} .more=${section.next !== null} .loading=${loadingMore} @lu-select=${(event: Event) => this._open(event, "heard")} @lu-more=${() => this._load("heard", true)}></kestrel-lu-audio-list>`}
+    </kestrel-lu-section>`;
   }
 
   private _renderHours(species: Species) {

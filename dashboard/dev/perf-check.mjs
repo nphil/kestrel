@@ -56,6 +56,9 @@ const opts = {
   shots: !argv.includes("--no-shots"),
   retries: flag("retries") ? Number(flag("retries")) : 1,
   json: argv.includes("--json"),
+  // Judge only what does not depend on how busy the machine is (layout, feedback shown, targets, dead taps, Back, audio
+  // one at a time, keyboard, console errors). Timing gates are still measured and printed, but they do not fail the run.
+  correctnessOnly: argv.includes("--correctness-only"),
 };
 
 // Device sizes (Lucent profiles: LANGUAGE.md section 7). `throttle` approximates his iPhone on touch devices.
@@ -298,14 +301,14 @@ async function pressRows(ctx, view) {
     rows.push(await press(ctx, "tab", NAV("Wildlife")));
   } else if (view === "wildlife") {
     rows.push(await press(ctx, "species tile", `(k) => k.host().shadowRoot.querySelector('.species-tile:not(.skeleton)')`));
-    rows.push(await press(ctx, "filter option", `(k) => [...k.host().shadowRoot.querySelector('kestrel-segmented').shadowRoot.querySelectorAll('[role=radio]')].find((r) => r.getAttribute('aria-checked') !== 'true')`));
+    rows.push(await press(ctx, "filter option", `(k) => [...k.host().shadowRoot.querySelector('kestrel-lu-segmented').shadowRoot.querySelectorAll('[role=radio]')].find((r) => r.getAttribute('aria-checked') !== 'true')`));
     rows.push(await press(ctx, "tab", NAV("Live")));
   } else if (view === "sheet") {
     const sheet = `k.deep(document, 'kestrel-species-sheet')[0].shadowRoot`;
     const title = `(k) => k.deep(document, 'kestrel-sheet')[0]?.shadowRoot.querySelector('#title')`;
-    rows.push(await press(ctx, "video thumbnail", `(k) => ${sheet}.querySelector('kestrel-media-rail')?.shadowRoot.querySelector('.item')`, title));
-    rows.push(await press(ctx, "play button", `(k) => ${sheet}.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`, title));
-    rows.push(await press(ctx, "recording row", `(k) => ${sheet}.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.open')`, title));
+    rows.push(await press(ctx, "video thumbnail", `(k) => ${sheet}.querySelector('kestrel-lu-media-rail')?.shadowRoot.querySelector('.item')`, title));
+    rows.push(await press(ctx, "play button", `(k) => ${sheet}.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`, title));
+    rows.push(await press(ctx, "recording row", `(k) => ${sheet}.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.open')`, title));
     rows.push(await press(ctx, "close button", `(k) => k.deep(document, 'kestrel-sheet')[0]?.shadowRoot.querySelector('.close')`, title));
   }
   return rows;
@@ -416,7 +419,7 @@ const SPECIES_TILE = (needle) => `(k) => [...k.host().shadowRoot.querySelectorAl
 async function openSpecies(ctx, needle) {
   const { page } = ctx;
   if (!await clickAt(ctx, SPECIES_TILE(needle))) return false;
-  await page.waitForFunction(() => window.__kp.deep(document, "kestrel-species-sheet")[0]?.shadowRoot.querySelector("kestrel-section[state=ready], kestrel-media-rail, kestrel-audio-list"), null, { timeout: 15000 }).catch(() => undefined);
+  await page.waitForFunction(() => window.__kp.deep(document, "kestrel-species-sheet")[0]?.shadowRoot.querySelector("kestrel-lu-media-rail, kestrel-lu-audio-list"), null, { timeout: 15000 }).catch(() => undefined);
   await page.waitForTimeout(600);
   return true;
 }
@@ -424,7 +427,7 @@ async function openSpecies(ctx, needle) {
 /** Chooses an option of the Wildlife filter by its label and waits for the grid to follow. */
 async function setFilter(ctx, label) {
   const { page } = ctx;
-  await page.evaluate((text) => { const seg = window.__kp.host().shadowRoot.querySelector("kestrel-segmented"); [...seg.shadowRoot.querySelectorAll("[role=radio]")].find((r) => r.textContent.trim().startsWith(text))?.click(); }, label);
+  await page.evaluate((text) => { const seg = window.__kp.host().shadowRoot.querySelector("kestrel-lu-segmented"); [...seg.shadowRoot.querySelectorAll("[role=radio]")].find((r) => r.textContent.trim().startsWith(text))?.click(); }, label);
   await page.waitForTimeout(label === "All" ? 400 : 200);
   if (label !== "All") await page.waitForFunction(() => { const tiles = window.__kp.host().shadowRoot.querySelectorAll(".species-tile:not(.skeleton)"); return tiles.length > 0 && [...tiles].every((t) => /video|photo/.test(t.getAttribute("aria-label") || "")); }, null, { timeout: 8000 }).catch(() => undefined);
 }
@@ -439,7 +442,7 @@ async function pickSpecies(ctx) {
     const best = labels.map((l) => ({ name: l.split(".")[0], n: count(l) })).sort((a, b) => b.n - a.n)[0];
     return best?.n ? best.name : null;
   };
-  const filter = (label) => page.evaluate((text) => { const seg = window.__kp.host().shadowRoot.querySelector("kestrel-segmented"); [...seg.shadowRoot.querySelectorAll("[role=radio]")].find((r) => r.textContent.trim().startsWith(text))?.click(); }, label);
+  const filter = (label) => page.evaluate((text) => { const seg = window.__kp.host().shadowRoot.querySelector("kestrel-lu-segmented"); [...seg.shadowRoot.querySelectorAll("[role=radio]")].find((r) => r.textContent.trim().startsWith(text))?.click(); }, label);
   await filter("All");
   await page.waitForTimeout(300);
   const all = await read();
@@ -455,9 +458,9 @@ async function pickSpecies(ctx) {
 
 async function audioStart(ctx) {
   const { page } = ctx;
-  const find = `(k) => k.deep(document, 'kestrel-species-sheet')[0]?.shadowRoot.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`;
+  const find = `(k) => k.deep(document, 'kestrel-species-sheet')[0]?.shadowRoot.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`;
   await page.evaluate(() => {
-    const audio = window.__kp.deep(document, "kestrel-audio-list")[0].shadowRoot.querySelector("audio");
+    const audio = window.__kp.deep(document, "kestrel-lu-audio-list")[0].shadowRoot.querySelector("audio");
     window.__audio = new Promise((resolve) => {
       let down = 0; let tap = 0;
       window.addEventListener("pointerdown", (e) => { down = e.timeStamp; }, { capture: true, once: true });
@@ -473,7 +476,7 @@ async function audioStart(ctx) {
 
 async function oneAtATime(ctx) {
   const { page } = ctx;
-  await clickAt(ctx, `(k) => [...k.deep(document, 'kestrel-species-sheet')[0].shadowRoot.querySelector('kestrel-audio-list').shadowRoot.querySelectorAll('.play:not(:disabled)')][1]`);
+  await clickAt(ctx, `(k) => [...k.deep(document, 'kestrel-species-sheet')[0].shadowRoot.querySelector('kestrel-lu-audio-list').shadowRoot.querySelectorAll('.play:not(:disabled)')][1]`);
   await page.waitForTimeout(800);
   return page.evaluate(() => {
     const playing = window.__kp.deep(document, "audio").filter((a) => !a.paused && !a.ended).length;
@@ -496,7 +499,7 @@ async function videoStart(ctx) {
       requestAnimationFrame(tick);
     });
   });
-  const find = `(k) => [...k.deep(document, 'kestrel-species-sheet')[0].shadowRoot.querySelector('kestrel-media-rail').shadowRoot.querySelectorAll('.item')].find((i) => i.querySelector('.glyph'))`;
+  const find = `(k) => [...k.deep(document, 'kestrel-species-sheet')[0].shadowRoot.querySelector('kestrel-lu-media-rail').shadowRoot.querySelectorAll('.item')].find((i) => i.querySelector('.glyph'))`;
   if (!await clickAt(ctx, find)) return { skipped: "no video thumbnail" };
   const result = await page.evaluate(() => window.__video);
   return { ...result, pass: result.ms >= 0 && result.ms <= GATE.videoMs };
@@ -510,7 +513,7 @@ async function backRestores(ctx, needle) {
   await page.waitForTimeout(300);
   if (!await openSpecies(ctx, needle)) return { skipped: "species not listed" };
   const opened = await read();
-  const opener = `(k) => { const s = k.deep(document, 'kestrel-species-sheet')[0].shadowRoot; return s.querySelector('kestrel-media-rail')?.shadowRoot.querySelector('.item') ?? s.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.open'); }`;
+  const opener = `(k) => { const s = k.deep(document, 'kestrel-species-sheet')[0].shadowRoot; return s.querySelector('kestrel-lu-media-rail')?.shadowRoot.querySelector('.item') ?? s.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.open'); }`;
   if (!await clickAt(ctx, opener)) return { skipped: "nothing to open" };
   await page.waitForFunction(() => location.pathname.endsWith("/visit"), null, { timeout: 8000 }).catch(() => undefined);
   await page.waitForTimeout(700);
@@ -654,8 +657,8 @@ async function runSize(browser, key, size, harnessUrl) {
       c.scrollGrid.pass = c.scrollGrid.ownWorstMs <= GATE.longTaskMs && c.scrollGrid.cls <= GATE.cls;
       await ctx.page.evaluate(() => window.scrollTo(0, 0));
       if (pick.heard && await openSpecies(ctx, pick.heard)) {
-        for (let i = 0; i < 4; i++) { if (!await clickAt(ctx, `(k) => k.deep(document, 'kestrel-species-sheet')[0]?.shadowRoot.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.text-button:not(:disabled)')`)) break; await ctx.page.waitForTimeout(700); }
-        const rows = await ctx.page.evaluate(() => window.__kp.deep(document, "kestrel-audio-list")[0]?.rows?.length ?? 0);
+        for (let i = 0; i < 4; i++) { if (!await clickAt(ctx, `(k) => k.deep(document, 'kestrel-species-sheet')[0]?.shadowRoot.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.text-button:not(:disabled)')`)) break; await ctx.page.waitForTimeout(700); }
+        const rows = await ctx.page.evaluate(() => window.__kp.deep(document, "kestrel-lu-audio-list")[0]?.rows?.length ?? 0);
         c.scrollRecordings = { rows, ...await scrollSheetList(ctx) };
         c.scrollRecordings.pass = (c.scrollRecordings.ownWorstMs ?? 0) <= GATE.longTaskMs && (c.scrollRecordings.cls ?? 0) <= GATE.cls;
         await ctx.page.evaluate(() => { const b = window.__kp.deep(document, "kestrel-sheet")[0]?.shadowRoot.querySelector(".body"); if (b) b.scrollTo(0, 0); });
@@ -706,9 +709,11 @@ function judge(report) {
   const push = (gate, detail) => fails.push(`${report.size}: ${gate} - ${detail}`);
   const c = report.checks;
   if (c.fatal) push("run", c.fatal.split("\n")[0]);
-  if (c.open && !c.open.pass) push("open", JSON.stringify(c.open));
+  const timing = !opts.correctnessOnly;
+  if (timing && c.open && !c.open.pass) push("open", JSON.stringify(c.open));
+  else if (c.open?.spinnerSeen) push("open", "a lone spinner was shown");
   for (const key of ["layoutLive", "layoutWildlife"]) if (c[key] && !c[key].pass) push("layout", `${key}: ${JSON.stringify(c[key])}`);
-  for (const key of ["pressLive", "pressWildlife", "pressSheet"]) for (const row of c[key] ?? []) if (!row.skipped && !row.pass) push("press", `${row.name}: ${row.ms} ms (inert press ${row.floorMs} ms), feedback ${row.changed ? "shown" : "MISSING"}`);
+  for (const key of ["pressLive", "pressWildlife", "pressSheet"]) for (const row of c[key] ?? []) if (!row.skipped && !row.pass && (timing || !row.changed)) push("press", `${row.name}: ${row.ms} ms (inert press ${row.floorMs} ms), feedback ${row.changed ? "shown" : "MISSING"}`);
   for (const key of ["staticLive", "staticWildlife", "staticSheet", "staticInsights", "staticVisit"]) {
     const s = c[key];
     if (!s) continue;
@@ -716,12 +721,12 @@ function judge(report) {
     if (s.dead.length) push("dead taps", `${key}: ${s.dead.join("; ")}`);
     if (s.hoverOutsideMedia.length) push("hover", `${key}: ${s.hoverOutsideMedia.join("; ")}`);
   }
-  if (c.tabs && !c.tabs.pass) push("tabs", JSON.stringify(c.tabs));
-  if (c.scrollGrid && !c.scrollGrid.pass) push("scroll grid", JSON.stringify(c.scrollGrid));
-  if (c.scrollRecordings && !c.scrollRecordings.pass) push("scroll recordings", JSON.stringify(c.scrollRecordings));
-  if (c.audio && !c.audio.skipped && !c.audio.pass) push("audio", `${c.audio.ms} ms`);
+  if (timing && c.tabs && !c.tabs.pass) push("tabs", JSON.stringify(c.tabs));
+  if (c.scrollGrid && !c.scrollGrid.pass && (timing || c.scrollGrid.cls > GATE.cls)) push("scroll grid", JSON.stringify(c.scrollGrid));
+  if (c.scrollRecordings && !c.scrollRecordings.pass && (timing || c.scrollRecordings.cls > GATE.cls)) push("scroll recordings", JSON.stringify(c.scrollRecordings));
+  if (timing && c.audio && !c.audio.skipped && !c.audio.pass) push("audio", `${c.audio.ms} ms`);
   if (c.oneAtATime && !c.oneAtATime.pass) push("one at a time", `${c.oneAtATime.playing} playing`);
-  if (c.video && !c.video.skipped && !c.video.pass) push("video", `${c.video.ms} ms`);
+  if (timing && c.video && !c.video.skipped && !c.video.pass) push("video", `${c.video.ms} ms`);
   if (c.back && !c.back.skipped && !c.back.pass) push("back", JSON.stringify(c.back));
   if (c.keyboard && !c.keyboard.pass) push("keyboard", JSON.stringify(c.keyboard));
   if (report.consoleErrors.length) push("console", report.consoleErrors.join(" | "));
@@ -779,7 +784,7 @@ else {
     if (r.foreignRejections) console.log(`note      ${r.foreignRejections} bare "closed" rejection(s) from Scrypted's live cards being torn down (not Kestrel's, not counted)`);
     if (c.fatal) console.log(`FATAL     ${c.fatal.split("\n")[0]}`);
   }
-  console.log(failures.length ? `\nFAILED ${failures.length} gate(s):\n- ${failures.join("\n- ")}` : "\nAll gates passed.");
+  console.log(failures.length ? `\nFAILED ${failures.length} gate(s):\n- ${failures.join("\n- ")}` : `\nAll gates passed${opts.correctnessOnly ? " (correctness only: timing was measured but not judged)" : ""}.`);
   console.log(`\nReport: ${join(opts.out, "perf-check.json")}${opts.shots ? ` (screenshots in ${opts.out})` : ""}`);
 }
 process.exit(failures.length ? 1 : 0);

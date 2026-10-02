@@ -1,5 +1,5 @@
 import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from "lit";
-import KestrelMark from "../../../assets/kestrel-icon-128.png";
+import KestrelMark from "../../../assets/kestrel-mark-96.png";
 import { api, asVisit, cameraArray, cameraPicture, extractLabels, goBack, isNotFound, navigate, routeView, speciesArray, speciesFromLocation, speciesPicture, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
 import { readCached, writeCached } from "../cache.ts";
 import { ago, clamp, dateTime, formatMiB, sentence, timestamp, when } from "../format.ts";
@@ -10,10 +10,8 @@ import { sameMedia } from "../urls.ts";
 import { filterCounts, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberedFilter, type SpeciesFilter } from "../wildlife.ts";
 import { PARTS_CSS, badge } from "../ui/parts.ts";
 import { PanelProfile } from "../ui/profile.ts";
-import { trackPresses } from "../ui/press.ts";
-import "../ui/lazy-audio.ts";
+import { trackPresses } from "lucent-ha";
 import "../ui/lazy-image.ts";
-import "../ui/segmented.ts";
 import "../ui/sheet.ts";
 import "../ui/live-picture.ts";
 import "./kestrel-live-player.ts";
@@ -944,7 +942,7 @@ export class KestrelCameras extends LitElement {
   private _renderRecording(src: string, source: { audioOriginal?: string | null; audioInfo?: AudioInfo | null } | null, label: string) {
     const original = source ? visitAudioOriginal(source) : null;
     const notes = recordingNotes(source?.audioInfo);
-    return html`<kestrel-lazy-audio .src=${src} .original=${original && !sameMedia(original, src) ? original : ""} .mark=${notes.mark} .caption=${notes.caption} label=${label} preload="metadata"></kestrel-lazy-audio>`;
+    return html`<kestrel-lu-audio-player .src=${src} .original=${original && !sameMedia(original, src) ? original : ""} .mark=${notes.mark} .caption=${notes.caption} label=${label} preload="metadata"></kestrel-lu-audio-player>`;
   }
 
   private _statusLabel(status: Visit["status"]): string {
@@ -1011,7 +1009,7 @@ export class KestrelCameras extends LitElement {
     ];
     return html`<section class="wildlife-view">
       <div class="section-heading"><div><h1>Wildlife</h1><p class="muted summary"><span>${counts.all} species</span><span aria-hidden="true">·</span><span><ha-icon .icon=${KIND.seen.icon} aria-hidden="true"></ha-icon>${counts.seen} on camera</span><span aria-hidden="true">·</span><span><ha-icon .icon=${KIND.heard.icon} aria-hidden="true"></ha-icon>${counts.heard} heard</span></p></div></div>
-      <kestrel-segmented label="Show species" .value=${this._speciesFilter} .options=${options} @change=${this._onFilter}></kestrel-segmented>
+      <kestrel-lu-segmented label="Show species" .value=${this._speciesFilter} .options=${options} @lu-change=${this._onFilter}></kestrel-lu-segmented>
       ${visible.length
         ? html`<div class="species-grid">${visible.map((species) => this._renderSpeciesTile(species))}</div>
           ${this._speciesVisible < shown.length ? html`<button class="pill secondary show-more" type="button" @click=${() => { this._speciesVisible = Math.min(this._speciesVisible + 24, shown.length); }}>Show more species</button>` : nothing}`
@@ -1289,10 +1287,10 @@ export class KestrelCameras extends LitElement {
     :host([data-lu-short]) .navigation { position: static; grid-column: 1; grid-row: 1 / span 2; display: flex; flex-direction: column; justify-content: flex-start; height: auto; padding: var(--lu-space-2) var(--lu-space-1); border-top: 0; border-right: 1px solid var(--lu-edge); background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; }
     :host([data-lu-short]) .nav-item { width: 100%; min-height: calc(var(--lu-target) + var(--lu-space-3)); flex-direction: column; gap: 2px; padding: var(--lu-space-1); border-radius: var(--lu-radius-control); font-size: var(--lu-type-caption); line-height: 1.2; text-align: center; }
     :host([data-lu-short]) .wildlife-view { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--lu-space-3) var(--lu-space-4); }
-    :host([data-lu-short]) .wildlife-view > :not(.section-heading):not(kestrel-segmented) { grid-column: 1 / -1; }
+    :host([data-lu-short]) .wildlife-view > :not(.section-heading):not(kestrel-lu-segmented) { grid-column: 1 / -1; }
     :host([data-lu-short]) main { grid-column: 2; grid-row: 2; padding-bottom: var(--lu-edge-y); }
     :host([data-lu-short]) .toast { bottom: var(--lu-space-3); }
-    :host([data-lu-short]) kestrel-segmented { min-width: calc(var(--lu-target) * 7); }
+    :host([data-lu-short]) kestrel-lu-segmented { min-width: calc(var(--lu-target) * 7); }
     :host([data-lu-short][data-lu-profile="phone"]) .species-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr)); }
     /* A short screen gives the picture the whole height and puts the name, status and sightings beside it. */
     :host([data-lu-short]) .focused-camera { grid-template-columns: minmax(0, 1fr) minmax(11rem, 16rem); grid-template-rows: auto 1fr; align-items: start; column-gap: var(--lu-space-4); }

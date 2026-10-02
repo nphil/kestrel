@@ -121,7 +121,7 @@ await page.evaluate((nav) => (new Function(`return (${nav})`))()(window.__kp()).
 await page.waitForFunction(() => window.__kp().shadowRoot.querySelector(".species-tile:not(.skeleton)"), null, { timeout: 30000 });
 await page.waitForTimeout(2000);
 await compare("species tile", "(k) => k.shadowRoot.querySelector('.species-tile:not(.skeleton)')");
-await compare("filter option", "(k) => [...k.shadowRoot.querySelector('kestrel-segmented').shadowRoot.querySelectorAll('[role=radio]')].find((r) => r.getAttribute('aria-checked') !== 'true')");
+await compare("filter option", "(k) => [...k.shadowRoot.querySelector('kestrel-lu-segmented').shadowRoot.querySelectorAll('[role=radio]')].find((r) => r.getAttribute('aria-checked') !== 'true')");
 
 // The sheet of the species with the most recordings.
 const opened = await page.evaluate(() => {
@@ -133,12 +133,12 @@ const opened = await page.evaluate(() => {
   return true;
 });
 if (opened) {
-  await page.waitForFunction(() => window.__deep(document, "kestrel-species-sheet")[0]?.shadowRoot.querySelector("kestrel-audio-list")?.shadowRoot.querySelector(".play"), null, { timeout: 20000 }).catch(() => undefined);
+  await page.waitForFunction(() => window.__deep(document, "kestrel-species-sheet")[0]?.shadowRoot.querySelector("kestrel-lu-audio-list")?.shadowRoot.querySelector(".play"), null, { timeout: 20000 }).catch(() => undefined);
   await page.waitForTimeout(2500);
   const sheet = "window.__deep(document, 'kestrel-species-sheet')[0].shadowRoot";
   const title = "(k) => window.__deep(document, 'kestrel-sheet')[0].shadowRoot.querySelector('#title')";
-  await compare("sheet: play button", `(k) => ${sheet}.querySelector('kestrel-audio-list').shadowRoot.querySelector('.play:not(:disabled)')`, title);
-  await compare("sheet: recording row", `(k) => ${sheet}.querySelector('kestrel-audio-list').shadowRoot.querySelector('.open')`, title);
+  await compare("sheet: play button", `(k) => ${sheet}.querySelector('kestrel-lu-audio-list').shadowRoot.querySelector('.play:not(:disabled)')`, title);
+  await compare("sheet: recording row", `(k) => ${sheet}.querySelector('kestrel-lu-audio-list').shadowRoot.querySelector('.open')`, title);
   await compare("sheet: close button", "(k) => window.__deep(document, 'kestrel-sheet')[0].shadowRoot.querySelector('.close')", title);
 } else console.log("sheet                    no species with recordings, skipped");
 
