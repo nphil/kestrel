@@ -174,8 +174,14 @@ async function openContext(browser, size, harnessUrl) {
   const errors = [];
   page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(m.text().slice(0, 200)); });
   page.on("response", (r) => { if (r.status() >= 400 && !r.url().endsWith("/favicon.ico") && !(opts.target === "harness" && r.url().includes("/media/camera/")) && !/\/(api\/websocket|auth\/)/.test(r.url())) errors.push(`${r.status()} ${new URL(r.url()).pathname.slice(0, 80)}`); });
-  page.on("pageerror", (e) => errors.push(`pageerror: ${String(e).slice(0, 200)}`));
-  return { context, page, cdp, errors, throttle, harnessUrl };
+  // Scrypted's live cards reject with the bare string "closed" (no Error, no stack) when they are torn down while still
+  // connecting; Kestrel only ever throws Errors, so those are counted and reported, but they are not the panel's failure.
+  const foreign = [];
+  page.on("pageerror", (e) => {
+    if (!e.name && !e.stack && String(e.message) === "closed") foreign.push("closed");
+    else errors.push(`pageerror: ${String(e).slice(0, 200)}`);
+  });
+  return { context, page, cdp, errors, foreign, throttle, harnessUrl };
 }
 
 async function gotoPanel(ctx, view = "live", { cold = false } = {}) {
@@ -689,6 +695,8 @@ async function runSize(browser, key, size, harnessUrl) {
     c.fatal = String(error?.stack ?? error).slice(0, 500);
   }
   report.consoleErrors = [...new Set(ctx.errors)].slice(0, 5);
+  report.foreignRejections = ctx.foreign.length;
+  report.loadAfter = +loadavg()[0].toFixed(1);
   await ctx.context.close();
   return report;
 }
@@ -755,7 +763,9 @@ else {
   for (const r of reports) {
     const c = r.checks;
     const worst = (rows) => rows?.filter((x) => !x.skipped).map((x) => `${x.name} ${x.ms}ms${x.ms > GATE.pressMs ? ` (inert ${x.floorMs})` : ""}${x.changed ? "" : "!"}${x.limitedByHost ? "~" : ""}`).join(", ");
-    console.log(`\n== ${r.size} ${r.viewport} (${r.throttle} CPU; host load ${r.loadBefore} on ${cpus().length} cores, 3M-op probe ${r.cpuProbeMs} ms) ==`);
+    // Timings only mean something on a quiet machine (1-minute load under 8 before and after); otherwise they are provisional.
+    const quiet = r.loadBefore < 8 && (r.loadAfter ?? 0) < 8;
+    console.log(`\n== ${r.size} ${r.viewport} (${r.throttle} CPU; host load ${r.loadBefore} -> ${r.loadAfter ?? "?"} on ${cpus().length} cores, 3M-op probe ${r.cpuProbeMs} ms${quiet ? "" : "; PROVISIONAL, the host was busy"}) ==`);
     if (c.layoutLive) console.log(`layout    profile=${c.layoutLive.profile} short=${c.layoutLive.short} panel=${c.layoutLive.panelW}px columns=${c.layoutLive.columns} overflowX=${c.layoutLive.overflowX}`);
     if (c.open) console.log(`open      cold ${c.open.coldPanelToContentMs} ms (skeleton ${c.open.coldSkeletonMs} ms, spinner ${c.open.spinnerSeen}), warm ${c.open.warmPanelToContentMs} ms`);
     console.log(`press     (each control is compared with an inert press taken just before it; ~ = over 50 ms but within ${GATE.pressOverFloorMs * (r.throttle === "1x" ? 1 : 2)} ms of that, i.e. the machine, not the control)\n          live: ${worst(c.pressLive) ?? "-"} | wildlife: ${worst(c.pressWildlife) ?? "-"} | sheet: ${worst(c.pressSheet) ?? "-"}`);
@@ -766,6 +776,7 @@ else {
     if (c.back) console.log(`back      ${c.back.skipped ?? `scroll ${c.back.start} -> ${c.back.finalScroll} (drift ${c.back.drift}px); sheet reopens ${c.back.backToSheet}; closes ${c.back.closed}`}`);
     for (const key of ["staticLive", "staticWildlife", "staticSheet", "staticInsights", "staticVisit"]) if (c[key]) console.log(`static    ${key.slice(6)}: ${c[key].interactive} controls, ${c[key].small.length} under ${GATE.targetPx}px, ${c[key].dead.length} dead-looking, ${c[key].hoverOutsideMedia.length} hover-only rules`);
     if (c.keyboard) console.log(`keyboard  shortcut ${c.keyboard.shortcutSwitchesView}, help ${c.keyboard.helpOpens}, focus ring ${c.keyboard.focusRingVisible}`);
+    if (r.foreignRejections) console.log(`note      ${r.foreignRejections} bare "closed" rejection(s) from Scrypted's live cards being torn down (not Kestrel's, not counted)`);
     if (c.fatal) console.log(`FATAL     ${c.fatal.split("\n")[0]}`);
   }
   console.log(failures.length ? `\nFAILED ${failures.length} gate(s):\n- ${failures.join("\n- ")}` : "\nAll gates passed.");
