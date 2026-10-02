@@ -156,8 +156,8 @@ export class KestrelAudioList extends LitElement {
     ul { margin: 0; padding: 0; list-style: none; }
     li { position: relative; display: flex; align-items: center; gap: var(--lu-space-2); height: var(--lu-row); border-bottom: 1px solid var(--lu-edge); content-visibility: auto; contain-intrinsic-size: auto var(--lu-row); }
     li:last-child { border-bottom: 0; }
-    .play { display: grid; flex: none; width: var(--lu-target); height: var(--lu-target); place-items: center; padding: 0; border: 1px solid var(--lu-edge-raised); border-radius: 50%; color: var(--lu-ink); background: var(--lu-glass-raised); box-shadow: var(--lu-highlight-raised); cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-    .play:is(:active, [data-pressed]):not(:disabled) { transform: scale(var(--lu-scale-pressed)); background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
+    .play { display: grid; flex: none; width: var(--lu-target); height: var(--lu-target); place-items: center; padding: 0; border: 1px solid var(--lu-edge-raised); border-radius: 50%; color: var(--lu-ink); background: var(--lu-glass-raised); box-shadow: var(--lu-highlight-raised); cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .play:is(:active, [data-pressed]):not(:disabled) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
     .active .play { border-color: transparent; color: var(--lu-accent-ink); background: var(--lu-accent); box-shadow: none; }
     .play:disabled { color: var(--lu-ink-3); background: var(--lu-tile); box-shadow: none; cursor: not-allowed; }
     .play ha-icon { --mdc-icon-size: 24px; width: 24px; height: 24px; }

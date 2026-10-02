@@ -83,7 +83,6 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     --lu-motion-layer: 220ms;
     --lu-motion-scroll: 300ms;
     --lu-motion-exit: 180ms;
-    --lu-scale-pressed: .97;
     --lu-font: var(--ha-font-family-body, var(--paper-font-body1_-_font-family, inherit));
   }
   :host([data-lu-profile="phone"]) { --lu-row: 56px; --lu-type-display: 48px; --lu-type-title: 24px; --lu-type-body: 16px; --lu-type-label: 14px; --lu-type-caption: 12px; --lu-edge-x: 16px; --lu-edge-y: 16px; --lu-gutter: 12px; }
@@ -92,7 +91,7 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
   :host([data-lu-profile="smart"]) { --lu-target: 64px; --lu-row: 64px; --lu-type-display: 72px; --lu-type-title: 28px; --lu-type-body: 20px; --lu-type-label: 18px; --lu-type-caption: 16px; --lu-edge-x: 24px; --lu-edge-y: 20px; --lu-gutter: 16px; --lu-sheet-max: 94dvh; }
   :host([data-lu-short]) { --lu-sheet-max: 94dvh; }
   @media (prefers-reduced-motion: reduce) {
-    :host { --lu-scale-pressed: 1; --lu-motion-press: 0ms; --lu-motion-focus: 0ms; --lu-motion-card: 0ms; --lu-motion-layer: 120ms; --lu-motion-exit: 120ms; --lu-motion-scroll: 0ms; }
+    :host { --lu-motion-press: 0ms; --lu-motion-focus: 0ms; --lu-motion-card: 0ms; --lu-motion-layer: 120ms; --lu-motion-exit: 120ms; --lu-motion-scroll: 0ms; }
   }
 `,ne=m`
   button:focus-visible, a:focus-visible, input:focus-visible, [role="radio"]:focus-visible { outline: none; box-shadow: var(--lu-focus-ring) !important; }
@@ -108,8 +107,9 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
   .muted { color: var(--lu-ink-2); }
   .caption { color: var(--lu-ink-3); font-size: var(--lu-type-caption); }
 `,$=m`
-  .pill { display: inline-flex; align-items: center; justify-content: center; gap: var(--lu-space-2); min-height: var(--lu-target); padding: 0 var(--lu-space-5); border: 1px solid transparent; border-radius: var(--lu-radius-pill); cursor: pointer; font-size: var(--lu-type-label); font-weight: 600; text-decoration: none; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-  .pill:is(:active, [data-pressed]):not(:disabled) { transform: scale(var(--lu-scale-pressed)); }
+  .pill { display: inline-flex; align-items: center; justify-content: center; gap: var(--lu-space-2); min-height: var(--lu-target); padding: 0 var(--lu-space-5); border: 1px solid transparent; border-radius: var(--lu-radius-pill); cursor: pointer; font-size: var(--lu-type-label); font-weight: 600; text-decoration: none; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+  /* Pressed feedback is a wash (a veil over pictures), never a scale: changing a transform promotes the element to its own
+   * layer on every press, which measured 6-13 ms of main-thread work per press, too much for a 50 ms budget on a slower phone. */
   .pill:is(:active, [data-pressed]):not(:disabled), .icon-button:is(:active, [data-pressed]), .back-button:is(:active, [data-pressed]), .text-button:is(:active, [data-pressed]), .back-inline:is(:active, [data-pressed]) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
   .pill.primary { color: var(--lu-accent-ink); background: var(--lu-accent); }
   .pill.secondary { color: var(--lu-ink); background: var(--lu-glass-raised); border-color: var(--lu-edge-raised); box-shadow: var(--lu-highlight-rest); }
@@ -138,8 +138,8 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     .notes { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-2); margin: var(--lu-space-1) 0 0; color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
     .mark { display: inline-flex; align-items: center; gap: var(--lu-space-1); min-height: 24px; padding: 0 var(--lu-space-2); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-tile); font-weight: 600; }
     .mark ha-icon { --mdc-icon-size: 14px; width: 14px; height: 14px; }
-    .toggle { display: inline-flex; min-height: var(--lu-target); align-items: center; gap: var(--lu-space-1); margin-top: var(--lu-space-1); padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: transparent; font: 500 var(--lu-type-caption)/1.2 var(--lu-font); cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-    .toggle:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); }
+    .toggle { display: inline-flex; min-height: var(--lu-target); align-items: center; gap: var(--lu-space-1); margin-top: var(--lu-space-1); padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: transparent; font: 500 var(--lu-type-caption)/1.2 var(--lu-font); cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .toggle:is(:active, [data-pressed]) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
     .toggle[aria-pressed="true"] { color: var(--lu-ink); background: var(--lu-glass-raised); border-color: var(--lu-edge-raised); box-shadow: var(--lu-highlight-raised); font-weight: 600; }
     .toggle ha-icon { --mdc-icon-size: 16px; width: 16px; height: 16px; }
     @media (hover: hover) and (pointer: fine) { .toggle[aria-pressed="false"]:hover { background: var(--lu-material-hover-wash); } }
@@ -148,8 +148,8 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
   .badge { display: inline-flex; align-items: center; gap: var(--lu-space-1); min-height: max(28px, calc(var(--lu-type-caption) * 2)); padding: 0 var(--lu-space-3) 0 var(--lu-space-2); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-reading); font-size: var(--lu-type-caption); font-weight: 600; font-variant-numeric: tabular-nums; }
   .badge.bare { padding: 0 var(--lu-space-2); }
   .badge ha-icon { --mdc-icon-size: calc(var(--lu-type-caption) * 1.35); width: calc(var(--lu-type-caption) * 1.35); height: calc(var(--lu-type-caption) * 1.35); flex: none; }
-  .chip-button { display: inline-flex; align-items: center; gap: var(--lu-space-2); min-width: 0; max-width: 100%; min-height: var(--lu-target); padding: var(--lu-space-1) var(--lu-space-3) var(--lu-space-1) var(--lu-space-2); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-control); color: var(--lu-ink); background: var(--lu-tile); font: 500 var(--lu-type-label)/1.25 var(--lu-font); text-align: left; cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-  .chip-button:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); background: var(--lu-glass-raised); }
+  .chip-button { display: inline-flex; align-items: center; gap: var(--lu-space-2); min-width: 0; max-width: 100%; min-height: var(--lu-target); padding: var(--lu-space-1) var(--lu-space-3) var(--lu-space-1) var(--lu-space-2); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-control); color: var(--lu-ink); background: var(--lu-tile); font: 500 var(--lu-type-label)/1.25 var(--lu-font); text-align: left; cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+  .chip-button:is(:active, [data-pressed]) { background-color: var(--lu-glass-raised); background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); transition: none; }
   @media (hover: hover) and (pointer: fine) { .chip-button:hover { background: var(--lu-glass-raised); } }
   .chip-button > ha-icon { --mdc-icon-size: 20px; width: 20px; height: 20px; flex: none; color: var(--lu-accent); }
   .chip-button .lines { display: grid; min-width: 0; }
@@ -168,10 +168,10 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     /* The height is reserved up front, so the page below doesn't shift when the options render. */
     :host { display: block; min-width: 0; max-width: 480px; min-height: calc(var(--lu-row) + var(--lu-space-1) * 2 + 2px); }
     .tray { display: flex; gap: var(--lu-space-1); padding: var(--lu-space-1); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-control); background: var(--lu-material-well); }
-    .segment { position: relative; display: grid; flex: 1 1 0; min-width: 0; min-height: var(--lu-row); align-content: center; justify-items: center; gap: 2px; padding: var(--lu-space-1) var(--lu-space-2); border: 1px solid transparent; border-radius: max(calc(var(--lu-radius-control) - 5px), 6px); color: var(--lu-ink-2); background: transparent; font: 500 var(--lu-type-label)/1.2 var(--lu-font); cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
+    .segment { position: relative; display: grid; flex: 1 1 0; min-width: 0; min-height: var(--lu-row); align-content: center; justify-items: center; gap: 2px; padding: var(--lu-space-1) var(--lu-space-2); border: 1px solid transparent; border-radius: max(calc(var(--lu-radius-control) - 5px), 6px); color: var(--lu-ink-2); background: transparent; font: 500 var(--lu-type-label)/1.2 var(--lu-font); cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
     .segment[aria-checked="true"] { color: var(--lu-ink); background: var(--lu-glass-raised); border-color: var(--lu-edge-raised); box-shadow: var(--lu-highlight-raised); font-weight: 600; }
     .segment[aria-checked="true"]::after { content: ""; position: absolute; top: var(--lu-space-2); right: var(--lu-space-2); width: 6px; height: 6px; border-radius: 50%; background: var(--lu-accent); }
-    .segment:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
+    .segment:is(:active, [data-pressed]) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
     @media (hover: hover) and (pointer: fine) { .segment[aria-checked="false"]:hover { background: var(--lu-material-hover-wash); } }
     .name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .meta { display: inline-flex; align-items: center; gap: var(--lu-space-1); font-size: var(--lu-type-caption); font-variant-numeric: tabular-nums; }
@@ -269,8 +269,8 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     ul { margin: 0; padding: 0; list-style: none; }
     li { position: relative; display: flex; align-items: center; gap: var(--lu-space-2); height: var(--lu-row); border-bottom: 1px solid var(--lu-edge); content-visibility: auto; contain-intrinsic-size: auto var(--lu-row); }
     li:last-child { border-bottom: 0; }
-    .play { display: grid; flex: none; width: var(--lu-target); height: var(--lu-target); place-items: center; padding: 0; border: 1px solid var(--lu-edge-raised); border-radius: 50%; color: var(--lu-ink); background: var(--lu-glass-raised); box-shadow: var(--lu-highlight-raised); cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-    .play:is(:active, [data-pressed]):not(:disabled) { transform: scale(var(--lu-scale-pressed)); background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
+    .play { display: grid; flex: none; width: var(--lu-target); height: var(--lu-target); place-items: center; padding: 0; border: 1px solid var(--lu-edge-raised); border-radius: 50%; color: var(--lu-ink); background: var(--lu-glass-raised); box-shadow: var(--lu-highlight-raised); cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .play:is(:active, [data-pressed]):not(:disabled) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
     .active .play { border-color: transparent; color: var(--lu-accent-ink); background: var(--lu-accent); box-shadow: none; }
     .play:disabled { color: var(--lu-ink-3); background: var(--lu-tile); box-shadow: none; cursor: not-allowed; }
     .play ha-icon { --mdc-icon-size: 24px; width: 24px; height: 24px; }
@@ -301,8 +301,9 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     ul { display: flex; gap: var(--lu-space-3); margin: 0 calc(var(--lu-space-1) * -1); padding: var(--lu-space-1) var(--lu-space-1) var(--lu-space-2); overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: thin; list-style: none; }
     li { flex: none; width: calc(var(--lu-target) * 3.5); scroll-snap-align: start; }
     li.more { display: grid; align-items: start; width: auto; }
-    .item { display: grid; width: 100%; gap: 2px; padding: 0; border: 0; border-radius: var(--lu-radius-tile); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press); }
-    .item:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); background: var(--lu-material-press-wash); }
+    .item { display: grid; width: 100%; gap: 2px; padding: 0; border: 0; border-radius: var(--lu-radius-tile); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .item:is(:active, [data-pressed]) { background: var(--lu-material-press-wash); transition: none; }
+    .item:is(:active, [data-pressed]) .frame::after { content: ""; position: absolute; inset: 0; border-radius: var(--lu-radius-tile); background: var(--lu-material-press-wash); pointer-events: none; }
     .frame { position: relative; display: block; margin-bottom: var(--lu-space-1); }
     kestrel-lazy-image { display: block; width: 100%; }
     .glyph-wrap { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
@@ -313,7 +314,7 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     .title { padding: 0 var(--lu-space-1); font-size: var(--lu-type-label); font-weight: 550; }
     .caption { padding: 0 var(--lu-space-1); overflow: hidden; color: var(--lu-ink-2); font-size: var(--lu-type-caption); text-overflow: ellipsis; white-space: nowrap; }
     .more-tile { display: grid; width: calc(var(--lu-target) * 2.2); aspect-ratio: 16 / 10; place-items: center; padding: 0 var(--lu-space-3); border: 1px dashed var(--lu-edge-raised); border-radius: var(--lu-radius-tile); color: var(--lu-accent); background: transparent; font: 600 var(--lu-type-label) var(--lu-font); text-align: center; cursor: pointer; }
-    .more-tile:is(:active, [data-pressed]):not(:disabled) { transform: scale(var(--lu-scale-pressed)); }
+    .more-tile:is(:active, [data-pressed]):not(:disabled) { background: var(--lu-material-press-wash); }
     .more-tile:disabled { color: var(--lu-ink-3); cursor: progress; }
     @media (hover: hover) and (pointer: fine) { .item:hover kestrel-lazy-image { filter: brightness(1.06); } }
   `];customElements.define("kestrel-media-rail",ve);var ge=class extends v{constructor(){super(),this.icon="",this.heading="",this.summary="",this.state="ready",this.count=0,this.empty="Nothing here yet",this.noun="items",this.variant="rows"}_retry(){this.dispatchEvent(new CustomEvent("retry"))}_renderBody(){return this.count>0?o`<slot></slot>${this.state==="error"?o`<p class="line"><span class="muted">Couldn't load more.</span><button class="text-button" type="button" @click=${this._retry}>Try again</button></p>`:d}`:this.state==="loading"?o`<div class=${`skeleton ${this.variant}`} role="status" aria-label=${`Loading ${this.noun}`}>${[0,1,2].map(()=>o`<span class="bone"></span>`)}</div>`:this.state==="error"?o`<p class="line"><span class="muted">Couldn't load ${this.noun}.</span><button class="text-button" type="button" @click=${this._retry}>Try again</button></p>`:o`<p class="line muted">${this.empty}</p>`}render(){let i="section-title";return o`<section aria-labelledby=${i}>
@@ -518,8 +519,8 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     .camera-count, .count-badge { color: var(--lu-ink-2); font-size: var(--lu-type-label); font-variant-numeric: tabular-nums; }
     .count-badge { display: inline-grid; min-width: 34px; height: 34px; place-items: center; border-radius: var(--lu-radius-pill); background: var(--lu-accent-soft); color: var(--lu-accent); font-weight: 600; }
     .camera-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--lu-target) * 5)), 1fr)); gap: var(--lu-gutter); }
-    .camera-tile { display: grid; min-width: 0; overflow: hidden; border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-card); color: var(--lu-ink); transition: transform var(--lu-motion-press) var(--lu-ease-press); }
-    .camera-tile:has(.camera-focus:is(:active, [data-pressed])) { transform: scale(var(--lu-scale-pressed)); }
+    .camera-tile { display: grid; min-width: 0; overflow: hidden; border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-card); color: var(--lu-ink); }
+    .camera-focus:is(:active, [data-pressed]) .camera-picture::after { content: ""; position: absolute; inset: 0; background: var(--lu-material-press-wash); pointer-events: none; }
     .camera-focus { display: block; width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
     @media (hover: hover) and (pointer: fine) { .camera-focus:hover { background: var(--lu-material-hover-wash); } }
     .camera-focus:is(:active, [data-pressed]) .camera-name { background: var(--lu-material-press-wash); }
@@ -592,8 +593,9 @@ var be=globalThis,ye=be.ShadowRoot&&(be.ShadyCSS===void 0||be.ShadyCSS.nativeSha
     .summary span { display: inline-flex; align-items: center; gap: var(--lu-space-1); }
     .summary ha-icon { --mdc-icon-size: 16px; width: 16px; height: 16px; }
     .wildlife-view .section-heading { margin-bottom: 0; }
-    .species-tile { display: grid; align-content: start; min-width: 0; gap: var(--lu-space-2); padding: 0 0 var(--lu-space-3); border: 0; border-radius: var(--lu-radius-card); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-    .species-tile:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); background: var(--lu-material-press-wash); }
+    .species-tile { display: grid; align-content: start; min-width: 0; gap: var(--lu-space-2); padding: 0 0 var(--lu-space-3); border: 0; border-radius: var(--lu-radius-card); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .species-tile:is(:active, [data-pressed]) { background: var(--lu-material-press-wash); transition: none; }
+    .species-tile:is(:active, [data-pressed]) .species-photo::after { content: ""; position: absolute; inset: 0; border-radius: var(--lu-radius-tile); background: var(--lu-material-press-wash); pointer-events: none; }
     @media (hover: hover) and (pointer: fine) { .species-tile:hover { background: var(--lu-material-hover-wash); } }
     .species-tile kestrel-lazy-image { display: block; width: 100%; }
     .species-photo { position: relative; }

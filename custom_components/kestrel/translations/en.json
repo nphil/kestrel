@@ -22,11 +22,12 @@
     "step": {
       "init": {
         "title": "Kestrel settings",
-        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting. To get loud, clean bird-call previews, add the Kestrel audio service address and key; leave both empty to play BirdNET-Go's original recordings.",
+        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting. To get loud, clean bird-call previews, add the Kestrel audio service address and key; leave both empty to play BirdNET-Go's original recordings. Past calls from the last few days are sent to the service gradually; set the backfill to 0 to send only new calls.",
         "data": {
           "poll_timeout": "Event wait (seconds)",
           "audio_url": "Audio service address",
-          "audio_key": "Audio service key"
+          "audio_key": "Audio service key",
+          "audio_backfill_days": "Backfill past calls (days)"
         }
       }
     },

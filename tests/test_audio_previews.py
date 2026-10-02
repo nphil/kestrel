@@ -420,6 +420,71 @@ class BackfillTests(AudioTestCase):
                 await self.previews._backfill_once()
 
 
+class BackfillWindowTests(AudioTestCase):
+    DAY = 86400 * 1000
+
+    async def test_the_window_follows_the_setting(self) -> None:
+        self.previews = audio_module.AudioPreviews(self.hass, URL, KEY, backfill_days=7)
+        recent, old = call("h1", 1, age_ms=3 * self.DAY), call("h2", 2, age_ms=10 * self.DAY)
+        self.register_plugin([{"items": [recent, old], "next": None}])
+        for detection_id in (1, 2):  # both recordings exist: only the window decides which is sent
+            self.serve_original(detection_id)
+        self.job_route(FakeResponse(202, {"state": "pending"}))
+        self.session.route("GET", f"{URL}/v1/stats", FakeResponse(200, {"queue": {"depth": 0}}))
+        await self.previews._backfill_once()
+        self.assertEqual([job["params"]["detection_id"] for job in self.jobs()], [1])
+        self.assertEqual(self.previews._backfill.state, "done")
+
+    async def test_with_the_backfill_off_only_new_calls_are_sent_and_past_visits_are_never_listed(self) -> None:
+        self.previews = audio_module.AudioPreviews(self.hass, URL, KEY, backfill_days=0)
+        coordinator = self.register_plugin([{"items": [call("h1", 1)], "next": None}])
+        self.serve_original(360)
+        self.job_route(FakeResponse(202, {"state": "pending"}))
+        with mock.patch.object(audio_module, "_BACKFILL_START_DELAY", 0):
+            self.previews.async_start()
+            async_dispatcher_send(self.hass, SIGNAL, [event("visit_new", call("h9", 360))])
+            await settle()
+        self.assertEqual(self.previews._backfill.state, "off")
+        self.assertEqual(coordinator.client.calls, [], "the plugin's visit list is never asked for")
+        self.assertEqual([job["params"]["detection_id"] for job in self.jobs()], [360])
+        self.assertEqual((await self.previews.async_diagnostics())["backfill_days"], 0)
+
+    async def test_widening_the_window_later_sends_only_what_is_missing(self) -> None:
+        newer, middle, older = call("h1", 1, age_ms=1 * self.DAY), call("h2", 2, age_ms=10 * self.DAY), call("h3", 3, age_ms=20 * self.DAY)
+        for detection_id in (1, 2, 3):
+            self.serve_original(detection_id)
+        self.job_route(FakeResponse(202, {"state": "pending"}))
+        self.session.route("GET", f"{URL}/v1/stats", FakeResponse(200, {"queue": {"depth": 0}}))
+        pages = {"items": [newer, middle, older], "next": None}
+
+        self.previews = audio_module.AudioPreviews(self.hass, URL, KEY, backfill_days=7)
+        self.register_plugin([pages])
+        await self.previews._backfill_once()
+        self.assertEqual([job["params"]["detection_id"] for job in self.jobs()], [1])
+
+        # Home Assistant reloads with a wider window; the service already has call 1.
+        self.info_route(1, FakeResponse(200, info_json("ready", 1)))
+        self.previews = audio_module.AudioPreviews(self.hass, URL, KEY, backfill_days=30)
+        self.register_plugin([pages])
+        await self.previews._backfill_once()
+        self.assertEqual([job["params"]["detection_id"] for job in self.jobs()], [1, 2, 3])
+
+    async def test_running_the_same_pass_twice_never_sends_a_call_twice(self) -> None:
+        visits = {"items": [call("h1", 1, age_ms=self.DAY), call("h2", 2, age_ms=2 * self.DAY)], "next": None}
+        for detection_id in (1, 2):
+            self.serve_original(detection_id)
+        self.job_route(FakeResponse(202, {"state": "pending"}))
+        self.session.route("GET", f"{URL}/v1/stats", FakeResponse(200, {"queue": {"depth": 0}}))
+        self.register_plugin([visits])
+        await self.previews._backfill_once()
+        for detection_id in (1, 2):  # the service now reports both as queued
+            self.info_route(detection_id, FakeResponse(200, info_json("pending", detection_id)))
+        self.previews._cache.clear()
+        self.register_plugin([visits])
+        await self.previews._backfill_once()
+        self.assertEqual([job["params"]["detection_id"] for job in self.jobs()], [1, 2])
+
+
 class ReliabilityTests(AudioTestCase):
     async def test_a_revoked_key_is_not_mistaken_for_a_healthy_service(self) -> None:
         # /healthz is open and keeps answering 200; only an authenticated call proves the key works.

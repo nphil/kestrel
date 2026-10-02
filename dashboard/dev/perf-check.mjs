@@ -8,8 +8,9 @@
  *
  * Gates (per size; heavy scenarios run on the sizes in FULL, the rest get layout, input and static checks):
  *   press      pressed feedback is painted within 50 ms of the pointer going down, on every tappable thing
- *              (an inert press is measured too; over 50 ms only counts against the control if it is clearly
- *              above that floor, because a busy machine slows every press the same)
+ *              (never scrolled into view first; an inert press is measured just before each one, in the same
+ *              state, and over 50 ms only counts against the control if it is clearly above that, by more than
+ *              12 ms, 24 on a 4x-throttled CPU, because a busy machine slows every press the same)
  *   tabs       revisiting Live / Wildlife / AI check-up: the new view's first frame within 100 ms and stable
  *              within 300 ms (both doubled on a 4x-throttled CPU); misses that are Home Assistant's or
  *              Scrypted's work on the shared main thread, not the panel's, are reported but don't fail
@@ -194,29 +195,47 @@ async function gotoPanel(ctx, view = "live", { cold = false } = {}) {
 // ---------------------------------------------------------------------------------------------- measurements
 const root$ = (fn, ...args) => (page) => page.evaluate(fn, ...args);
 
-/** Presses three times and keeps the median, so one scheduling hiccup of the test browser doesn't decide a gate. */
-async function press(ctx, name, find) {
+const INERT = `(k) => k.host().shadowRoot.querySelector('h1')`;
+
+/** Presses the control three times, each right after pressing something inert in the same state, and keeps the
+ * median of both. One scheduling hiccup of the test browser doesn't decide a gate, and "what an inert press costs
+ * right now" is measured under the same load and scroll position as the control, not at some other moment. */
+async function press(ctx, name, find, inert = INERT) {
   const runs = [];
+  const floors = [];
   for (let i = 0; i < 3; i++) {
+    const floor = await pressOnce(ctx, "inert", inert);
     const run = await pressOnce(ctx, name, find);
     if (run.skipped) return run;
+    if (!floor.skipped) floors.push(floor.ms);
     runs.push(run);
   }
   runs.sort((a, b) => a.ms - b.ms);
+  floors.sort((a, b) => a - b);
   const median = runs[1];
-  return { ...median, maxMs: runs[2].ms, pass: median.ms <= GATE.pressMs && median.changed };
+  return { ...median, maxMs: runs[2].ms, floorMs: floors.length ? floors[1] ?? floors[0] : 0, pass: median.ms <= GATE.pressMs && median.changed };
 }
 
 /** Press (pointer down, no release) on the first element matching `find`, report time to painted feedback. */
 async function pressOnce(ctx, name, find) {
   const { page, cdp, size } = ctx;
-  const rect = await page.evaluate(`(() => { const el = (${find})(window.__kp); if (!el) return null; el.scrollIntoView({ block: 'center', inline: 'center' }); const r = el.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height } : null; })()`);
+  // Pressing what is already on screen costs no scrolling; scrolling right before a press would measure the new
+  // tiles' images being decoded and painted instead of the control.
+  const rect = await page.evaluate(`(() => { const el = (${find})(window.__kp); if (!el) return null; const top = el.getBoundingClientRect().top; el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const r = el.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height, scrolled: Math.abs(r.top - top) > 1 } : null; })()`);
   if (!rect) return { name, skipped: "not on screen" };
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(rect.scrolled ? 400 : 120);
   const rect2 = await page.evaluate(`(() => { const el = (${find})(window.__kp); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
   await page.evaluate(`(() => {
     const el = (${find})(window.__kp);
-    const sig = (node) => { const chain = []; for (let n = node, i = 0; n && i < 4; n = n.parentElement ?? n.getRootNode()?.host, i++) { const s = getComputedStyle(n); chain.push([s.transform, s.backgroundColor, s.backgroundImage, s.boxShadow, s.opacity, s.filter].join('|')); } return chain.join('||'); };
+    const look = (node, pseudo) => { const s = getComputedStyle(node, pseudo); return [s.transform, s.backgroundColor, s.backgroundImage, s.boxShadow, s.opacity, s.filter, pseudo ? s.content : ''].join('|'); };
+    // What the press changed: the control and three levels above it, plus its own children and the veils drawn
+    // by their ::before/::after (a pressed picture tile shows itself through a veil or a child's wash).
+    const sig = (node) => {
+      const parts = [];
+      for (let n = node, i = 0; n && i < 4; n = n.parentElement ?? n.getRootNode()?.host, i++) parts.push(look(n));
+      for (const n of [node, ...node.querySelectorAll('*')].slice(0, 40)) { parts.push(look(n, '::before'), look(n, '::after')); if (n !== node) parts.push(look(n)); }
+      return parts.join('||');
+    };
     const before = sig(el);
     // The frame that shows the pressed state is produced between the first and the second animation-frame
     // callback after the press, so the second callback marks the moment it is on its way to the screen.
@@ -247,28 +266,26 @@ async function pressOnce(ctx, name, find) {
 
 const NAV = (label) => `(k) => [...k.host().shadowRoot.querySelectorAll('.nav-item')].find((b) => b.textContent.trim().startsWith('${label}'))`;
 
-/** What pressing something inert costs here: the least any press can take on this browser and machine right now. */
-async function pressFloor(ctx) {
-  const run = await press(ctx, "inert", `(k) => k.host().shadowRoot.querySelector('h1')`);
-  return run.skipped ? 0 : run.ms;
-}
+/** The most a press may cost over an inert press before it counts as the control's doing (doubled on a 4x-throttled
+ * CPU, like the tab budgets: the same few milliseconds of real work last four times longer there). */
+const overAllowance = (ctx) => GATE.pressOverFloorMs * (ctx.throttle > 1 ? 2 : 1);
 
 async function pressSuite(ctx, view) {
   const rows = await pressRows(ctx, view);
-  const floor = await pressFloor(ctx);
+  const allowed = overAllowance(ctx);
   for (const row of rows) {
     if (row.skipped) continue;
-    row.floorMs = floor;
-    row.overMs = row.ms - floor;
-    // Over 50 ms is only the control's doing if it is clearly above what an inert press takes right now.
-    row.pass = row.changed && (row.ms <= GATE.pressMs || row.overMs <= GATE.pressOverFloorMs);
-    row.limitedByHost = row.changed && row.ms > GATE.pressMs && row.overMs <= GATE.pressOverFloorMs;
+    row.overMs = row.ms - row.floorMs;
+    // Over 50 ms is only the control's doing if it is clearly above what an inert press takes in the same state.
+    row.pass = row.changed && (row.ms <= GATE.pressMs || row.overMs <= allowed);
+    row.limitedByHost = row.changed && row.ms > GATE.pressMs && row.overMs <= allowed;
   }
   return rows;
 }
 
 async function pressRows(ctx, view) {
   const rows = [];
+  if (view !== "sheet") { await ctx.page.evaluate(() => window.scrollTo(0, 0)); await ctx.page.waitForTimeout(300); }
   if (view === "live") {
     rows.push(await press(ctx, "camera tile", `(k) => k.host().shadowRoot.querySelector('.camera-focus')`));
     rows.push(await press(ctx, "sighting chip", `(k) => k.host().shadowRoot.querySelector('.chip-button')`));
@@ -279,10 +296,11 @@ async function pressRows(ctx, view) {
     rows.push(await press(ctx, "tab", NAV("Live")));
   } else if (view === "sheet") {
     const sheet = `k.deep(document, 'kestrel-species-sheet')[0].shadowRoot`;
-    rows.push(await press(ctx, "video thumbnail", `(k) => ${sheet}.querySelector('kestrel-media-rail')?.shadowRoot.querySelector('.item')`));
-    rows.push(await press(ctx, "play button", `(k) => ${sheet}.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`));
-    rows.push(await press(ctx, "recording row", `(k) => ${sheet}.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.open')`));
-    rows.push(await press(ctx, "close button", `(k) => k.deep(document, 'kestrel-sheet')[0]?.shadowRoot.querySelector('.close')`));
+    const title = `(k) => k.deep(document, 'kestrel-sheet')[0]?.shadowRoot.querySelector('#title')`;
+    rows.push(await press(ctx, "video thumbnail", `(k) => ${sheet}.querySelector('kestrel-media-rail')?.shadowRoot.querySelector('.item')`, title));
+    rows.push(await press(ctx, "play button", `(k) => ${sheet}.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`, title));
+    rows.push(await press(ctx, "recording row", `(k) => ${sheet}.querySelector('kestrel-audio-list')?.shadowRoot.querySelector('.open')`, title));
+    rows.push(await press(ctx, "close button", `(k) => k.deep(document, 'kestrel-sheet')[0]?.shadowRoot.querySelector('.close')`, title));
   }
   return rows;
 }
@@ -736,11 +754,11 @@ if (opts.json) console.log(JSON.stringify({ reports, failures }, null, 1));
 else {
   for (const r of reports) {
     const c = r.checks;
-    const worst = (rows) => rows?.filter((x) => !x.skipped).map((x) => `${x.name} ${x.ms}ms${x.changed ? "" : "!"}${x.limitedByHost ? "~" : ""}`).join(", ");
+    const worst = (rows) => rows?.filter((x) => !x.skipped).map((x) => `${x.name} ${x.ms}ms${x.ms > GATE.pressMs ? ` (inert ${x.floorMs})` : ""}${x.changed ? "" : "!"}${x.limitedByHost ? "~" : ""}`).join(", ");
     console.log(`\n== ${r.size} ${r.viewport} (${r.throttle} CPU; host load ${r.loadBefore} on ${cpus().length} cores, 3M-op probe ${r.cpuProbeMs} ms) ==`);
     if (c.layoutLive) console.log(`layout    profile=${c.layoutLive.profile} short=${c.layoutLive.short} panel=${c.layoutLive.panelW}px columns=${c.layoutLive.columns} overflowX=${c.layoutLive.overflowX}`);
     if (c.open) console.log(`open      cold ${c.open.coldPanelToContentMs} ms (skeleton ${c.open.coldSkeletonMs} ms, spinner ${c.open.spinnerSeen}), warm ${c.open.warmPanelToContentMs} ms`);
-    console.log(`press     (floor for an inert press: ${c.pressLive?.[0]?.floorMs ?? "-"} ms; ~ = over 50 ms but within ${GATE.pressOverFloorMs} ms of the floor, i.e. the machine, not the control)\n          live: ${worst(c.pressLive) ?? "-"} | wildlife: ${worst(c.pressWildlife) ?? "-"} | sheet: ${worst(c.pressSheet) ?? "-"}`);
+    console.log(`press     (each control is compared with an inert press taken just before it; ~ = over 50 ms but within ${GATE.pressOverFloorMs * (r.throttle === "1x" ? 1 : 2)} ms of that, i.e. the machine, not the control)\n          live: ${worst(c.pressLive) ?? "-"} | wildlife: ${worst(c.pressWildlife) ?? "-"} | sheet: ${worst(c.pressSheet) ?? "-"}`);
     if (c.tabs) console.log(`tabs      first visit ${["first visit Wildlife", "first visit AI check-up", "first visit Live"].map((k) => c.tabs[k]).join("/")} ms; revisits (first/stable ms): ${c.tabs.revisits.join(", ")}; budget ${c.tabs.budgetFirst}/${c.tabs.budgetStable}; panel's own worst frame ${c.tabs.panelWorstMs} ms${c.tabs.limitedByOthers ? " (over budget only because Home Assistant / Scrypted keep the page busy)" : ""}`);
     if (c.scrollGrid) console.log(`scroll    grid: panel's worst frame ${c.scrollGrid.ownWorstMs} ms (others ${c.scrollGrid.hostWorstMs} ms, ${c.scrollGrid.longFrames} long frames), CLS ${c.scrollGrid.cls}; recordings (${c.scrollRecordings?.rows ?? 0} rows): panel ${c.scrollRecordings?.ownWorstMs} ms (others ${c.scrollRecordings?.hostWorstMs} ms), CLS ${c.scrollRecordings?.cls}`);
     if (c.audio) console.log(`audio     ${c.audio.skipped ?? `${c.audio.ms} ms`}; playing at once: ${c.oneAtATime?.playing}`);

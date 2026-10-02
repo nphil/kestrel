@@ -109,9 +109,10 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    Devices & Services → Kestrel → Configure. Each heard call is then played as the
    moment the model matched, made loud and, only where a re-check proves it helps,
    cleaned up, with an *Original* toggle to hear BirdNET-Go's full recording. Home
-   Assistant sends the service every new call and, after a restart, the last 30 days
-   gradually. If the service is off or unreachable, calls simply play the original
-   recording.
+   Assistant sends the service every new call and, gradually, past calls too (the
+   *Backfill past calls (days)* setting: 30 by default, 0 sends only new calls;
+   raising it later only sends what is missing). If the service is off or
+   unreachable, calls simply play the original recording.
 5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first

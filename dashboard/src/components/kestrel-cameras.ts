@@ -1115,8 +1115,8 @@ export class KestrelCameras extends LitElement {
     .camera-count, .count-badge { color: var(--lu-ink-2); font-size: var(--lu-type-label); font-variant-numeric: tabular-nums; }
     .count-badge { display: inline-grid; min-width: 34px; height: 34px; place-items: center; border-radius: var(--lu-radius-pill); background: var(--lu-accent-soft); color: var(--lu-accent); font-weight: 600; }
     .camera-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--lu-target) * 5)), 1fr)); gap: var(--lu-gutter); }
-    .camera-tile { display: grid; min-width: 0; overflow: hidden; border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-card); color: var(--lu-ink); transition: transform var(--lu-motion-press) var(--lu-ease-press); }
-    .camera-tile:has(.camera-focus:is(:active, [data-pressed])) { transform: scale(var(--lu-scale-pressed)); }
+    .camera-tile { display: grid; min-width: 0; overflow: hidden; border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-card); color: var(--lu-ink); }
+    .camera-focus:is(:active, [data-pressed]) .camera-picture::after { content: ""; position: absolute; inset: 0; background: var(--lu-material-press-wash); pointer-events: none; }
     .camera-focus { display: block; width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
     @media (hover: hover) and (pointer: fine) { .camera-focus:hover { background: var(--lu-material-hover-wash); } }
     .camera-focus:is(:active, [data-pressed]) .camera-name { background: var(--lu-material-press-wash); }
@@ -1189,8 +1189,9 @@ export class KestrelCameras extends LitElement {
     .summary span { display: inline-flex; align-items: center; gap: var(--lu-space-1); }
     .summary ha-icon { --mdc-icon-size: 16px; width: 16px; height: 16px; }
     .wildlife-view .section-heading { margin-bottom: 0; }
-    .species-tile { display: grid; align-content: start; min-width: 0; gap: var(--lu-space-2); padding: 0 0 var(--lu-space-3); border: 0; border-radius: var(--lu-radius-card); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-    .species-tile:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); background: var(--lu-material-press-wash); }
+    .species-tile { display: grid; align-content: start; min-width: 0; gap: var(--lu-space-2); padding: 0 0 var(--lu-space-3); border: 0; border-radius: var(--lu-radius-card); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .species-tile:is(:active, [data-pressed]) { background: var(--lu-material-press-wash); transition: none; }
+    .species-tile:is(:active, [data-pressed]) .species-photo::after { content: ""; position: absolute; inset: 0; border-radius: var(--lu-radius-tile); background: var(--lu-material-press-wash); pointer-events: none; }
     @media (hover: hover) and (pointer: fine) { .species-tile:hover { background: var(--lu-material-hover-wash); } }
     .species-tile kestrel-lazy-image { display: block; width: 100%; }
     .species-photo { position: relative; }

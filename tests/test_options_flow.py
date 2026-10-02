@@ -35,15 +35,19 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_leaving_the_audio_fields_empty_turns_previews_off_without_contacting_anything(self) -> None:
         result = await self.flow().async_step_init({"poll_timeout": 25})
         self.assertEqual(result["type"], "create_entry")
-        self.assertEqual(result["data"], {"poll_timeout": 25, "audio_url": "", "audio_key": ""})
+        self.assertEqual(
+            result["data"], {"poll_timeout": 25, "audio_url": "", "audio_key": "", "audio_backfill_days": 30}
+        )
         self.assertEqual(self.session.calls, [])
 
     async def test_a_working_address_and_key_are_saved_tidied_and_checked_with_the_key(self) -> None:
         result = await self.flow().async_step_init(
-            {"poll_timeout": 10, "audio_url": f"{URL}/", "audio_key": f"  {KEY} "}
+            {"poll_timeout": 10, "audio_url": f"{URL}/", "audio_key": f"  {KEY} ", "audio_backfill_days": 7}
         )
         self.assertEqual(result["type"], "create_entry")
-        self.assertEqual(result["data"], {"poll_timeout": 10, "audio_url": URL, "audio_key": KEY})
+        self.assertEqual(
+            result["data"], {"poll_timeout": 10, "audio_url": URL, "audio_key": KEY, "audio_backfill_days": 7}
+        )
         [stats] = self.session.calls_to("GET", f"{URL}/v1/stats")
         self.assertEqual(stats["headers"], {"X-Kestrel-Audio-Key": KEY})
         [health] = self.session.calls_to("GET", f"{URL}/healthz")
@@ -83,6 +87,20 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(markers["poll_timeout"].default(), 7)
         self.assertEqual(markers["audio_url"].description, {"suggested_value": URL})
         self.assertEqual(markers["audio_key"].description, {"suggested_value": KEY})
+        self.assertEqual(markers["audio_backfill_days"].default(), 30, "30 when never set")
+
+    async def test_the_backfill_setting_defaults_to_thirty_is_remembered_and_stays_between_zero_and_thirty(self) -> None:
+        saved = await self.flow({"audio_backfill_days": 0}).async_step_init()
+        markers = {marker.schema: marker for marker in saved["data_schema"].schema}
+        self.assertEqual(markers["audio_backfill_days"].default(), 0, "0 means new calls only, and is kept")
+        schema = saved["data_schema"]
+        for good in (0, 1, 30):
+            self.assertEqual(schema({"poll_timeout": 25, "audio_backfill_days": good})["audio_backfill_days"], good)
+        for bad in (-1, 31):
+            with self.assertRaises(vol.Invalid):
+                schema({"poll_timeout": 25, "audio_backfill_days": bad})
+        result = await self.flow().async_step_init({"poll_timeout": 25, "audio_backfill_days": 0})
+        self.assertEqual(result["data"]["audio_backfill_days"], 0)
 
     async def test_the_audio_fields_are_optional_and_the_event_wait_stays_in_range(self) -> None:
         form = await self.flow().async_step_init()

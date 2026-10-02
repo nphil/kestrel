@@ -30,7 +30,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dis
 
 from .announced import new_visit_from_event
 from .client import KestrelApiError
-from .const import AUDIO_KEY_HEADER, BIRDNET_GO_INTERNAL_URL, DOMAIN, SIGNAL_EVENTS
+from .const import AUDIO_KEY_HEADER, BIRDNET_GO_INTERNAL_URL, DEFAULT_AUDIO_BACKFILL_DAYS, DOMAIN, SIGNAL_EVENTS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +45,6 @@ _TRACK_BATCH = 10
 _PENDING_GIVE_UP = 1800.0
 _PUSH_WINDOW_MS = 6 * 3600 * 1000  # only tell dashboards about recent visits
 _HEALTH_INTERVAL = 30.0
-_BACKFILL_DAYS = 30
 _BACKFILL_PAGE = 50
 _BACKFILL_QUEUE_LIMIT = 5  # service queue depth (waiting + running) the backfill may reach
 _BACKFILL_WAIT = 15.0
@@ -184,10 +183,17 @@ def _bounded_insert(store: OrderedDict[Any, Any], key: Any, value: Any = None) -
 class AudioPreviews:
     """Home Assistant's connection to the kestrel-audio service (a no-op when not configured)."""
 
-    def __init__(self, hass: HomeAssistant, url: str | None, key: str | None) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        url: str | None,
+        key: str | None,
+        backfill_days: int = DEFAULT_AUDIO_BACKFILL_DAYS,
+    ) -> None:
         self._hass = hass
         self._url = (url or "").strip().rstrip("/")
         self._key = (key or "").strip()
+        self._backfill_days = max(0, int(backfill_days))
         self._cache: OrderedDict[int, PreviewInfo] = OrderedDict()
         self._detection_by_visit: OrderedDict[str, int] = OrderedDict()
         self._deleted: OrderedDict[str, None] = OrderedDict()
@@ -226,7 +232,10 @@ class AudioPreviews:
         self._unsubscribe = async_dispatcher_connect(self._hass, SIGNAL_EVENTS, self._on_events)
         self._spawn(self._track_loop(), "kestrel audio tracker")
         self._spawn(self._health_loop(), "kestrel audio health")
-        self._spawn(self._backfill_loop(), "kestrel audio backfill")
+        if self._backfill_days > 0:
+            self._spawn(self._backfill_loop(), "kestrel audio backfill")
+        else:
+            self._backfill.state = "off"
 
     async def async_stop(self) -> None:
         if self._unsubscribe is not None:
@@ -603,9 +612,9 @@ class AudioPreviews:
             await asyncio.sleep(_HEALTH_INTERVAL)
 
     async def _backfill_once(self) -> None:
-        """Give every heard visit of the last 30 days a preview, newest first and gently."""
+        """Give every heard visit of the last `backfill_days` days a preview, newest first and gently."""
         self._backfill = _Backfill(state="running")
-        cutoff = (time.time() - _BACKFILL_DAYS * 86400) * 1000
+        cutoff = (time.time() - self._backfill_days * 86400) * 1000
         before: int | float | None = None
         while True:
             coordinator = self._hass.data.get(DOMAIN, {}).get("coordinator")
@@ -709,6 +718,7 @@ class AudioPreviews:
             "reachable": self._reachable,
             "known_previews": counts,
             "waiting_for_service": len(self._pending),
+            "backfill_days": self._backfill_days,
             "backfill": dataclasses.asdict(self._backfill),
         }
         if stats is not None:

@@ -21,13 +21,16 @@ from .client import KestrelApiError, KestrelClient
 from .const import (
     AUDIO_KEY_HEADER,
     CONF_API_KEY,
+    CONF_AUDIO_BACKFILL_DAYS,
     CONF_AUDIO_KEY,
     CONF_AUDIO_URL,
     CONF_POLL_TIMEOUT,
     CONF_URL,
+    DEFAULT_AUDIO_BACKFILL_DAYS,
     DEFAULT_POLL_TIMEOUT,
     DEFAULT_URL,
     DOMAIN,
+    MAX_AUDIO_BACKFILL_DAYS,
     MAX_POLL_TIMEOUT,
     MIN_POLL_TIMEOUT,
 )
@@ -105,6 +108,9 @@ class KestrelOptionsFlow(OptionsFlowWithReload):
                         CONF_POLL_TIMEOUT: user_input[CONF_POLL_TIMEOUT],
                         CONF_AUDIO_URL: audio_url,
                         CONF_AUDIO_KEY: audio_key,
+                        CONF_AUDIO_BACKFILL_DAYS: user_input.get(
+                            CONF_AUDIO_BACKFILL_DAYS, DEFAULT_AUDIO_BACKFILL_DAYS
+                        ),
                     },
                 )
 
@@ -131,6 +137,13 @@ class KestrelOptionsFlow(OptionsFlowWithReload):
                         description={"suggested_value": current.get(CONF_AUDIO_KEY, "")},
                     ): selector.TextSelector(
                         selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    ),
+                    vol.Optional(
+                        CONF_AUDIO_BACKFILL_DAYS,
+                        default=current.get(CONF_AUDIO_BACKFILL_DAYS, DEFAULT_AUDIO_BACKFILL_DAYS),
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=0, max=MAX_AUDIO_BACKFILL_DAYS),
                     ),
                 }
             ),

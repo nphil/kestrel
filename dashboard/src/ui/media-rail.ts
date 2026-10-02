@@ -53,8 +53,9 @@ export class KestrelMediaRail extends LitElement {
     ul { display: flex; gap: var(--lu-space-3); margin: 0 calc(var(--lu-space-1) * -1); padding: var(--lu-space-1) var(--lu-space-1) var(--lu-space-2); overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: thin; list-style: none; }
     li { flex: none; width: calc(var(--lu-target) * 3.5); scroll-snap-align: start; }
     li.more { display: grid; align-items: start; width: auto; }
-    .item { display: grid; width: 100%; gap: 2px; padding: 0; border: 0; border-radius: var(--lu-radius-tile); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press); }
-    .item:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); background: var(--lu-material-press-wash); }
+    .item { display: grid; width: 100%; gap: 2px; padding: 0; border: 0; border-radius: var(--lu-radius-tile); color: var(--lu-ink); background: transparent; text-align: left; cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .item:is(:active, [data-pressed]) { background: var(--lu-material-press-wash); transition: none; }
+    .item:is(:active, [data-pressed]) .frame::after { content: ""; position: absolute; inset: 0; border-radius: var(--lu-radius-tile); background: var(--lu-material-press-wash); pointer-events: none; }
     .frame { position: relative; display: block; margin-bottom: var(--lu-space-1); }
     kestrel-lazy-image { display: block; width: 100%; }
     .glyph-wrap { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
@@ -65,7 +66,7 @@ export class KestrelMediaRail extends LitElement {
     .title { padding: 0 var(--lu-space-1); font-size: var(--lu-type-label); font-weight: 550; }
     .caption { padding: 0 var(--lu-space-1); overflow: hidden; color: var(--lu-ink-2); font-size: var(--lu-type-caption); text-overflow: ellipsis; white-space: nowrap; }
     .more-tile { display: grid; width: calc(var(--lu-target) * 2.2); aspect-ratio: 16 / 10; place-items: center; padding: 0 var(--lu-space-3); border: 1px dashed var(--lu-edge-raised); border-radius: var(--lu-radius-tile); color: var(--lu-accent); background: transparent; font: 600 var(--lu-type-label) var(--lu-font); text-align: center; cursor: pointer; }
-    .more-tile:is(:active, [data-pressed]):not(:disabled) { transform: scale(var(--lu-scale-pressed)); }
+    .more-tile:is(:active, [data-pressed]):not(:disabled) { background: var(--lu-material-press-wash); }
     .more-tile:disabled { color: var(--lu-ink-3); cursor: progress; }
     @media (hover: hover) and (pointer: fine) { .item:hover kestrel-lazy-image { filter: brightness(1.06); } }
   `];

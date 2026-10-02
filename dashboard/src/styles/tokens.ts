@@ -79,7 +79,6 @@ export const TOKENS_CSS = css`
     --lu-motion-layer: 220ms;
     --lu-motion-scroll: 300ms;
     --lu-motion-exit: 180ms;
-    --lu-scale-pressed: .97;
     --lu-font: var(--ha-font-family-body, var(--paper-font-body1_-_font-family, inherit));
   }
   :host([data-lu-profile="phone"]) { --lu-row: 56px; --lu-type-display: 48px; --lu-type-title: 24px; --lu-type-body: 16px; --lu-type-label: 14px; --lu-type-caption: 12px; --lu-edge-x: 16px; --lu-edge-y: 16px; --lu-gutter: 12px; }
@@ -88,7 +87,7 @@ export const TOKENS_CSS = css`
   :host([data-lu-profile="smart"]) { --lu-target: 64px; --lu-row: 64px; --lu-type-display: 72px; --lu-type-title: 28px; --lu-type-body: 20px; --lu-type-label: 18px; --lu-type-caption: 16px; --lu-edge-x: 24px; --lu-edge-y: 20px; --lu-gutter: 16px; --lu-sheet-max: 94dvh; }
   :host([data-lu-short]) { --lu-sheet-max: 94dvh; }
   @media (prefers-reduced-motion: reduce) {
-    :host { --lu-scale-pressed: 1; --lu-motion-press: 0ms; --lu-motion-focus: 0ms; --lu-motion-card: 0ms; --lu-motion-layer: 120ms; --lu-motion-exit: 120ms; --lu-motion-scroll: 0ms; }
+    :host { --lu-motion-press: 0ms; --lu-motion-focus: 0ms; --lu-motion-card: 0ms; --lu-motion-layer: 120ms; --lu-motion-exit: 120ms; --lu-motion-scroll: 0ms; }
   }
 `;
 
@@ -114,8 +113,9 @@ export const BASE_CSS = css`
 
 /** Buttons: pills, icon buttons and text buttons. */
 export const CONTROLS_CSS = css`
-  .pill { display: inline-flex; align-items: center; justify-content: center; gap: var(--lu-space-2); min-height: var(--lu-target); padding: 0 var(--lu-space-5); border: 1px solid transparent; border-radius: var(--lu-radius-pill); cursor: pointer; font-size: var(--lu-type-label); font-weight: 600; text-decoration: none; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-  .pill:is(:active, [data-pressed]):not(:disabled) { transform: scale(var(--lu-scale-pressed)); }
+  .pill { display: inline-flex; align-items: center; justify-content: center; gap: var(--lu-space-2); min-height: var(--lu-target); padding: 0 var(--lu-space-5); border: 1px solid transparent; border-radius: var(--lu-radius-pill); cursor: pointer; font-size: var(--lu-type-label); font-weight: 600; text-decoration: none; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+  /* Pressed feedback is a wash (a veil over pictures), never a scale: changing a transform promotes the element to its own
+   * layer on every press, which measured 6-13 ms of main-thread work per press, too much for a 50 ms budget on a slower phone. */
   .pill:is(:active, [data-pressed]):not(:disabled), .icon-button:is(:active, [data-pressed]), .back-button:is(:active, [data-pressed]), .text-button:is(:active, [data-pressed]), .back-inline:is(:active, [data-pressed]) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
   .pill.primary { color: var(--lu-accent-ink); background: var(--lu-accent); }
   .pill.secondary { color: var(--lu-ink); background: var(--lu-glass-raised); border-color: var(--lu-edge-raised); box-shadow: var(--lu-highlight-rest); }

@@ -92,8 +92,8 @@ export class KestrelLazyAudio extends LitElement {
     .notes { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-2); margin: var(--lu-space-1) 0 0; color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
     .mark { display: inline-flex; align-items: center; gap: var(--lu-space-1); min-height: 24px; padding: 0 var(--lu-space-2); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink); background: var(--lu-tile); font-weight: 600; }
     .mark ha-icon { --mdc-icon-size: 14px; width: 14px; height: 14px; }
-    .toggle { display: inline-flex; min-height: var(--lu-target); align-items: center; gap: var(--lu-space-1); margin-top: var(--lu-space-1); padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: transparent; font: 500 var(--lu-type-caption)/1.2 var(--lu-font); cursor: pointer; transition: transform var(--lu-motion-press) var(--lu-ease-press), background-color var(--lu-motion-label) var(--lu-ease); }
-    .toggle:is(:active, [data-pressed]) { transform: scale(var(--lu-scale-pressed)); }
+    .toggle { display: inline-flex; min-height: var(--lu-target); align-items: center; gap: var(--lu-space-1); margin-top: var(--lu-space-1); padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: transparent; font: 500 var(--lu-type-caption)/1.2 var(--lu-font); cursor: pointer; transition: background-color var(--lu-motion-label) var(--lu-ease); }
+    .toggle:is(:active, [data-pressed]) { background-image: linear-gradient(var(--lu-material-press-wash), var(--lu-material-press-wash)); }
     .toggle[aria-pressed="true"] { color: var(--lu-ink); background: var(--lu-glass-raised); border-color: var(--lu-edge-raised); box-shadow: var(--lu-highlight-raised); font-weight: 600; }
     .toggle ha-icon { --mdc-icon-size: 16px; width: 16px; height: 16px; }
     @media (hover: hover) and (pointer: fine) { .toggle[aria-pressed="false"]:hover { background: var(--lu-material-hover-wash); } }

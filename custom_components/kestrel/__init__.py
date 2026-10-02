@@ -20,9 +20,11 @@ from .audio import AudioPreviews
 from .client import KestrelClient
 from .const import (
     CONF_API_KEY,
+    CONF_AUDIO_BACKFILL_DAYS,
     CONF_AUDIO_KEY,
     CONF_AUDIO_URL,
     CONF_URL,
+    DEFAULT_AUDIO_BACKFILL_DAYS,
     DOMAIN,
     INTEGRATION_VERSION,
     PANEL_COMPONENT_NAME,
@@ -75,7 +77,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     entry.runtime_data = coordinator
     domain_data = hass.data.setdefault(DOMAIN, {})
     domain_data["coordinator"] = coordinator
-    audio = AudioPreviews(hass, entry.options.get(CONF_AUDIO_URL), entry.options.get(CONF_AUDIO_KEY))
+    audio = AudioPreviews(
+        hass,
+        entry.options.get(CONF_AUDIO_URL),
+        entry.options.get(CONF_AUDIO_KEY),
+        entry.options.get(CONF_AUDIO_BACKFILL_DAYS, DEFAULT_AUDIO_BACKFILL_DAYS),
+    )
     domain_data["audio"] = audio
     audio.async_start()
 

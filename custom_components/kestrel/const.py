@@ -8,14 +8,17 @@ CONF_API_KEY = "api_key"
 CONF_POLL_TIMEOUT = "poll_timeout"
 CONF_AUDIO_URL = "audio_url"
 CONF_AUDIO_KEY = "audio_key"
+CONF_AUDIO_BACKFILL_DAYS = "audio_backfill_days"
 AUDIO_KEY_HEADER = "X-Kestrel-Audio-Key"
 
 DEFAULT_URL = "http://192.168.1.69:11080/endpoint/@nphil/kestrel/public"
 DEFAULT_POLL_TIMEOUT = 25
 MIN_POLL_TIMEOUT = 1
 MAX_POLL_TIMEOUT = 25
+DEFAULT_AUDIO_BACKFILL_DAYS = 30
+MAX_AUDIO_BACKFILL_DAYS = 30  # BirdNET-Go and the audio service both keep recordings for 30 days
 
-INTEGRATION_VERSION = "1.0.16"
+INTEGRATION_VERSION = "1.0.17"
 STATIC_PATH = "/kestrel-static"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "birdnet_audio", "birdnet_preview", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
