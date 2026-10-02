@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Camera, ImageEmbedding, MediaObject, ObjectDetector } from '@scrypted/sdk';
+import { LIVE_PICTURE_QUALITY, LIVE_PICTURE_WIDTH } from './live';
 import { sdk } from './sdkFix';
 
 interface SharpPipeline {
@@ -88,4 +89,16 @@ export async function embedCrop(crop: Buffer): Promise<Buffer | undefined> {
         return undefined;
     const media = await sdk.mediaManager.createMediaObject(crop, 'image/jpeg');
     return device.getImageEmbedding(media);
+}
+
+// One current picture from the camera for a Live tile: a periodic request (the camera plugin may answer
+// from its own recent cache instead of waking the camera), at most 960 px wide, re-encoded as JPEG q75 so
+// every camera gives the same small size whatever it returns. Rejects when the camera cannot take one.
+export async function captureLivePicture(cameraId: string, timeoutMs: number): Promise<Buffer> {
+    const camera = sdk.systemManager.getDeviceById(cameraId) as unknown as Camera | undefined;
+    if (!camera || typeof camera.takePicture !== 'function')
+        throw new Error(`Camera ${cameraId} cannot take pictures`);
+    const media = await camera.takePicture({ reason: 'periodic', periodicRequest: true, timeout: timeoutMs, picture: { width: LIVE_PICTURE_WIDTH } });
+    const original = await sdk.mediaManager.convertMediaObjectToBuffer(media, 'image/jpeg');
+    return sharp(original).rotate().resize({ width: LIVE_PICTURE_WIDTH, withoutEnlargement: true }).jpeg({ quality: LIVE_PICTURE_QUALITY }).toBuffer();
 }

@@ -9,8 +9,9 @@ import mqtt, { type MqttClient } from 'mqtt';
 import { ChangeGate } from './changes';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
+import { LIVE_CAPTURE_DEADLINE_MS, LIVE_CAPTURE_TIMEOUT_MS, LivePictureCache, etagMatches, type LivePicture } from './live';
 import { parseLongPollTimeoutMs } from './longpoll';
-import { captureDetection, embedCrop, ensureMediaDirectories, saveCapture } from './media';
+import { captureDetection, captureLivePicture, embedCrop, ensureMediaDirectories, saveCapture } from './media';
 import { KeyedQueue, SameMomentTracker, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
 import { KestrelStore, type EventItem, type EventsResponse, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
@@ -49,7 +50,7 @@ type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestam
 // health of any individual RTSP/rebroadcast stream under it. A stream (e.g. the NVR recording
 // stream) can be restarting repeatedly while Online stays true, because another stream on the
 // same camera (e.g. the low-res analysis stream) still has data -- that is not visible here.
-type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; lastDetection: { species: string; at: number; visitId: string; kind: VisitKind; grp: VisitGroup } | null };
+type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; picture: string; lastDetection: { species: string; at: number; visitId: string; kind: VisitKind; grp: VisitGroup } | null };
 type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[]; durationTotal: number; durationSamples: number };
 type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
 type DetectorSession = { sawObject: boolean; timer: NodeJS.Timeout };
@@ -226,6 +227,13 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     // The camera list as it was when it was last published: the 30 s refresh only publishes a `camera`
     // event when the list now differs (online, health, drops, latest sighting, names).
     private cameraGate = new ChangeGate();
+    // A current picture per camera for the Live tiles of snapshot-only cameras (media/live/<id>.jpg): taken
+    // only when asked for, shared by concurrent requests, reused for 15 s, held in memory only (see live.ts).
+    private livePictures = new LivePictureCache({
+        capture: cameraId => captureLivePicture(cameraId, LIVE_CAPTURE_TIMEOUT_MS),
+        isCamera: cameraId => this.allVideoCameras().has(cameraId),
+        onFailure: (cameraId, error, failures, retryInMs) => this.console.warn(`Could not take a live picture on camera ${cameraId} (failure ${failures}; not asking again for ${Math.round(retryInMs / 1000)} s): ${String(error)}`),
+    }, { deadlineMs: LIVE_CAPTURE_DEADLINE_MS });
     private onlineListeners = new Map<string, { removeListener(): void }>();
     private cameraRuntime = new Map<string, CameraRuntime>();
     private eventWaiters = new Set<() => void>();
@@ -629,7 +637,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             const runtime = this.runtime(camera.id);
             const latest = this.db.listVisits({ camera: camera.id, limit: 1 }).items[0];
             items.push({ id: camera.id, name: camera.name, nvrCardId: camera.nvrCardId, online, health: this.cameraHealth(camera.id, online),
-                drops1h: runtime.drops.length, wildlife: this.cameras.has(camera.id),
+                drops1h: runtime.drops.length, wildlife: this.cameras.has(camera.id), picture: `media/live/${camera.id}.jpg`,
                 lastDetection: latest ? { species: latest.species, at: latest.startedAt, visitId: latest.id, kind: latest.kind, grp: latest.grp } : null });
         }
         return items;
@@ -1014,6 +1022,18 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         return { generatedAt: Date.now(), classifier: { deviceId: '248', labels: await this.labels() }, items: exported.items, sinceRetrain: exported.sinceRetrain };
     }
 
+    // The response for a live picture: never cached by anyone (it is only current for moments), but it carries
+    // an ETag and Last-Modified so a client can tell whether it changed and how old it is. A conditional
+    // request for the picture it already has gets an empty 304.
+    private sendLivePicture(request: HttpRequest, response: HttpResponse, picture: LivePicture): void {
+        const validators = { 'Cache-Control': 'no-store', 'ETag': picture.etag, 'Last-Modified': new Date(picture.capturedAt).toUTCString() };
+        if (etagMatches(headerValue(request.headers, 'if-none-match'), picture.etag)) {
+            response.send('', { code: 304, headers: validators });
+            return;
+        }
+        response.send(picture.buffer, { code: 200, headers: { ...validators, 'Content-Type': 'image/jpeg', 'Content-Length': String(picture.buffer.length) } });
+    }
+
     private async serveMedia(kind: string, id: string, request: HttpRequest, response: HttpResponse): Promise<void> {
         const mediaId = kind === 'clip' ? id.replace(/\.mp4$/i, '')
             : kind === 'audio' ? id
@@ -1026,6 +1046,13 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         else if (kind === 'clip') { file = row?.clip_file; contentType = 'video/mp4'; }
         else if (kind === 'audio') { file = row?.audio_file; contentType = 'audio/mpeg'; }
         else if (kind === 'camera') { file = this.db.latestVisitForCamera(mediaId)?.snapshot_file; contentType = 'image/jpeg'; }
+        else if (kind === 'live') {
+            const picture = await this.livePictures.get(mediaId);
+            if (picture) { this.sendLivePicture(request, response, picture); return; }
+            // The camera cannot give a picture right now: its latest visit snapshot is the next best thing.
+            file = this.db.latestVisitForCamera(mediaId)?.snapshot_file;
+            contentType = 'image/jpeg';
+        }
         else if (kind === 'species') {
             file = this.db.speciesBestPath(mediaId) || this.db.latestVisitForSpecies(mediaId)?.snapshot_file;
             contentType = 'image/jpeg';
@@ -1199,6 +1226,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
         for (const wake of this.eventWaiters) wake();
         this.eventWaiters.clear();
+        this.livePictures.clear();
         this.store?.close();
     }
 }
