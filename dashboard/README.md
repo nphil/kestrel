@@ -9,6 +9,7 @@ Lit 3 + strict TypeScript, bundled by esbuild into `../custom_components/kestrel
 | `npm run build` | Production bundle; the integration serves whatever hashed file is in that folder. |
 | `npm run build:dev` then `npm run serve:dev` | Local fixture page at <http://127.0.0.1:8765/dev/index.html> (fake cameras, species, visits and recordings; no Home Assistant). |
 | `node dev/perf-check.mjs` | Release gate. Measures the real panel (or `--target harness`) on every device size against the standing requirements and exits non-zero when one fails. Needs `npm install --include=dev`. Run it before each release; the options are listed at the top of the file. |
+| `nice -n 15 node dev/press-cost.mjs` | What a press costs the panel itself, from a browser trace (main-thread thread-time), so it holds on a busy machine where wall-clock timing does not. Compares each control with an inert press; budget 8 ms at 1x CPU. |
 
 ## Layout
 
