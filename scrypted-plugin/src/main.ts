@@ -13,7 +13,7 @@ import { LIVE_CAPTURE_DEADLINE_MS, LIVE_CAPTURE_TIMEOUT_MS, LivePictureCache, et
 import { parseLongPollTimeoutMs } from './longpoll';
 import { captureDetection, captureLivePicture, embedCrop, ensureMediaDirectories, saveCapture } from './media';
 import { KeyedQueue, SameMomentTracker, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
-import { KestrelStore, type EventItem, type EventsResponse, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
+import { KestrelStore, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
 import { GENUS_CLASS, SPECIES_CLASS } from './taxonomy';
@@ -985,6 +985,26 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         }
     }
 
+    // Fresh start: `POST visits/purge {kind:'heard', before:<ms>, execute?:true}`. Without `execute` it is
+    // a dry run. Only heard visits can be purged. ONE compact `visit_deleted` event (no id) tells open
+    // dashboards to reload; the integration ignores a `visit_deleted` without an id, so the caller
+    // deletes the matching previews itself from the returned detection ids.
+    private purgeVisits(body: Record<string, unknown>): PurgeResult {
+        if (body.kind !== 'heard') throw Object.assign(new Error("kind must be 'heard': seen visits cannot be purged"), { status: 400 });
+        const before = asNumber(body.before);
+        if (before === undefined || before <= 0 || before > Date.now()) throw Object.assign(new Error('before must be a millisecond timestamp in the past'), { status: 400 });
+        const result = this.db.purgeHeardBefore(before, body.execute === true);
+        if (result.executed && result.removed) {
+            for (const id of result.relinked) {
+                const visit = this.db.getVisit(id);
+                if (visit) this.publishEvent('visit_updated', visit);
+            }
+            this.publishEvent('visit_deleted', { purged: { kind: 'heard', before, count: result.removed } });
+            this.console.log(`Kestrel purged ${result.removed} heard visit(s) before ${before}`);
+        }
+        return result;
+    }
+
     // `timeoutMs` is how long to hold the request open when nothing is pending (callers pass
     // parseLongPollTimeoutMs, already clamped to 0..25 s). Pending events return immediately.
     private async waitForEvents(after: number, timeoutMs: number): Promise<EventsResponse> {
@@ -1154,6 +1174,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 this.db.markRetrained(at);
                 jsonReply(response, 200, { retrainedAt: at, sinceRetrain: 0 }); return;
             }
+            if (method === 'POST' && route === 'visits/purge') { jsonReply(response, 200, this.purgeVisits(parseJsonBody(request.body))); return; }
             if (parts[0] === 'visits' && parts[1] && parts.length === 2 && method === 'GET') {
                 const visit = this.db.getVisit(parts[1]);
                 jsonReply(response, visit ? 200 : 404, visit ?? { error: 'Visit not found' }); return;

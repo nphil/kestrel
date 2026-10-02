@@ -79,6 +79,18 @@ export interface EventsResponse {
     events?: EventItem[];
     resync?: true;
 }
+export interface PurgeResult {
+    executed: boolean;
+    before: number;
+    removed: number;
+    // BirdNET-Go detection ids of the removed (or, in a dry run, matching) visits.
+    detectionIds: number[];
+    species: number;
+    // Kept seen visits whose link to a purged call was cleared.
+    relinked: string[];
+    remainingHeard: number;
+}
+
 
 interface RawVisit {
     id: string;
@@ -267,6 +279,11 @@ export class KestrelStore {
                 data TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS known_species (
+                species TEXT PRIMARY KEY,
+                first_at INTEGER NOT NULL,
+                purged_at INTEGER NOT NULL
+            );
         `);
         // One-time migration: the visits table predates these two columns (BirdNET-Go's
         // own detection reference), so a pre-existing on-disk DB needs them added explicitly --
@@ -437,6 +454,7 @@ export class KestrelStore {
             UPDATE visits SET first_ever=1 WHERE rowid IN (
                 SELECT rowid FROM (
                     SELECT rowid, ROW_NUMBER() OVER (PARTITION BY species ORDER BY started_at ASC, rowid ASC) AS rn FROM visits
+                    WHERE species NOT IN (SELECT species FROM known_species)
                 ) WHERE rn=1
             )
         `);
@@ -535,6 +553,7 @@ export class KestrelStore {
 
     private recomputeFirstEverForSpecies(species: string): void {
         this.db.prepare('UPDATE visits SET first_ever=0 WHERE species=?').run(species);
+        if (this.db.prepare('SELECT 1 FROM known_species WHERE species=?').get(species)) return;
         this.db.prepare('UPDATE visits SET first_ever=1 WHERE rowid=(SELECT rowid FROM visits WHERE species=? ORDER BY started_at ASC, rowid ASC LIMIT 1)').run(species);
     }
 
@@ -568,9 +587,60 @@ export class KestrelStore {
         return 'merged';
     }
 
+    // "Has this species ever been recorded?" -- the question behind every first-ever flag and alert.
+    // Species whose visits were purged (purgeHeardBefore) stay known, so a fresh start does not make
+    // every bird "new" again.
     hasSpecies(species: string): boolean {
-        return !!this.db.prepare("SELECT 1 FROM visits WHERE species=? AND status NOT IN ('not_animal','unknown') LIMIT 1").get(species);
+        return !!this.db.prepare("SELECT 1 FROM visits WHERE species=? AND status NOT IN ('not_animal','unknown') LIMIT 1").get(species)
+            || !!this.db.prepare('SELECT 1 FROM known_species WHERE species=?').get(species);
     }
+
+    // Fresh start for heard visits: removes every HEARD visit that started strictly before `before`
+    // (ms), in one transaction, WITHOUT per-visit `visit_deleted` announcements (the caller sends one
+    // compact event). Seen visits, corrections and learning embeddings are not touched (corrections
+    // hold no foreign key to visits). The species of the removed visits are first remembered in
+    // `known_species`, so hasSpecies stays true and nothing is flagged "first ever" again. With
+    // `execute` false nothing changes: it only reports what would go.
+    purgeHeardBefore(before: number, execute: boolean): PurgeResult {
+        const rows = this.db.prepare("SELECT id, species, status, started_at, birdnet_detection_id FROM visits WHERE kind='heard' AND started_at<? ORDER BY started_at, rowid")
+            .all(before) as { id: string; species: string; status: VisitStatus; started_at: number; birdnet_detection_id: number | null }[];
+        const detectionIds = rows.map(row => row.birdnet_detection_id).filter((id): id is number => typeof id === 'number');
+        const result: PurgeResult = {
+            executed: execute, before, removed: rows.length, detectionIds,
+            species: new Set(rows.map(row => row.species)).size, relinked: [],
+            remainingHeard: Number((this.db.prepare("SELECT COUNT(*) AS n FROM visits WHERE kind='heard'").get() as { n: number }).n) - rows.length,
+        };
+        if (!execute || !rows.length) return result;
+        const removedIds = new Set(rows.map(row => row.id));
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            const remember = this.db.prepare(`INSERT INTO known_species(species,first_at,purged_at) VALUES(?,?,?)
+                ON CONFLICT(species) DO UPDATE SET first_at=MIN(first_at,excluded.first_at)`);
+            const now = Date.now();
+            for (const row of rows) {
+                if (row.status === 'not_animal' || row.status === 'unknown') continue;
+                remember.run(row.species, row.started_at, now);
+            }
+            this.db.prepare("DELETE FROM visits WHERE kind='heard' AND started_at<?").run(before);
+            const bestVisits = this.db.prepare('SELECT visit_id FROM species_best').all() as { visit_id: string }[];
+            for (const { visit_id } of bestVisits) if (removedIds.has(visit_id)) this.refreshSpeciesBestForVisit(visit_id);
+            // A kept seen visit may still point at a purged call.
+            const linked = this.db.prepare("SELECT * FROM visits WHERE kind='seen' AND data LIKE '%\"heard\":{%'").all() as unknown as RawVisit[];
+            for (const raw of linked) {
+                const visit = this.decodeVisit(raw);
+                if (!visit.heard || !removedIds.has(visit.heard.visitId)) continue;
+                visit.heard = null;
+                this.saveVisit(visit);
+                result.relinked.push(visit.id);
+            }
+            this.db.exec('COMMIT');
+        } catch (error) {
+            this.db.exec('ROLLBACK');
+            throw error;
+        }
+        return result;
+    }
+
 
     listVisits(filters: VisitFilters = {}): { items: Visit[]; next: number | null } {
         const clauses: string[] = [];
