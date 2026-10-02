@@ -24,6 +24,9 @@ _FORWARD_HEADERS = (
     "ETag",
     "Last-Modified",
 )
+# Live camera pictures are only current for moments: the browser may ask "has it changed?" and the
+# plugin answers 304, but nothing may be cached on our side.
+_LIVE_CONDITIONAL_HEADERS = ("If-None-Match", "If-Modified-Since")
 
 
 class KestrelMediaView(HomeAssistantView):
@@ -93,12 +96,18 @@ class KestrelMediaView(HomeAssistantView):
         coordinator: KestrelCoordinator | None = self._hass.data.get(DOMAIN, {}).get("coordinator")
         if coordinator is None:
             return web.Response(status=503, text="Kestrel is not connected")
+        live = kind == "live"
+        if live:
+            headers.update(
+                {name: request.headers[name] for name in _LIVE_CONDITIONAL_HEADERS if name in request.headers}
+            )
         return await self._stream(
             request,
             coordinator.client.session,
             coordinator.client.media_url(kind, media_id),
             {**coordinator.client.headers, **headers},
             aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
+            live=live,
         )
 
     @staticmethod
@@ -110,11 +119,21 @@ class KestrelMediaView(HomeAssistantView):
         timeout: aiohttp.ClientTimeout,
         *,
         cache_control: str = "private, max-age=300",
+        live: bool = False,
     ) -> web.StreamResponse:
         try:
             async with session.get(
                 url, headers=headers, timeout=timeout, allow_redirects=False
             ) as upstream:
+                if live and upstream.status == 304:
+                    # "Unchanged": answer with the validators only, never a body.
+                    return web.Response(
+                        status=304,
+                        headers={
+                            "Cache-Control": upstream.headers.get("Cache-Control", "no-store"),
+                            **{n: upstream.headers[n] for n in ("ETag", "Last-Modified") if n in upstream.headers},
+                        },
+                    )
                 if upstream.status not in (200, 206, 416):
                     if upstream.status in (202, 404):  # 202: the preview is still being made
                         return web.Response(status=404, text="Media not found")
@@ -128,7 +147,9 @@ class KestrelMediaView(HomeAssistantView):
                     for name in _FORWARD_HEADERS
                     if name in upstream.headers
                 }
-                downstream_headers["Cache-Control"] = cache_control
+                downstream_headers["Cache-Control"] = (
+                    upstream.headers.get("Cache-Control", "no-store") if live else cache_control
+                )
                 response = web.StreamResponse(status=upstream.status, headers=downstream_headers)
                 await response.prepare(request)
                 async for chunk in upstream.content.iter_chunked(64 * 1024):

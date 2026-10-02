@@ -165,6 +165,32 @@ class FakeSession:
 SESSION: dict[str, FakeSession] = {"session": FakeSession()}
 
 
+class FakeWebResponse:
+    """aiohttp.web.Response: just the status, headers and text."""
+
+    def __init__(self, *, status: int = 200, headers: dict | None = None, text: str | None = None) -> None:
+        self.status = status
+        self.headers = dict(headers or {})
+        self.text = text
+
+
+class FakeStreamResponse(FakeWebResponse):
+    """aiohttp.web.StreamResponse: collects what is written."""
+
+    def __init__(self, *, status: int = 200, headers: dict | None = None) -> None:
+        super().__init__(status=status, headers=headers)
+        self.body = b""
+
+    async def prepare(self, request: object) -> None:
+        pass
+
+    async def write(self, chunk: bytes) -> None:
+        self.body += chunk
+
+    async def write_eof(self) -> None:
+        pass
+
+
 class KestrelApiError(Exception):
     def __init__(self, message: str, *, status: int | None = None) -> None:
         super().__init__(message)
@@ -255,7 +281,7 @@ def _install_stubs() -> None:
         ActiveConnection=type("ActiveConnection", (), {}),
         ERR_INVALID_FORMAT="invalid_format",
     )
-    _module("homeassistant.components.http")
+    _module("homeassistant.components.http", HomeAssistantView=type("HomeAssistantView", (), {}))
     _module(
         "homeassistant.components.http.auth",
         async_sign_path=lambda hass, path, expiry, refresh_token_id=None: f"{path}?authSig=FAKE",
@@ -277,7 +303,14 @@ def _install_stubs() -> None:
     )
     _module("homeassistant.util")
     _module("homeassistant.util.dt", utcnow=lambda: datetime.now(timezone.utc))
-    _module("aiohttp", ClientError=type("ClientError", (Exception,), {}), ClientTimeout=lambda **kwargs: None)
+    web = _module("aiohttp.web", Response=FakeWebResponse, StreamResponse=FakeStreamResponse, Request=object)
+    _module(
+        "aiohttp",
+        ClientError=type("ClientError", (Exception,), {}),
+        ClientTimeout=lambda **kwargs: None,
+        ClientSession=object,
+        web=web,
+    )
     package = types.ModuleType("kestrel_pkg")
     package.__path__ = [str(INTEGRATION)]  # the real files, so relative imports resolve
     sys.modules["kestrel_pkg"] = package
@@ -296,6 +329,7 @@ event_module = importlib.import_module("kestrel_pkg.event")
 websocket_module = importlib.import_module("kestrel_pkg.websocket_api")
 const_module = importlib.import_module("kestrel_pkg.const")
 audio_module = importlib.import_module("kestrel_pkg.audio")
+media_module = importlib.import_module("kestrel_pkg.media")
 config_flow_module = importlib.import_module("kestrel_pkg.config_flow")
 
 FRONT = {"id": "55", "name": "Front Door Camera"}

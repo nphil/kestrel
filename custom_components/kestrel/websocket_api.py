@@ -21,7 +21,7 @@ from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_H
 from .coordinator import KestrelCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-_MEDIA_RE = re.compile(r"(?:^|/)media/(snap|crop|clip|audio|species|camera|birdnet_audio)/([^?#]+)")
+_MEDIA_RE = re.compile(r"(?:^|/)media/(snap|crop|clip|audio|species|camera|live|birdnet_audio)/([^?#]+)")
 
 
 def _coordinator(hass: HomeAssistant) -> KestrelCoordinator:

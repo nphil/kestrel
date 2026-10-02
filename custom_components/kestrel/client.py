@@ -36,7 +36,7 @@ class KestrelClient:
 
     def media_url(self, kind: str, media_id: str) -> str:
         """Return the plugin URL for one allow-listed media resource."""
-        if kind not in {"snap", "crop", "clip", "audio", "species", "camera"}:
+        if kind not in {"snap", "crop", "clip", "audio", "species", "camera", "live"}:
             raise KestrelApiError("Unsupported media type")
         return f"{self.base_url}/media/{kind}/{quote(str(media_id), safe='')}"
 
