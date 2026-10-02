@@ -385,6 +385,7 @@ class BackfillTests(AudioTestCase):
         self.assertEqual(coordinator.client.calls[1]["before"], cursor)
         progress = self.previews._backfill
         self.assertEqual((progress.state, progress.scanned, progress.submitted, progress.already_known), ("done", 2, 1, 1))
+        self.assertEqual(self.jobs()[0]["params"]["priority"], "low", "old calls queue behind new ones")
 
     async def test_it_waits_while_the_service_queue_is_busy(self) -> None:
         pages, _ = self.pages()
@@ -447,6 +448,7 @@ class BackfillWindowTests(AudioTestCase):
         self.assertEqual(self.previews._backfill.state, "off")
         self.assertEqual(coordinator.client.calls, [], "the plugin's visit list is never asked for")
         self.assertEqual([job["params"]["detection_id"] for job in self.jobs()], [360])
+        self.assertNotIn("priority", self.jobs()[0]["params"], "a newly heard call is never queued behind old ones")
         self.assertEqual((await self.previews.async_diagnostics())["backfill_days"], 0)
 
     async def test_widening_the_window_later_sends_only_what_is_missing(self) -> None:

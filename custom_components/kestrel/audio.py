@@ -453,7 +453,7 @@ class AudioPreviews:
             return _UNAVAILABLE
         return _Original(body, content_type if content_type.startswith("audio/") else "audio/ogg")
 
-    async def _submit(self, visit: dict[str, Any], detection_id: int) -> str:
+    async def _submit(self, visit: dict[str, Any], detection_id: int, *, low_priority: bool = False) -> str:
         """Send one recording to the service.
 
         Returns 'sent', 'no_original' (BirdNET-Go never saved it), 'unavailable' (BirdNET-Go
@@ -479,6 +479,8 @@ class AudioPreviews:
         camera_name = camera.get("name") if isinstance(camera, dict) else None
         if isinstance(camera_name, str) and camera_name:
             params["camera"] = camera_name
+        if low_priority:  # back-filling old calls must never delay a call that has just been heard
+            params["priority"] = "low"
         try:
             status, data = await self._request(
                 "POST",
@@ -666,7 +668,7 @@ class AudioPreviews:
         _bounded_insert(self._submitted, detection_id)
         outcome = "unreachable"
         try:
-            outcome = await self._submit(visit, detection_id)
+            outcome = await self._submit(visit, detection_id, low_priority=True)
         finally:
             if outcome != "sent":
                 self._submitted.pop(detection_id, None)
