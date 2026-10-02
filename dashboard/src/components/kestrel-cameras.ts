@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from "lit";
 import KestrelMark from "../../../assets/kestrel-icon-128.png";
-import { api, asArray, asVisit, cameraSnapshotUrl, extractLabels, goBack, isNotFound, navigate, routeView, speciesArray, speciesFromLocation, speciesPicture, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
+import { api, asVisit, cameraArray, cameraPicture, extractLabels, goBack, isNotFound, navigate, routeView, speciesArray, speciesFromLocation, speciesPicture, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
 import { readCached, writeCached } from "../cache.ts";
 import { ago, clamp, dateTime, formatMiB, sentence, timestamp, when } from "../format.ts";
 import { COMMON_CSS, TOKENS_CSS } from "../styles/tokens.ts";
@@ -15,6 +15,7 @@ import "../ui/lazy-audio.ts";
 import "../ui/lazy-image.ts";
 import "../ui/segmented.ts";
 import "../ui/sheet.ts";
+import "../ui/live-picture.ts";
 import "./kestrel-live-player.ts";
 import { forgetVisit } from "./kestrel-species-sheet.ts";
 import type { KestrelLivePlayer } from "./kestrel-live-player.ts";
@@ -238,6 +239,15 @@ export class KestrelCameras extends LitElement {
 
   private _liveIsPaused(): boolean { return this._livePaused && this._view !== "live"; }
 
+  private _lastPictureRefresh = 0;
+  /** A picture link the server no longer accepts: ask for the cameras again (their links are signed afresh), at most once a minute. */
+  private _onPictureExpired = (): void => {
+    const now = Date.now();
+    if (now - this._lastPictureRefresh < 60_000) return;
+    this._lastPictureRefresh = now;
+    void this._loadCameras();
+  };
+
   private _onViewChanged(previous: string | undefined): void {
     window.clearTimeout(this._livePauseTimer);
     if (this._view === "live") this._livePaused = false;
@@ -382,7 +392,7 @@ export class KestrelCameras extends LitElement {
     if (!event) return;
     if (event.type === "camera") {
       // The event carries the whole camera list and is only sent when something changed, so use it as is.
-      const cameras = asArray<Camera>(event.data);
+      const cameras = cameraArray(event.data);
       if (cameras.length && typeof cameras[0]?.name === "string") this._setCameras(cameras);
       else if (this._view === "live") void this._loadCameras();
       if (this._view === "insights") void this._loadHealth();
@@ -457,7 +467,7 @@ export class KestrelCameras extends LitElement {
     if (!this._hass) return;
     this._ensureNvrComponents();
     const cameras = await api.cameras(this._hass);
-    if (this._isActive(generation)) this._setCameras(asArray<Camera>(cameras));
+    if (this._isActive(generation)) this._setCameras(cameraArray(cameras));
   }
 
   /** Replacing a list that hasn't changed would still re-render every tile, so an identical refresh is dropped. */
@@ -470,7 +480,8 @@ export class KestrelCameras extends LitElement {
     if (signature === this._camerasSignature && this._cameras.length) return;
     this._camerasSignature = signature;
     this._cameras = next;
-    writeCached("cameras", next);
+    // Signed picture links are good for hours, not for the six this snapshot is kept: they are never stored.
+    writeCached("cameras", next.map((camera) => ({ ...camera, picture: null })));
   }
 
   private _setSpecies(species: Species[]): void {
@@ -538,7 +549,7 @@ export class KestrelCameras extends LitElement {
     if (!this._isActive(generation)) return;
     if (speciesResult.status === "fulfilled") this._setSpecies(speciesArray(speciesResult.value));
     if (settingsResult.status === "fulfilled" && JSON.stringify(settingsResult.value) !== JSON.stringify(this._settings)) this._settings = settingsResult.value;
-    if (camerasResult.status === "fulfilled") this._setCameras(asArray<Camera>(camerasResult.value));
+    if (camerasResult.status === "fulfilled") this._setCameras(cameraArray(camerasResult.value));
     if (speciesResult.status === "rejected") throw speciesResult.reason;
     this._speciesVisible = Math.min(24, Math.max(this._speciesVisible, 24));
   }
@@ -556,7 +567,7 @@ export class KestrelCameras extends LitElement {
     const [health, review, cameras] = results;
     if (health.status === "fulfilled") this._health = health.value;
     if (review.status === "fulfilled") this._review = visitPage(review.value).items.slice(0, 24);
-    if (cameras.status === "fulfilled") this._setCameras(asArray<Camera>(cameras.value));
+    if (cameras.status === "fulfilled") this._setCameras(cameraArray(cameras.value));
     if (health.status === "rejected" && review.status === "rejected") throw health.reason;
   }
 
@@ -849,7 +860,7 @@ export class KestrelCameras extends LitElement {
     if (selected) {
       return html`<section class="focused-camera">
         <div class="section-heading"><button class="back-inline" type="button" @pointerdown=${this._prewarmFocus} @keydown=${this._prewarmFocus} @click=${() => { this._selectedCamera = null; }}>All cameras</button><h1>${selected.name}</h1><span class="status-chip"><i class="status-dot ${this._statusKind(selected.health)}"></i>${this._healthLabel(selected)}</span></div>
-        ${selected.nvrCardId === null ? html`<div class="focused-snapshot"><kestrel-lazy-image class="snapshot-image" .src=${cameraSnapshotUrl(selected.id) ?? ""} alt=${`${selected.name} latest snapshot`} wide></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span></div>` : selected.online ? html`<kestrel-live-player mode="focus" .cameraId=${String(selected.id)} .nvrCardId=${selected.nvrCardId} .label=${selected.name} .live=${true} .paused=${this._liveIsPaused()} .wide=${this._panel.width > 680} .scryptedUrl=${SCRYPTED_URL} .hass=${this._hass}></kestrel-live-player>` : html`<div class="unsupported-stream"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><strong>Camera is offline</strong><span>The last camera health state is offline.</span><a href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a></div>`}
+        ${selected.nvrCardId === null ? html`<div class="focused-snapshot"><kestrel-live-picture class="snapshot-image" .src=${cameraPicture(selected) ?? ""} .paused=${this._liveIsPaused()} alt=${`${selected.name} latest picture`} wide @kestrel-picture-expired=${this._onPictureExpired}></kestrel-live-picture><span class="snapshot-chip">Snapshot only</span></div>` : selected.online ? html`<kestrel-live-player mode="focus" .cameraId=${String(selected.id)} .nvrCardId=${selected.nvrCardId} .label=${selected.name} .live=${true} .paused=${this._liveIsPaused()} .wide=${this._panel.width > 680} .scryptedUrl=${SCRYPTED_URL} .hass=${this._hass}></kestrel-live-player>` : html`<div class="unsupported-stream"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><strong>Camera is offline</strong><span>The last camera health state is offline.</span><a href=${SCRYPTED_URL} target="_blank" rel="noopener noreferrer">Open in Scrypted</a></div>`}
         <div class="camera-meta"><span>${selected.drops1h ?? 0} stream drops in the last hour</span>${recentSighting(selected) ? this._renderSighting(recentSighting(selected) as CameraDetection) : html`<span class="muted">No sightings in the last 24 hours</span>`}</div>
       </section>`;
     }
@@ -862,7 +873,7 @@ export class KestrelCameras extends LitElement {
           <button class="camera-focus" type="button" aria-label=${`Focus ${camera.name}`} @pointerdown=${this._prewarmTile} @keydown=${this._prewarmTile} @click=${() => { this._selectedCamera = String(camera.id); }}>
             <div class="camera-picture">
               ${camera.nvrCardId === null
-                ? html`<kestrel-lazy-image class="camera-snapshot" .src=${cameraSnapshotUrl(camera.id) ?? ""} alt=${`${camera.name} latest snapshot`}></kestrel-lazy-image><span class="snapshot-chip">Snapshot only</span>`
+                ? html`<kestrel-live-picture class="camera-snapshot" .src=${cameraPicture(camera) ?? ""} .paused=${this._liveIsPaused()} alt=${`${camera.name} latest picture`} @kestrel-picture-expired=${this._onPictureExpired}></kestrel-live-picture><span class="snapshot-chip">Snapshot only</span>`
                 : camera.online
                   ? html`<kestrel-live-player .cameraId=${String(camera.id)} .nvrCardId=${camera.nvrCardId} .label=${camera.name} .live=${liveIds.has(String(camera.id))} .paused=${this._liveIsPaused()} .hass=${this._hass}></kestrel-live-player>`
                   : html`<div class="stream-placeholder static"><ha-icon .icon=${"mdi:cctv-off"}></ha-icon><span>Camera offline</span></div>`}
@@ -1288,6 +1299,7 @@ export class KestrelCameras extends LitElement {
     :host([data-lu-short]) .focused-camera > .section-heading { grid-column: 2; grid-row: 1; flex-direction: column; align-items: flex-start; gap: var(--lu-space-2); }
     :host([data-lu-short]) .focused-camera > kestrel-live-player, :host([data-lu-short]) .focused-camera > .focused-snapshot, :host([data-lu-short]) .focused-camera > .unsupported-stream { grid-column: 1; grid-row: 1 / span 2; max-height: calc(100dvh - 48px - var(--lu-edge-y) * 2); }
     :host([data-lu-short]) .camera-meta { grid-column: 2; grid-row: 2; flex-direction: column; align-items: flex-start; }
+    :host([data-lu-short]) .focused-snapshot .snapshot-image { min-height: 0; max-height: calc(100dvh - 48px - var(--lu-edge-y) * 2); }
     @media (prefers-reduced-motion: reduce) {
       .progress-track span, .meter span { transition: none; }
     }

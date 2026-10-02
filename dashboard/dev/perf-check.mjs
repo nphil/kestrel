@@ -173,7 +173,7 @@ async function openContext(browser, size, harnessUrl) {
   if (throttle > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: throttle });
   const errors = [];
   page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(m.text().slice(0, 200)); });
-  page.on("response", (r) => { if (r.status() >= 400 && !r.url().endsWith("/favicon.ico") && !(opts.target === "harness" && r.url().includes("/media/camera/")) && !/\/(api\/websocket|auth\/)/.test(r.url())) errors.push(`${r.status()} ${new URL(r.url()).pathname.slice(0, 80)}`); });
+  page.on("response", (r) => { if (r.status() >= 400 && !r.url().endsWith("/favicon.ico") && !(opts.target === "harness" && r.url().includes("/media/camera/")) && !(r.status() === 404 && r.url().includes("/media/live/")) && !/\/(api\/websocket|auth\/)/.test(r.url())) errors.push(`${r.status()} ${new URL(r.url()).pathname.slice(0, 80)}`); });
   // Scrypted's live cards reject with the bare string "closed" (no Error, no stack) when they are torn down while still
   // connecting; Kestrel only ever throws Errors, so those are counted and reported, but they are not the panel's failure.
   const foreign = [];

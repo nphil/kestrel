@@ -135,8 +135,21 @@ export function speciesPicture(species: Species): { url: string | null; isRefere
   return { url: reference, isReference: reference !== null };
 }
 
-export function cameraSnapshotUrl(id: string | number): string | null {
-  return mediaUrl(`media/camera/${id}.jpg`);
+/** Keeps a camera's picture link the same from one response to the next (see urls.ts). */
+function steadyCamera(camera: Camera): Camera {
+  if (camera.picture) camera.picture = stableUrl(camera.picture) as string;
+  return camera;
+}
+
+export function cameraArray(value: unknown): Camera[] {
+  return asArray<Camera>(value).map(steadyCamera);
+}
+
+/** The link to a camera's current picture, or null when it has none or it isn't a usable link yet: a bare path the
+ * integration hasn't signed would resolve under the panel's own address and never load. */
+export function cameraPicture(camera: Camera): string | null {
+  const link = camera.picture;
+  return typeof link === "string" && /^(?:https?:)?\/\/|^\//.test(link) ? link : null;
 }
 
 export function routeView(config: KestrelCardConfig): KestrelCardConfig["view"] {

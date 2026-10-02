@@ -6,7 +6,7 @@ const KEEP_MS = 6 * 3_600_000;
 const MAX_ENTRIES = 3000;
 const known = new Map<string, { url: string; at: number }>();
 
-function pathOf(url: string): string {
+export function pathOf(url: string): string {
   return url.replace(/([?&])authSig=[^&]*&?/, "$1").replace(/[?&]$/, "");
 }
 

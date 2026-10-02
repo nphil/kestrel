@@ -9,11 +9,11 @@ const cameras: Camera[] = [
   { id: 103, name: "Back Door", nvrCardId: 103, online: true, health: "ok", drops1h: 1, wildlife: true, lastDetection: { species: "Blue Jay", at: now - 180_000, visitId: "fx-heard-blue-jay-0", kind: "heard", grp: "bird" } },
   { id: 104, name: "Front Door", nvrCardId: 104, online: true, health: "unstable", drops1h: 4, wildlife: true, lastDetection: { species: "Eastern Gray Squirrel", at: now - 30_000, visitId: "fx-seen-eastern-gray-squirrel-0", kind: "seen", grp: "mammal" } },
   { id: 105, name: "Plant Room", nvrCardId: 105, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: { species: "House Mouse", at: now - 30 * 3_600_000, visitId: "fx-seen-house-mouse-0", kind: "seen", grp: "mammal" } },
-  { id: 106, name: "Bird", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: true, lastDetection: null },
-  { id: 108, name: "Tool Room", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: null },
-  { id: 128, name: "Office", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: null },
+  { id: 106, name: "Bird", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: true, picture: media, lastDetection: null },
+  { id: 108, name: "Tool Room", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: false, picture: media, lastDetection: null },
+  { id: 128, name: "Office", nvrCardId: null, online: true, health: "ok", drops1h: 0, wildlife: false, picture: media, lastDetection: null },
   { id: 168, name: "Gym", nvrCardId: 168, online: true, health: "ok", drops1h: 0, wildlife: false, lastDetection: null },
-  { id: 196, name: "Downstairs Door", nvrCardId: null, online: false, health: "offline", drops1h: 2, wildlife: false, lastDetection: null },
+  { id: 196, name: "Downstairs Door", nvrCardId: null, online: false, health: "offline", drops1h: 2, wildlife: false, picture: media, lastDetection: null },
   { id: 240, name: "Plant Room Cat Feeder", nvrCardId: 240, online: true, health: "ok", drops1h: 0, wildlife: true, lastDetection: null },
 ];
 const createVisit = (): Visit => ({

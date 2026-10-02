@@ -10,11 +10,12 @@ Lit 3 + strict TypeScript, bundled by esbuild into `../custom_components/kestrel
 | `npm run build:dev` then `npm run serve:dev` | Local fixture page at <http://127.0.0.1:8765/dev/index.html> (fake cameras, species, visits and recordings; no Home Assistant). |
 | `node dev/perf-check.mjs` | Release gate. Measures the real panel (or `--target harness`) on every device size against the standing requirements and exits non-zero when one fails. Needs `npm install --include=dev`. Run it before each release; the options are listed at the top of the file. |
 | `nice -n 15 node dev/press-cost.mjs` | What a press costs the panel itself, from a browser trace (main-thread thread-time), so it holds on a busy machine where wall-clock timing does not. Compares each control with an inert press; budget 8 ms at 1x CPU. |
+| `node dev/smoke/final-notfound.mjs`, `final-live-back.mjs [w h]`, `live-pictures.mjs [--wait 45]`, `themes.mjs` | Post-install smoke checks on the real panel (they use the bundle Home Assistant serves, or the newest local one for `themes.mjs`): friendly merged/removed page, Live chip -> visit -> Back restores scroll and the focused camera, snapshot-only cameras show a picture that refreshes about every 16 s, light-flat vs dark-glass theme screenshots. Need the relay on 127.0.0.1:8124 and the token file; print no secrets. |
 
 ## Layout
 
 - `src/ui/` generic Lucent building blocks: sheet, section, media rail, audio list, segmented control, lazy image and
-  audio, press tracking, panel profile. They read `--lu-*` tokens only and know nothing about Kestrel's data.
+  audio, self-refreshing live picture, press tracking, panel profile. They read `--lu-*` tokens only and know nothing about Kestrel's data.
 - `src/components/` Kestrel glue: the panel (`kestrel-cameras`), the species sheet, the live player.
 - `src/styles/tokens.ts` the one token layer. Home Assistant's theme supplies every colour; `PanelProfile` sets
   `data-lu-profile` (phone, tablet, desktop, smart, ha) from the panel's own size and input, and the tokens follow.

@@ -21,6 +21,8 @@ export interface Camera {
   health: CameraHealth;
   drops1h: number;
   wildlife: boolean;
+  /** The link to a current picture of the camera (signed by the integration), refreshed by the panel while it is shown. */
+  picture?: string | null;
   lastDetection: CameraDetection | null;
 }
 
