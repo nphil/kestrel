@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Lit dashboard card for Kestrel cameras and wildlife visits",
+  "description": "Kestrel cameras and wildlife panel for Home Assistant (Lit, built on lucent-ha)",
   "scripts": {
     "build": "node build.mjs",
     "build:dev": "node dev/build.mjs",
     "typecheck": "tsc --noEmit",
-    "serve:dev": "python3 -m http.server 8765 --directory ."
+    "serve:dev": "node dev/serve.mjs 8765"
   },
   "dependencies": {
     "lit": "^3.2.1",

@@ -1,3 +1,5 @@
+import type { HassConnection, HomeAssistant as LuHomeAssistant } from "lucent-ha";
+
 export type CameraHealth = "ok" | "unstable" | "offline";
 export type VisitKind = "seen" | "heard";
 export type VisitStatus = "auto" | "learned" | "corrected" | "confirmed" | "not_animal" | "unknown";
@@ -112,11 +114,14 @@ export interface SpeciesDetail {
   calls?: Visit[];
   [key: string]: unknown;
 }
-export interface HomeAssistant {
+/** What Home Assistant hands the panel: the toolkit's slice of it, with the calls Kestrel makes typed more strictly. */
+export interface HomeAssistant extends LuHomeAssistant {
   callWS<T = unknown>(message: Record<string, unknown>): Promise<T>;
-  connection: {
-    subscribeMessage<T>(callback: (message: T) => void, message: Record<string, unknown>): Promise<() => Promise<void>>;
+  connection: HassConnection & {
+    /** `resubscribe: false`: after a reconnect the panel subscribes again itself (and can retry), instead of the library doing it once. */
+    subscribeMessage<T>(callback: (message: T) => void, message: Record<string, unknown>, options?: { resubscribe?: boolean }): Promise<() => Promise<void>>;
   };
+  user?: NonNullable<LuHomeAssistant["user"]> & { id?: string };
 }
 export interface KestrelCardConfig { type?: string; view?: "live" | "visit" | "wildlife" | "insights"; }
 export interface KestrelPush {

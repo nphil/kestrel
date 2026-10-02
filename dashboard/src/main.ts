@@ -1,7 +1,6 @@
 /** Loading this module registers Kestrel's custom Home Assistant panel and card. */
-import { defineElements, LuAudioList, LuAudioPlayer, LuMediaRail, LuSection, LuSegmented } from "lucent-ha";
-import "./ui/lazy-image.ts";
+import { defineElements, LuAppShell, LuAudioList, LuAudioPlayer, LuButton, LuChip, LuGrid, LuImage, LuMediaRail, LuRoot, LuRow, LuSection, LuSegmented, LuSheet, LuState, LuViewStack } from "lucent-ha";
 import "./components/kestrel-cameras.ts";
 
 // The toolkit's elements Kestrel uses, registered as <kestrel-lu-...>. Only these (and what they render) reach the bundle.
-defineElements("kestrel", [LuAudioList, LuAudioPlayer, LuMediaRail, LuSection, LuSegmented]);
+defineElements("kestrel", [LuAppShell, LuAudioList, LuAudioPlayer, LuButton, LuChip, LuGrid, LuImage, LuMediaRail, LuRoot, LuRow, LuSection, LuSegmented, LuSheet, LuState, LuViewStack]);

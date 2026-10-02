@@ -15,6 +15,20 @@ export function sameMedia(a: string | null | undefined, b: string | null | undef
   return Boolean(a) && Boolean(b) && pathOf(a as string) === pathOf(b as string);
 }
 
+/** Forgets every kept link. Home Assistant signs links with a key that changes when it restarts, so after that the
+ * links kept here are dead and the next response must be taken as it comes. */
+export function forgetStableUrls(): void { known.clear(); }
+
+/** A signed link kept from an earlier response, to ask the server about: one that is cheap to fetch (a picture of a species or
+ * a visit), never a clip, a recording or a live picture. */
+export function keptLink(): string | null {
+  let found: string | null = null;
+  for (const { url } of known.values()) {
+    if (/\/media\/(?:species|species_ref|snap|crop)\//.test(url)) found = url; // the newest such link
+  }
+  return found;
+}
+
 export function stableUrl(url: string | null | undefined): string | null | undefined {
   if (!url) return url;
   const key = pathOf(url);

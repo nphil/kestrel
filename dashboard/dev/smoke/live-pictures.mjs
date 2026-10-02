@@ -2,7 +2,8 @@
 // Post-install smoke check on the REAL panel: the Live tiles of snapshot-only cameras (no NVR card) show a current
 // picture, keep refreshing it about every 16 s while visible, and say how old it is when it is old.
 // Usage: node dev/smoke/live-pictures.mjs [--size 1280x1500] [--wait 45] [--local]
-//   --local serves the newest bundle in custom_components/kestrel/frontend instead of the one Home Assistant serves.
+//   It uses the bundle Home Assistant serves (the installed one); --local serves the newest bundle in custom_components/kestrel/frontend instead.
+//   The tiles are the `article.camera-tile` of the Live page; each holds a `kestrel-live-picture` (found through the panel's shadow root).
 // Needs the relay on 127.0.0.1:8124 (ha-relay-kestrel) and /data/home/tmp/ha-token. Prints no secrets (links are shown
 // without their signature). Screenshot: $OUT (default /tmp/kestrel-smoke). Exits non-zero when a tile that has a usable
 // picture link never gets a picture, or a picture that did load is never refreshed.
@@ -58,7 +59,7 @@ const HELPERS = "window.__deep = (r, s, o = []) => { r.querySelectorAll(s).forEa
 await page.goto(`${base}/kestrel/live`, { waitUntil: "domcontentloaded" });
 await page.evaluate(HELPERS);
 await page.waitForFunction(() => window.__deep(document, "kestrel-panel")[0]?.shadowRoot.querySelector(".camera-tile"), null, { timeout: 60000 });
-console.log("bundle in use:", await page.evaluate(() => performance.getEntriesByType("resource").map((e) => e.name).filter((n) => /kestrel-static\/kestrel\./.test(n)).map((n) => n.split("/").pop()).join(" ")));
+console.log("bundle in use:", flag("local", false) ? `${newestBundle().split("/").pop()} (newest local)` : await page.evaluate(() => performance.getEntriesByType("resource").map((e) => e.name).filter((n) => /kestrel-static\/kestrel\./.test(n)).map((n) => n.split("/").pop()).join(" ")));
 
 const snapshot = () => page.evaluate(() => window.__deep(document, "kestrel-panel")[0].shadowRoot.querySelectorAll("kestrel-live-picture")).then(() => page.evaluate(() => [...window.__deep(document, "kestrel-panel")[0].shadowRoot.querySelectorAll("kestrel-live-picture")].map((p) => {
   const r = p.getBoundingClientRect();

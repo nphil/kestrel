@@ -115,6 +115,8 @@ export class KestrelLivePicture extends LitElement {
     const before = changed.get("src") as string | undefined;
     // The same picture under a new signature carries on; a different camera starts over.
     if (before && !sameMedia(before, this.src)) { this._stop(); this._release(); this._failures = 0; }
+    // The same picture under a fresh signature after it was refused: the new link works, so try it now, not after the growing wait.
+    else if (before && before !== this.src && this._failures > 0) { this._stop(); this._failures = 0; this._lastStart = 0; }
     if (!this._url) this._restore();
     if (!loadable(this.src)) this._phase = "none";
     else if (this._phase === "none") this._phase = "loading";

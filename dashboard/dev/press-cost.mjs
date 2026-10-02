@@ -11,9 +11,11 @@
  *
  *   nice -n 15 node dev/press-cost.mjs [--size 390x844] [--rounds 5] [--local]
  *
- * --local serves the newest bundle in custom_components/kestrel/frontend instead of the one Home Assistant serves.
- * --base and --token-file default as in perf-check. Exits non-zero when a control is over budget. Never prints the
- * Home Assistant token.
+ * Runs on the real panel through the relay. It uses the bundle Home Assistant serves (the installed one) unless --local
+ * serves the newest bundle in custom_components/kestrel/frontend. The controls are the toolkit's: app-shell nav items
+ * (`a.item` inside `kestrel-lu-nav`), tiles and chips of the showing view, the segmented filter and the species sheet's
+ * recordings (found through the shell, the view stack and `kestrel-lu-sheet`, as in perf-check). --base and --token-file
+ * default as in perf-check. Exits non-zero when a control is over budget. Never prints the Home Assistant token.
  */
 import { chromium } from "playwright-core";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -53,15 +55,28 @@ if (flag("local")) {
 const page = await context.newPage();
 const cdp = await context.newCDPSession(page);
 
-// In-page: find the panel through shadow roots.
-const HELPERS = "window.__deep = (r, s, o = []) => { r.querySelectorAll(s).forEach((e) => o.push(e)); r.querySelectorAll('*').forEach((e) => e.shadowRoot && window.__deep(e.shadowRoot, s, o)); return o; }; window.__kp = () => window.__deep(document, 'kestrel-panel')[0];";
+// In-page: find the panel through shadow roots, then the toolkit parts the controls live in.
+const HELPERS = `
+window.__deep = (r, s, o = []) => { r.querySelectorAll(s).forEach((e) => o.push(e)); r.querySelectorAll('*').forEach((e) => e.shadowRoot && window.__deep(e.shadowRoot, s, o)); return o; };
+window.__k = {
+  panel: () => window.__deep(document, 'kestrel-panel')[0],
+  sr: () => window.__k.panel()?.shadowRoot,
+  shell: () => window.__k.sr().querySelector('kestrel-lu-app-shell'),
+  stack: () => window.__k.sr()?.querySelector('kestrel-lu-view-stack'),
+  view: (id) => { const stack = window.__k.stack(); return stack?.querySelector(':scope > [data-view="' + (id ?? stack.current) + '"]'); },
+  nav: () => window.__deep(window.__k.shell().shadowRoot, 'kestrel-lu-nav')[0],
+  navItem: (id) => window.__k.nav()?.shadowRoot.querySelector('a.item[href$="/' + id + '"]'),
+  sheet: () => window.__k.sr().querySelector('kestrel-species-sheet')?.shadowRoot.querySelector('kestrel-lu-sheet[layer="species"]'),
+  sheetClose: (sheet) => sheet?.shadowRoot.querySelector('.close') ?? (sheet && window.__deep(sheet.shadowRoot, '[data-dialog="close"], [aria-label="Close"]')[0]),
+  sheetTitle: (sheet) => sheet?.shadowRoot.querySelector('#title') ?? (sheet && window.__deep(sheet.shadowRoot, 'h2, .header-title')[0]) ?? sheet?.firstElementChild,
+};`;
 await page.goto(`${base}/kestrel/live`, { waitUntil: "domcontentloaded" });
 await page.evaluate(HELPERS);
-await page.waitForFunction(() => window.__kp() && window.__kp().shadowRoot.querySelector(".chip-button"), null, { timeout: 60000 });
+await page.waitForFunction(() => window.__k.view?.("live")?.querySelector("kestrel-lu-chip[interactive]"), null, { timeout: 60000 });
 await page.waitForTimeout(3000);
 
 const TRACE = ["devtools.timeline", "disabled-by-default-devtools.timeline", "toplevel"];
-const elementOf = (source) => `(() => { const k = window.__kp(); return (${source})(k); })()`;
+const elementOf = (source) => `(() => (${source})(window.__k))()`;
 
 /** Finds the element, brings it into view without a centred scroll, and returns where to touch it. */
 async function aim(source) {
@@ -83,7 +98,7 @@ async function pressOnce(source) {
     await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: spot.x, y: spot.y });
     await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: spot.x, y: spot.y, button: "left", clickCount: 1 });
     await page.waitForTimeout(300);
-    await page.evaluate(() => window.addEventListener("click", (e) => e.stopImmediatePropagation(), { capture: true, once: true }));
+    await page.evaluate(() => window.addEventListener("click", (e) => { e.preventDefault(); e.stopImmediatePropagation(); }, { capture: true, once: true }));
     await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: spot.x, y: spot.y, button: "left", clickCount: 1 });
     await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 2, y: 2 });
   }
@@ -98,7 +113,7 @@ async function pressOnce(source) {
 
 const results = [];
 /** Presses the control and an inert element alternately, `ROUNDS` times each, and reports the difference of medians. */
-async function compare(label, find, inert = "(k) => k.shadowRoot.querySelector('h1')") {
+async function compare(label, find, inert = "(k) => k.shell().shadowRoot.querySelector('h1.title')") {
   const control = [];
   const floor = [];
   for (let round = 0; round < ROUNDS; round++) {
@@ -112,20 +127,20 @@ async function compare(label, find, inert = "(k) => k.shadowRoot.querySelector('
   console.log(`${label.padEnd(24)} ${median(control).toFixed(1).padStart(5)} ms vs inert ${median(floor).toFixed(1).padStart(5)} ms -> ${cost >= 0 ? "+" : ""}${cost.toFixed(1)} ms ${cost <= BUDGET_MS ? "ok" : `OVER ${BUDGET_MS} ms`}`);
 }
 
-const NAV = (name) => `(k) => [...k.shadowRoot.querySelectorAll('.nav-item')].find((b) => b.textContent.trim().startsWith('${name}'))`;
-await compare("camera tile", "(k) => k.shadowRoot.querySelector('.camera-focus')");
-await compare("sighting chip", "(k) => k.shadowRoot.querySelector('.chip-button')");
-await compare("nav tab", NAV("Wildlife"));
+const NAV = (id) => `(k) => k.navItem('${id}')`;
+await compare("camera tile", "(k) => k.view('live').querySelector('.camera-focus')");
+await compare("sighting chip", "(k) => k.view('live').querySelector('kestrel-lu-chip[interactive]')?.shadowRoot.querySelector('button.chip')");
+await compare("nav tab", NAV("wildlife"));
 
-await page.evaluate((nav) => (new Function(`return (${nav})`))()(window.__kp()).click(), NAV("Wildlife"));
-await page.waitForFunction(() => window.__kp().shadowRoot.querySelector(".species-tile:not(.skeleton)"), null, { timeout: 30000 });
+await page.evaluate(() => window.__k.navItem("wildlife").click());
+await page.waitForFunction(() => window.__k.stack().current === "wildlife" && window.__k.view("wildlife")?.querySelector("button.species-tile"), null, { timeout: 30000 });
 await page.waitForTimeout(2000);
-await compare("species tile", "(k) => k.shadowRoot.querySelector('.species-tile:not(.skeleton)')");
-await compare("filter option", "(k) => [...k.shadowRoot.querySelector('kestrel-lu-segmented').shadowRoot.querySelectorAll('[role=radio]')].find((r) => r.getAttribute('aria-checked') !== 'true')");
+await compare("species tile", "(k) => k.view('wildlife').querySelector('button.species-tile')");
+await compare("filter option", "(k) => [...k.view('wildlife').querySelector('kestrel-lu-segmented').shadowRoot.querySelectorAll('[role=radio]')].find((r) => r.getAttribute('aria-checked') !== 'true')");
 
 // The sheet of the species with the most recordings.
 const opened = await page.evaluate(() => {
-  const tiles = [...window.__kp().shadowRoot.querySelectorAll(".species-tile:not(.skeleton)")];
+  const tiles = [...window.__k.view("wildlife").querySelectorAll("button.species-tile")];
   const count = (t) => Number(/(\d+) recordings?/.exec(t.getAttribute("aria-label") ?? "")?.[1] ?? 0);
   const best = tiles.sort((a, b) => count(b) - count(a))[0];
   if (!best || !count(best)) return false;
@@ -133,13 +148,12 @@ const opened = await page.evaluate(() => {
   return true;
 });
 if (opened) {
-  await page.waitForFunction(() => window.__deep(document, "kestrel-species-sheet")[0]?.shadowRoot.querySelector("kestrel-lu-audio-list")?.shadowRoot.querySelector(".play"), null, { timeout: 20000 }).catch(() => undefined);
+  await page.waitForFunction(() => window.__k.sheet()?.querySelector("kestrel-lu-audio-list")?.shadowRoot.querySelector(".play"), null, { timeout: 20000 }).catch(() => undefined);
   await page.waitForTimeout(2500);
-  const sheet = "window.__deep(document, 'kestrel-species-sheet')[0].shadowRoot";
-  const title = "(k) => window.__deep(document, 'kestrel-sheet')[0].shadowRoot.querySelector('#title')";
-  await compare("sheet: play button", `(k) => ${sheet}.querySelector('kestrel-lu-audio-list').shadowRoot.querySelector('.play:not(:disabled)')`, title);
-  await compare("sheet: recording row", `(k) => ${sheet}.querySelector('kestrel-lu-audio-list').shadowRoot.querySelector('.open')`, title);
-  await compare("sheet: close button", "(k) => window.__deep(document, 'kestrel-sheet')[0].shadowRoot.querySelector('.close')", title);
+  const title = "(k) => k.sheetTitle(k.sheet())";
+  await compare("sheet: play button", "(k) => k.sheet().querySelector('kestrel-lu-audio-list').shadowRoot.querySelector('.play:not(:disabled)')", title);
+  await compare("sheet: recording row", "(k) => k.sheet().querySelector('kestrel-lu-audio-list').shadowRoot.querySelector('.open')", title);
+  await compare("sheet: close button", "(k) => k.sheetClose(k.sheet())", title);
 } else console.log("sheet                    no species with recordings, skipped");
 
 const loadAfter = loadavg()[0];

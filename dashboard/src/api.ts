@@ -166,24 +166,12 @@ export function speciesFromLocation(): string | null {
   return new URLSearchParams(window.location.search).get("s");
 }
 
-/** How many history entries the panel itself has added since it was opened (Home Assistant's own entries
- * carry no state, so they count as 0). Back buttons use it to know whether going back stays in the panel. */
-export function panelDepth(): number {
-  const state = window.history.state as { kestrel?: unknown } | null;
-  return typeof state?.kestrel === "number" ? state.kestrel : 0;
+/** The first part of the address, `/kestrel` for the sidebar panel (whatever name Home Assistant gave it). */
+export function panelPrefix(): string {
+  return `/${window.location.pathname.split("/").filter(Boolean)[0] ?? "lovelace"}`;
 }
 
-/** Moves within the panel: a new history entry, or with `replace` a swap of the current one. */
-export function navigate(path: string, search = "", replace = false): void {
-  const dashboardPath = window.location.pathname.split("/").filter(Boolean)[0] ?? "lovelace";
-  const url = `/${dashboardPath}/${path}${search}`;
-  if (replace) window.history.replaceState({ kestrel: panelDepth() }, "", url);
-  else window.history.pushState({ kestrel: panelDepth() + 1 }, "", url);
-  window.dispatchEvent(new Event("location-changed"));
-}
-
-/** Goes back one step inside the panel, or to `fallback` when this was the first screen. */
-export function goBack(fallback: string, search = ""): void {
-  if (panelDepth() > 0) window.history.back();
-  else navigate(fallback, search, true);
+/** The address of a page of the panel, e.g. `/kestrel/visit?v=12`. */
+export function routePath(view: string, search = ""): string {
+  return `${panelPrefix()}/${view}${search}`;
 }

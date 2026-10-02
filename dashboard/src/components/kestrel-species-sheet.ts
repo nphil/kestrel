@@ -1,13 +1,11 @@
+import { BASE_CSS, type AudioListRow, type LuCloseDetail, type RailItem } from "lucent-ha";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { api, speciesPicture, visitAudio, visitAudioOriginal, visitPage, visitSnapshot } from "../api.ts";
 import { clamp, dateTime, sentence, timestamp, when } from "../format.ts";
-import { BASE_CSS, CONTROLS_CSS } from "../styles/tokens.ts";
 import type { Camera, HomeAssistant, Species, Visit, VisitKind } from "../types.ts";
 import { sameMedia } from "../urls.ts";
-import type { AudioListRow, RailItem } from "lucent-ha";
+import { HEARD_HERO_CSS, heardHero } from "../ui/heard-hero.ts";
 import { GROUP_LABEL, KIND, evidenceWord, recordingNotes } from "../vocab.ts";
-import "../ui/lazy-image.ts";
-import "../ui/sheet.ts";
 
 interface Section { items: Visit[]; next: string | null; state: "loading" | "ready" | "error" }
 type Sections = Record<VisitKind, Section>;
@@ -39,6 +37,11 @@ export function forgetVisit(id: string): void {
   }
 }
 
+/** Forgets every remembered species: their pictures and recordings carry links Home Assistant signed with a key it has since replaced. */
+export function forgetSheetCache(): void {
+  CACHE.clear();
+}
+
 function remember(name: string, sections: Sections): void {
   CACHE.delete(name);
   CACHE.set(name, { at: Date.now(), sections });
@@ -46,13 +49,16 @@ function remember(name: string, sections: Sections): void {
 }
 
 /** A species' evidence: what the cameras caught and what the microphone heard, each in its own section.
- * Kestrel glue over the generic sheet, section, rail and audio list. Fires `close`, `open-visit`
- * ({ id, visit }), `warm-visit` ({ id }) and `toggle-mute`. */
+ * Kestrel glue over the toolkit's sheet, section, rail and audio list. `open` shows it; the owner keeps the element
+ * (and `species`) until `close` arrives, which is after the exit motion. Fires `close` ({ reason }), `open-visit`
+ * ({ id, visit }), `warm-visit` ({ id }) and `toggle-mute`. The sheet adds no history entry: the address (`?s=`)
+ * is the history. */
 export class KestrelSpeciesSheet extends LitElement {
   static properties = {
     hass: { attribute: false },
     species: { attribute: false },
     cameras: { attribute: false },
+    open: { type: Boolean },
     muted: { type: Boolean },
     canMute: { type: Boolean, attribute: "can-mute" },
     _sections: { state: true },
@@ -62,6 +68,7 @@ export class KestrelSpeciesSheet extends LitElement {
   declare hass: HomeAssistant | undefined;
   declare species: Species | undefined;
   declare cameras: Camera[];
+  declare open: boolean;
   declare muted: boolean;
   declare canMute: boolean;
   declare _sections: Sections;
@@ -75,6 +82,7 @@ export class KestrelSpeciesSheet extends LitElement {
   constructor() {
     super();
     this.cameras = [];
+    this.open = false;
     this.muted = false;
     this.canMute = false;
     this._sections = fresh();
@@ -148,23 +156,35 @@ export class KestrelSpeciesSheet extends LitElement {
   }
 
   /** Brings in anything newer than what is listed, e.g. after a push event. A visit can change species while
-   * it is being identified, so the newest page replaces what it overlaps instead of only adding to it. */
-  async refresh(): Promise<void> {
-    await Promise.all(KINDS.map((kind) => this._load(kind, false)));
+   * it is being identified, so the newest page replaces what it overlaps instead of only adding to it.
+   * Resolves to false when a list could not be fetched. */
+  async refresh(): Promise<boolean> {
+    const results = await Promise.all(KINDS.map((kind) => this._load(kind, false)));
+    return results.every(Boolean);
   }
 
-  private async _load(kind: VisitKind, more: boolean): Promise<void> {
+  /** Starts both lists again from their first page. Used when every link they hold is dead (Home Assistant restarted):
+   * rows that were paged in later cannot be repaired one by one. Resolves to false when a list could not be fetched. */
+  async reload(): Promise<boolean> {
+    if (!this._loadedFor) return true;
+    this._requests = { seen: this._requests.seen + 1, heard: this._requests.heard + 1 };
+    this._setSections(fresh());
+    const results = await Promise.all(KINDS.map((kind) => this._load(kind, false)));
+    return results.every(Boolean);
+  }
+
+  private async _load(kind: VisitKind, more: boolean): Promise<boolean> {
     const hass = this.hass;
     const name = this.species?.species;
     const section = this._sections[kind];
     const before = more ? section.next : null;
-    if (!hass || !name || (more && !before)) return;
+    if (!hass || !name || (more && !before)) return true;
     const request = ++this._requests[kind];
     const background = !more && section.items.length > 0; // already showing something: don't blank it
     if (!background) this._setSections({ ...this._sections, [kind]: { ...section, state: "loading" } });
     try {
       const page = visitPage(await api.visits(hass, { species: name, kind, limit: more ? MORE[kind] : FIRST[kind], ...(before ? { before } : {}) }));
-      if (request !== this._requests[kind] || name !== this.species?.species) return;
+      if (request !== this._requests[kind] || name !== this.species?.species) return true;
       const incoming = page.items.filter((visit) => visit.kind === kind);
       const current = this._sections[kind].items;
       let items: Visit[];
@@ -184,12 +204,17 @@ export class KestrelSpeciesSheet extends LitElement {
       }
       items = items.slice(0, CAP);
       this._setSections({ ...this._sections, [kind]: { items, next: items.length < CAP ? next : null, state: "ready" } });
+      return true;
     } catch {
       if (request === this._requests[kind]) this._setSections({ ...this._sections, [kind]: { ...this._sections[kind], state: this._sections[kind].items.length && !more ? "ready" : "error" } });
+      return false;
     }
   }
 
-  private _close(): void { this.dispatchEvent(new CustomEvent("close")); }
+  private _onClose(event: CustomEvent<LuCloseDetail>): void {
+    event.stopPropagation();
+    this.dispatchEvent(new CustomEvent("close", { detail: event.detail }));
+  }
 
   private _open(event: Event, kind: VisitKind): void {
     const id = (event as CustomEvent<{ id: string }>).detail.id;
@@ -239,17 +264,14 @@ export class KestrelSpeciesSheet extends LitElement {
       : html`<p class="line muted">No camera breakdown is available yet.</p>`}</section>`;
   }
 
-  static styles = [BASE_CSS, CONTROLS_CSS, css`
+  static styles = [BASE_CSS, HEARD_HERO_CSS, css`
     :host { display: contents; }
     h3, p { margin: 0; }
     h3 { margin-bottom: var(--lu-space-3); font-size: var(--lu-type-label); font-weight: 600; }
     ul { margin: 0; padding: 0; list-style: none; }
     .hero { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(110px, .6fr); align-items: center; gap: var(--lu-space-4); margin-bottom: var(--lu-space-2); }
     .photo { position: relative; }
-    .photo kestrel-lazy-image { display: block; width: 100%; aspect-ratio: 16 / 10; }
-    .heard-hero { display: grid; width: 100%; height: 100%; place-items: center; }
-    .heard-hero ha-icon { --mdc-icon-size: 40px; width: 40px; height: 40px; color: var(--lu-ink-3); }
-    .chip { position: absolute; top: var(--lu-space-2); right: var(--lu-space-2); z-index: 1; display: inline-flex; min-height: 28px; align-items: center; padding: 0 var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-pill); color: var(--lu-ink-2); background: var(--lu-reading); font-size: var(--lu-type-caption); }
+    .chip { position: absolute; top: var(--lu-space-2); right: var(--lu-space-2); z-index: 1; }
     .total { display: grid; gap: var(--lu-space-1); text-align: center; }
     .total strong { font-size: var(--lu-type-display); font-weight: 350; font-variant-numeric: tabular-nums; line-height: 1; }
     .total span { color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
@@ -261,12 +283,13 @@ export class KestrelSpeciesSheet extends LitElement {
     .simple li { display: flex; min-height: var(--lu-target); align-items: center; justify-content: space-between; gap: var(--lu-space-3); border-bottom: 1px solid var(--lu-edge); color: var(--lu-ink-2); font-size: var(--lu-type-label); }
     .simple li:last-child { border-bottom: 0; }
     .simple strong { color: var(--lu-ink); font-variant-numeric: tabular-nums; }
-    .footer { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-3); margin-top: var(--lu-space-5); padding-top: var(--lu-space-4); border-top: 1px solid var(--lu-edge); }
+    .footer { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-3); }
+    .caption { color: var(--lu-ink-3); font-size: var(--lu-type-caption); }
     @container (max-width: 400px) {
       .hero { grid-template-columns: 1fr; }
       .total { justify-items: start; text-align: left; }
     }
-    @media (max-height: 540px) {
+    @media (max-height: 500px) {
       .hero { grid-template-columns: auto 1fr; justify-items: start; gap: var(--lu-space-5); }
       .photo { width: calc(var(--lu-target) * 3.5); }
       .total { justify-items: start; text-align: left; }
@@ -280,17 +303,21 @@ export class KestrelSpeciesSheet extends LitElement {
     const showChip = picture.isReference && !this._photoFailed;
     const group = GROUP_LABEL[species.grp] ?? GROUP_LABEL.unknown;
     const subheading = `${group}${species.first ? ` · First detected ${dateTime(species.first)}` : ""}`;
-    return html`<kestrel-sheet .heading=${species.species} .subheading=${subheading} @close=${this._close}>
+    return html`<kestrel-lu-sheet .open=${this.open} .history=${false} layer="species" .heading=${species.species} .subheading=${subheading} @lu-close=${this._onClose}>
       <div class="hero">
-        <div class="photo"><kestrel-lazy-image .src=${picture.url ?? ""} alt=${species.species} wide @kestrel-image-error=${() => { this._photoFailed = true; }}>${species.heard ? html`<div slot="empty" class="heard-hero"><ha-icon .icon=${KIND.heard.icon}></ha-icon></div>` : nothing}</kestrel-lazy-image>${showChip ? html`<span class="chip">Reference photo</span>` : nothing}</div>
+        <div class="photo">
+          <kestrel-lu-image .src=${picture.url ?? ""} ratio="16/10" alt=${species.species} @lu-image-error=${() => { this._photoFailed = true; }}>${species.heard ? heardHero(KIND.heard.icon, "fallback") : nothing}</kestrel-lu-image>
+          ${species.heard && !picture.url ? heardHero(KIND.heard.icon) : nothing}
+          ${showChip ? html`<kestrel-lu-chip class="chip" overlay label="Reference photo"></kestrel-lu-chip>` : nothing}
+        </div>
         <div class="total"><strong>${species.count30d}</strong><span>${species.count30d === 1 ? "visit" : "visits"} in the last 30 days</span></div>
       </div>
       ${this._renderSection("seen", species)}
       ${this._renderSection("heard", species)}
       ${this._renderHours(species)}
       ${this._renderCameras(species)}
-      <div class="footer"><button class="pill secondary" type="button" ?disabled=${!this.canMute} @click=${() => this.dispatchEvent(new CustomEvent("toggle-mute"))}>${this.muted ? "Unmute notifications" : "Mute notifications"}</button><span class="caption">${this.muted ? "Muted for wildlife alerts" : "Wildlife alerts are enabled"}</span></div>
-    </kestrel-sheet>`;
+      <div slot="footer" class="footer"><kestrel-lu-button kind="secondary" icon=${this.muted ? "mdi:bell-outline" : "mdi:bell-off-outline"} ?disabled=${!this.canMute} label=${this.muted ? "Unmute notifications" : "Mute notifications"} @click=${() => this.dispatchEvent(new CustomEvent("toggle-mute"))}></kestrel-lu-button><span class="caption">${this.muted ? "Muted for wildlife alerts" : "Wildlife alerts are enabled"}</span></div>
+    </kestrel-lu-sheet>`;
   }
 }
 

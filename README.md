@@ -34,9 +34,13 @@ for those.
   with nothing found, detector / GPU / storage health, and BirdNET status.
 - **Notifications** — one per visit, with the snapshot, deep-linked to the visit.
 
-Built in the **Lucent** design language: it takes its colours from your Home
-Assistant theme (flat or glass), works from 320 px phones to wide screens, and
-stays light — one ~57 KB (gzipped) bundle, bounded storage, no polling.
+Built in the **Lucent** design language on the shared
+[lucent-ha](https://github.com/nphil/lucent-ha) toolkit: it takes its colours
+from your Home Assistant theme (flat or glass), keeps the menu button one tap
+away, closes a sheet with Back before leaving a page, remembers each tab's
+scroll, works from 320 px phones to wide screens, and stays light — one ~75 KB
+(gzipped) bundle, bounded storage, no polling. After Home Assistant restarts,
+open pictures and recordings come back by themselves, with no reload.
 
 ## How it fits together
 
@@ -57,7 +61,7 @@ camera mics ─▶ BirdNET-Go (HA app, Perch v2) ─▶ MQTT ──────�
 |---|---|
 | [`scrypted-plugin/`](scrypted-plugin) | `@nphil/kestrel` — the Scrypted plugin: turns detections and BirdNET calls into visits, links clips, stores corrections and learning data in SQLite with strict retention, serves the API and media. |
 | [`custom_components/kestrel/`](custom_components/kestrel) | The Home Assistant integration (HACS): config flow, entities, WebSocket API for the panel, authenticated media proxy, brand icons. |
-| [`dashboard/`](dashboard) | The panel and card (Lit + TypeScript), built into the integration. |
+| [`dashboard/`](dashboard) | The panel (Lit + TypeScript on lucent-ha), built into the integration. |
 | [`classifier/`](classifier) | The Wildlife Classifier: EVA-02 (iNaturalist 2021) trimmed to your local species, exported to ONNX for Scrypted; evaluation and the retrain tool. |
 | [`audio-eval/`](audio-eval) | The bird-sound model bake-off behind the BirdNET-Go settings ([results](audio-eval/results.md)). |
 | [`tools/`](tools) | Reproducible brand and banner renderers. |
