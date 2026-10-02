@@ -301,6 +301,14 @@ async function wearTheme(theme, settleMs = 1200) {
   if (!worn) throw new Error("this Home Assistant does not offer the page's theme hooks (_updateHass, _applyTheme)");
   await sleep(settleMs);
 }
+/** Home Assistant applies the profile's theme again in every open tab when the profile is saved from another tab (another user of the shared browser pressing
+ * `settheme`): a cell run in Caule Black Blue Glass then turns light under its own feet. Before each check the cell's theme is looked at and worn again if it went. */
+async function keepTheme() {
+  const ok = await ev(({ name, dark }) => { const t = document.querySelector("home-assistant")?.hass?.selectedTheme; return !!t && t.theme === name && !!t.dark === dark; }, { name: cell.theme.name, dark: cell.theme.dark }).catch(() => true);
+  if (ok) return;
+  console.log(`INFO  [${cell.key}] the page's theme was reset to the profile's (saved from another tab?); wearing ${cell.theme.name} again`);
+  await wearTheme(cell.theme, 600);
+}
 async function open(path, c, ready) {
   // The host is busy and the relay has dropped a request now and then: a failed load is tried again (3 times) before it counts.
   let attempt = 0;
@@ -407,6 +415,7 @@ async function proveSheet(spec) {
   const isNative = async () => (await sheetParts(spec.layer)).native; // asked while the sheet is open: a closed sheet may not be rendered at all
   const step = async (k, fn) => {
     if (STEPS && !STEPS.has(k)) return;
+    await keepTheme();
     try { await fn(); } catch (error) {
       if (!results.some((r) => r.cell === cell.key && r.id === id(k))) await fail(id(k), `threw: ${String(error?.message ?? error).split("\n")[0].slice(0, 200)}`);
       await setInsets(ZERO_INSETS).catch(() => undefined);
@@ -483,17 +492,18 @@ async function proveSheet(spec) {
       await ev(() => { window.__seen = new Set(); });
       let wrapped = false;
       let outside = null;
-      let cameBack = false;
+      let cameBack = false; // true when focus is inside the sheet again at the end of the walk
+      let away = false;
       const handoffs = []; // presses after which focus sat on the document itself (a native modal <dialog> hands Tab over to the browser's own UI; Home Assistant's dialog does the same)
-      for (let i = 0; i < n; i += 1) {
+      for (let i = 0; i < n || (away && i < n + 3); i += 1) { // a walk that ends on the document gets up to 3 more presses to come back
         await page.keyboard.press(key);
         const r = await ev((l) => { const { s } = window.__sheetParts(l); const a = window.__active(); const again = window.__seen.has(a); window.__seen.add(a); return { inside: window.__within(a, s), again, desc: window.__desc(a), doc: !a || a === document.body || a === document.documentElement }; }, spec.layer);
-        if (!r.inside && r.doc) { handoffs.push(i + 1); continue; }
+        if (!r.inside && r.doc) { handoffs.push(i + 1); away = true; continue; }
         if (!r.inside) { outside = `after ${i + 1} ${key}: focus on the PAGE element ${r.desc}`; break; }
-        if (handoffs.length) cameBack = true;
+        if (away) { cameBack = true; away = false; }
         if (r.again) wrapped = true;
       }
-      return { wrapped, outside, cameBack, handoffs, distinct: await ev(() => window.__seen.size) };
+      return { wrapped, outside, cameBack: !away && (cameBack || !handoffs.length), handoffs, distinct: await ev(() => window.__seen.size) };
     };
     const fwd = await walk("Tab");
     const bwd = await walk("Shift+Tab");
@@ -723,10 +733,11 @@ async function proveSheet(spec) {
   // ---- the scrim and the panel fade in and out (no pop) ----
   await onlyNative("fade", async () => {
     const run = async (open) => {
+      await page.bringToFront(); // a tab that is not in front draws no animation frames (another user of the shared browser may have taken the front)
       await ensureClosed(spec);
       if (!open) { await ensureOpen(spec); await sleep(900); }
-      await ev((l) => {
-        const st = (window.__fade = { s: [], on: true, t0: performance.now() });
+      await ev(([l, leaving]) => {
+        const st = (window.__fade = { s: [], anims: null, on: true, t0: performance.now() });
         const tick = () => {
           if (!st.on) return;
           const P = window.__sheetParts(l); // looked up every frame: a closed species sheet is not rendered at all
@@ -734,35 +745,55 @@ async function proveSheet(spec) {
             const dimEl = P.s.shadowRoot.querySelector(".dim");
             const dimShown = dimEl && getComputedStyle(dimEl).display !== "none";
             st.s.push({ t: Math.round(performance.now() - st.t0), open: P.dialog.open, scrim: +getComputedStyle(P.scrim).opacity, dim: dimShown ? +getComputedStyle(dimEl).opacity : null, panel: +getComputedStyle(P.panel).opacity });
+            // What the page itself says it is animating (Web Animations): name, duration and the opacity keyframes, taken once when the motion starts.
+            if (!st.anims && P.dialog.open && (!leaving || P.dialog.hasAttribute("data-leaving"))) {
+              const of = (el) => (el ? el.getAnimations().map((a) => ({ name: a.animationName, ms: a.effect.getTiming().duration, op: a.effect.getKeyframes().map((k) => k.opacity) })) : []);
+              const found = { scrim: of(P.scrim), dim: dimShown ? of(dimEl) : null, panel: of(P.panel) };
+              if (found.scrim.length || found.panel.length) st.anims = found;
+            }
           }
           requestAnimationFrame(tick);
         };
         tick();
-      }, spec.layer);
+      }, [spec.layer, !open]);
       if (open) await tap(await spec.opener()); else await page.keyboard.press("Escape");
       await sleep(800);
-      return ev(() => { window.__fade.on = false; return window.__fade.s; });
+      return ev(() => { window.__fade.on = false; return { s: window.__fade.s, anims: window.__fade.anims }; });
     };
-    const judge = (samples, entering) => {
+    // Two witnesses. (1) The animations the page runs: scrim, panel (and the dim layer, when used) each have a fade of at least 100 ms with an opacity-0 keyframe.
+    // (2) The frames seen: the first frame of the enter is not at full opacity (no pop) and, when the host drew enough frames inside the motion to have caught one,
+    // an in-between value. A loaded host draws few frames (10-20 a second here): a motion with fewer than 4 frames in it is judged by (1) and the first frame only.
+    const judge = ({ s: samples, anims }, entering) => {
       const open = samples.filter((s) => s.open);
       const mid = (key) => open.filter((s) => s[key] !== null && s[key] > 0.03 && s[key] < 0.97).length;
       const dimUsed = open.some((s) => s.dim !== null);
-      const out = open.length ? { n: open.length, ms: open[open.length - 1].t - open[0].t, first: open[0], last: open[open.length - 1], scrim: mid("scrim"), panel: mid("panel"), dim: dimUsed ? mid("dim") : null } : null;
       const bad = [];
-      if (!out) return { bad: ["no frame with the dialog open"], out };
-      if (out.scrim < 1) bad.push("the scrim does not fade (no in-between frame)");
-      if (out.panel < 1) bad.push("the panel does not fade (no in-between frame)");
-      if (dimUsed && out.dim < 1) bad.push("the dim layer does not fade (no in-between frame)");
+      if (!open.length) return { bad: ["no frame with the dialog open"], out: null };
+      const out = { n: open.length, ms: open[open.length - 1].t - open[0].t, first: open[0], last: open[open.length - 1], scrim: mid("scrim"), panel: mid("panel"), dim: dimUsed ? mid("dim") : null };
+      const parts = dimUsed ? ["scrim", "dim", "panel"] : ["scrim", "panel"];
+      const longest = Math.max(0, ...parts.flatMap((p) => (anims?.[p] ?? []).map((a) => a.ms)));
+      const inMotion = open.filter((x) => x.t <= open[0].t + longest + 50).length;
+      out.spec = parts.map((p) => `${p} ${(anims?.[p] ?? []).map((a) => `${a.name} ${a.ms} ms`).join("+") || "NO ANIMATION"}`).join(", ");
+      out.inMotion = inMotion;
+      for (const p of parts) if (!(anims?.[p] ?? []).some((a) => a.ms >= 100 && a.op.includes("0"))) bad.push(`${p} has no fade animation (>= 100 ms, opacity keyframe 0)`);
+      const sparse = inMotion < 4;
+      for (const p of parts) if (out[p] < 1 && !sparse) bad.push(`${p} shows no in-between frame although ${inMotion} frames were drawn in the motion`);
       if (entering && !(out.first.scrim <= 0.9 && (out.first.dim === null || out.first.dim <= 0.9))) bad.push(`first frame already at scrim ${out.first.scrim}${out.first.dim === null ? "" : `, dim ${out.first.dim}`} (a pop)`);
       if (entering && !(out.last.scrim >= 0.99 && out.last.panel >= 0.99)) bad.push("did not reach full opacity");
-      if (open.some((s) => s.dim !== null && Math.abs(s.dim - s.scrim) > 0.08)) bad.push("the dim layer and the scrim fade out of step");
+      if (open.some((x) => x.dim !== null && Math.abs(x.dim - x.scrim) > 0.08)) bad.push("the dim layer and the scrim fade out of step");
       return { bad, out };
     };
-    const say = (j) => (j.out ? `${j.out.n} frames over ${j.out.ms} ms, scrim ${j.out.first.scrim}->${j.out.last.scrim} (${j.out.scrim} in between), panel ${j.out.first.panel}->${j.out.last.panel} (${j.out.panel} in between), dim ${j.out.dim === null ? "not used" : `${j.out.dim} in between`}` : "no frames");
-    let enter = judge(await run(true), true);
-    let leave = judge(await run(false), false);
-    if (enter.bad.length || leave.bad.length) { enter = judge(await run(true), true); leave = judge(await run(false), false); } // a loaded host drops frames: once more
+    const say = (j) => (j.out ? `${j.out.n} frames (${j.out.inMotion} inside the motion), scrim ${j.out.first.scrim}->${j.out.last.scrim} (${j.out.scrim} in between), panel ${j.out.first.panel}->${j.out.last.panel} (${j.out.panel} in between), dim ${j.out.dim === null ? "not used" : `${j.out.dim} in between`}; animations: ${j.out.spec}` : "no frames");
+    const rawOf = (r) => r.s.filter((x) => x.open).slice(0, 12).map((x) => `${x.t}ms:${x.scrim}/${x.panel}`).join(" ");
+    let eRaw = null;
+    let lRaw = null;
+    const doEnter = async () => { eRaw = await run(true); return judge(eRaw, true); };
+    const doLeave = async () => { lRaw = await run(false); return judge(lRaw, false); };
+    let enter = await doEnter();
+    let leave = await doLeave();
+    if (enter.bad.length || leave.bad.length) { enter = await doEnter(); leave = await doLeave(); } // once more: a frame may have been lost to the host
     const bad = [...enter.bad.map((b) => `enter: ${b}`), ...leave.bad.map((b) => `leave: ${b}`)];
+    if (bad.length) bad.push(`first frames enter [${rawOf(eRaw)}] leave [${rawOf(lRaw)}]`);
     await ensureClosed(spec);
     await verdict(id("fade"), bad.length === 0, `enter: ${say(enter)}; leave: ${say(leave)}${bad.length ? `; ${bad.join("; ")}` : ""}`);
   });
@@ -801,7 +832,12 @@ async function proveSheet(spec) {
     if (at.scrim) await wheel("the scrim", at.scrim, [900, 900, -900, 400]);
     await wheel("the header", at.head, [700, 700, -700, 300]);
     await wheel("the body", at.body, [600, 600, 600, -300]);
-    const afterBody = await bodyTop();
+    let afterBody = await bodyTop();
+    if (at.bodyRange > 8 && afterBody === 0) { // wheel events can be lost on an overloaded host: once more, from a fresh aim, before it counts
+      const again = await aim();
+      await wheel("the body (second try)", again.body, [600, 600, 600, -300]);
+      afterBody = await bodyTop();
+    }
     await wheel("the body (to its end and beyond)", at.body, [3000, 3000, 3000, 3000, 3000]);
     const atEnd = await bodyTop();
     await wheel("the body (back to the top, then past it)", at.body, [-3000, -3000, -3000, -3000, -3000]);
@@ -1102,6 +1138,7 @@ async function runCell(c) {
       const t = target ? getComputedStyle(target) : null;
       return { bar: `${surface(bar)} / ink ${getComputedStyle(bar).color}`, text: t?.color ?? null, nonce: window.__nonce, open: window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]?.hasAttribute("open") };
     });
+    await keepTheme();
     const p0 = await paint();
     await wearTheme(other);
     await sleep(600);
