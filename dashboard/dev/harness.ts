@@ -228,6 +228,8 @@ interface HaControl {
   reconnect(): void;
   /** Home Assistant restarts: the signing secret changes (epoch + 1), the socket drops now and returns after `downMs`. Resolves after the reconnect. */
   restart(options?: { downMs?: number }): Promise<void>;
+  /** The signing secret changes WITHOUT the socket dropping (epoch + 1): links held from before are refused from now on, nothing announces it. */
+  rotateKey(): void;
   /** Signing epoch: media links returned from now on carry `?authSig=e<epoch>`. */
   readonly epoch: number;
   readonly hass: unknown;
@@ -258,6 +260,11 @@ window.__ha = {
     ha.disconnect();
     window.clearTimeout(restartTimer);
     await new Promise<void>((done) => { restartTimer = window.setTimeout(() => { ha.reconnect(); done(); }, downMs); });
+  },
+  rotateKey: () => {
+    epoch += 1;
+    remember("epoch", String(epoch));
+    window.__setEpoch?.(epoch);
   },
   get epoch() { return epoch; },
   get hass() { return ha.mock.hass; },

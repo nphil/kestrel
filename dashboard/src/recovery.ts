@@ -14,6 +14,22 @@ export function isSigned(url: string | null | undefined): url is string {
   return typeof url === "string" && /[?&]authSig=/.test(url);
 }
 
+/** True when a link Home Assistant signed has run out (or runs out within `marginMs`). The signature is a token that names its own
+ * expiry (`exp`, seconds), so this asks nobody: a link that is already past it is certain to be refused (401), and trying it anyway
+ * only adds a refused request to Home Assistant's log. `false` for a link whose expiry cannot be read. */
+export function signedLinkExpired(url: string | null | undefined, marginMs = 0, now = Date.now()): boolean {
+  const signature = typeof url === "string" ? /[?&]authSig=([^&#]+)/.exec(url)?.[1] : undefined;
+  const payload = signature?.split(".")[1];
+  if (!payload) return false;
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const claims = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="))) as { exp?: unknown };
+    return typeof claims.exp === "number" && claims.exp * 1000 - marginMs <= now;
+  } catch {
+    return false;
+  }
+}
+
 /** Asks the server about a signed link without downloading it. `true`: refused (401 or 403), so the signature is dead. `false`: any
  * other answer, or none within `waitMs` (a refusal comes back at once, so a slow answer means the signature was accepted and the server
  * is busy making the picture). `null`: the server could not be reached. */

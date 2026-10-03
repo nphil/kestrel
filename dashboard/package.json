@@ -8,6 +8,7 @@
     "build": "node build.mjs",
     "build:dev": "node dev/build.mjs",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.mjs\"",
     "serve:dev": "node dev/serve.mjs 8765"
   },
   "dependencies": {

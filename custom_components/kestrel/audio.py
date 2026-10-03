@@ -29,7 +29,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 
 from .announced import new_visit_from_event
-from .birdnet_availability import detection_id_of
+from .birdnet_availability import recording_id_of
 from .client import KestrelApiError
 from .const import AUDIO_KEY_HEADER, BIRDNET_GO_INTERNAL_URL, DEFAULT_AUDIO_BACKFILL_DAYS, DOMAIN, SIGNAL_EVENTS
 
@@ -109,20 +109,19 @@ class _Original:
 
 
 def _visit_detection_id(visit: dict[str, Any]) -> int | None:
-    audio = visit.get("audio")
-    return detection_id_of(audio.get("birdnetDetectionId")) if isinstance(audio, dict) else None
+    """The detection whose recording a heard visit has, or None (see recording_id_of: no clip name, no recording)."""
+    return recording_id_of(visit.get("audio"))
 
 
 def detection_ids(value: Any, found: list[int] | None = None) -> list[int]:
-    """Detection ids of every call a payload mentions (heard `audio` and a seen visit's `heard`)."""
+    """Detection ids of every recording a payload mentions (heard `audio` and a seen visit's `heard`)."""
     found = [] if found is None else found
     if isinstance(value, list):
         for item in value:
             detection_ids(item, found)
     elif isinstance(value, dict):
         for key in ("audio", "heard"):
-            part = value.get(key)
-            if isinstance(part, dict) and (identifier := detection_id_of(part.get("birdnetDetectionId"))) is not None:
+            if (identifier := recording_id_of(value.get(key))) is not None:
                 found.append(identifier)
         for item in value.values():
             if isinstance(item, (list, dict)):

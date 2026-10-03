@@ -103,33 +103,35 @@ def _sign_media_paths(
                 )
         audio = result.get("audio")
         if isinstance(audio, dict):
-            detection_id = birdnet_availability.detection_id_of(audio.get("birdnetDetectionId"))
+            recording_id = birdnet_availability.recording_id_of(audio)
             original = (
-                _signed_media_url(hass, "birdnet_audio", str(detection_id), refresh_token_id)
-                if detection_id is not None
-                and birdnet_availability.audio_available_now(hass, str(detection_id)) is not False
+                _signed_media_url(hass, "birdnet_audio", str(recording_id), refresh_token_id)
+                if recording_id is not None
+                and birdnet_availability.audio_available_now(hass, str(recording_id)) is True
                 else None
             )
             result["audio"] = original
             _apply_preview(
-                hass, result, "audio", original, detection_id,
+                hass, result, "audio", original, recording_id,
                 result.get("id", result.get("visit_id")), refresh_token_id,
             )
         heard = result.get("heard")
         if isinstance(heard, dict):
-            heard_detection_id = birdnet_availability.detection_id_of(heard.get("birdnetDetectionId"))
+            heard_recording_id = birdnet_availability.recording_id_of(heard)
             heard_original = None
-            if heard_detection_id is not None and birdnet_availability.audio_available_now(
-                hass, str(heard_detection_id)
-            ) is not False:
+            if heard_recording_id is not None and birdnet_availability.audio_available_now(
+                hass, str(heard_recording_id)
+            ) is True:
                 heard_original = _signed_media_url(
-                    hass, "birdnet_audio", str(heard_detection_id), refresh_token_id
+                    hass, "birdnet_audio", str(heard_recording_id), refresh_token_id
                 )
                 heard["audio_url"] = heard_original
             _apply_preview(
-                hass, heard, "audio_url", heard_original, heard_detection_id,
+                hass, heard, "audio_url", heard_original, heard_recording_id,
                 heard.get("visitId"), refresh_token_id,
             )
+            if "hasAudio" in heard:
+                heard["hasAudio"] = bool(heard.get("audio_url"))  # the panel offers "Play call" only for a call it can play
         clip = result.get("clip")
         visit_id = result.get("id", result.get("visit_id"))
         if isinstance(clip, dict) and clip.get("state") == "ready" and visit_id is not None:
@@ -162,6 +164,7 @@ async def _async_api_call(
         previews = hass.data.get(DOMAIN, {}).get("audio")
         if previews is not None:
             await previews.async_prefetch(result)
+        await birdnet_availability.async_confirm_audio(hass, result)
         result = _sign_media_paths(hass, result, connection.refresh_token_id)
         if postprocess is not None:
             result = postprocess(result)
@@ -352,6 +355,7 @@ async def ws_subscribe(
         hass.async_create_task(send_events(events), "kestrel websocket event batch")
 
     async def send_events(events: list[dict[str, Any]]) -> None:
+        await birdnet_availability.async_confirm_audio(hass, events)
         for event in events:
             signed_event = _sign_media_paths(hass, event, connection.refresh_token_id)
             connection.send_event(msg["id"], signed_event)

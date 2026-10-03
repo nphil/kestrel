@@ -50,7 +50,7 @@ def seen_visit(detection_id: object) -> dict:
 
 
 class SigningTests(unittest.IsolatedAsyncioTestCase):
-    """The availability of BirdNET-Go's recordings is NOT known here (the situation of a call's first appearance)."""
+    """The availability of BirdNET-Go's recordings is checked (async_confirm_audio) before the real command signs links."""
 
     async def asyncSetUp(self) -> None:
         self.session = FakeSession()
@@ -75,6 +75,7 @@ class SigningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_real_detection_still_gets_its_link_and_is_checked(self) -> None:
         self.session.route("GET", f"{BIRDNET}/api/v2/audio/360", FakeResponse(206))
+        await websocket_module.birdnet_availability.async_confirm_audio(self.hass, heard_visit(360))
         signed = self.sign(heard_visit(360))
         await settle()
         self.assertEqual(signed["audio"], "/api/kestrel/media/birdnet_audio/360?authSig=FAKE")

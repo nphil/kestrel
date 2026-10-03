@@ -155,7 +155,7 @@ class PayloadTests(AudioTestCase):
     async def test_a_seen_visits_heard_call_gets_the_same_treatment(self) -> None:
         self.info_route(360, FakeResponse(200, info_json("ready", 360)))
         seen_visit = {"id": "s1", "kind": "seen", "heard": {
-            "visitId": "h1", "species": "Carolina Wren", "hasAudio": True, "birdnetDetectionId": 360, "birdnetClip": None}}
+            "visitId": "h1", "species": "Carolina Wren", "hasAudio": True, "birdnetDetectionId": 360, "birdnetClip": "clip.wav"}}
         await self.previews.async_prefetch(seen_visit)
         heard = self.sign(seen_visit)["heard"]
         self.assertEqual(heard["audio_url"], PREVIEW)

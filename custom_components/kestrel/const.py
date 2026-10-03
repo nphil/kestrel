@@ -18,7 +18,7 @@ MAX_POLL_TIMEOUT = 25
 DEFAULT_AUDIO_BACKFILL_DAYS = 30
 MAX_AUDIO_BACKFILL_DAYS = 30  # BirdNET-Go and the audio service both keep recordings for 30 days
 
-INTEGRATION_VERSION = "1.1.1"
+INTEGRATION_VERSION = "1.1.2"
 STATIC_PATH = "/kestrel-static"
 MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "live", "birdnet_audio", "birdnet_preview", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
@@ -40,11 +40,11 @@ BIRDNET_GO_INGRESS_PATH = "/hassio/ingress/db21ed7f_birdnet-go"
 # low-confidence detection whose clip BirdNET-Go never saved). Image positive
 # matches BirdNET-Go's own 30-day image cache; image negative is rechecked
 # sooner in case a provider gets one later. Audio positive never expires (a
-# saved clip is not deleted); audio negative is rechecked in minutes, since a
+# saved clip is not deleted); audio negative is rechecked after a couple of minutes, since a
 # clip can land a few seconds after its MQTT detection message.
 BIRDNET_IMAGE_POSITIVE_CACHE_DAYS = 30
 BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS = 7
-BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES = 10
+BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES = 2
 
 # Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).
 PANEL_URL_PATH = "kestrel"

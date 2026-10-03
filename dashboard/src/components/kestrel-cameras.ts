@@ -7,7 +7,7 @@ import { keyed } from "lit/directives/keyed.js";
 import { repeat } from "lit/directives/repeat.js";
 import { api, asVisit, cameraArray, cameraPicture, extractLabels, isNotFound, routePath, routeView, speciesArray, speciesFromLocation, speciesPhoto, speciesPicture, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
 import { ago, clamp, dateTime, formatMiB, sentence, timestamp, when } from "../format.ts";
-import { RETRY_MS, isSigned, signatureRejected } from "../recovery.ts";
+import { RETRY_MS, isSigned, signatureRejected, signedLinkExpired } from "../recovery.ts";
 import { PANEL_CSS } from "../styles/panel.ts";
 import type { AudioInfo, Camera, CameraDetection, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, Visit, VisitSuggestion } from "../types.ts";
 import { heardHero } from "../ui/heard-hero.ts";
@@ -239,6 +239,7 @@ export class KestrelCameras extends LitElement {
     window.addEventListener("location-changed", this._onLocationChanged);
     window.addEventListener("popstate", this._onLocationChanged);
     this.addEventListener("lu-image-error", this._onMediaError);
+    this.addEventListener("pointerdown", this._onAudioPress, true);
     this._syncRoute(false);
     this._tabs = new TabHistory({ defaultId: "live", initialId: this._view === "visit" ? "live" : this._view });
     this._clockTimer = window.setInterval(() => { if (document.visibilityState === "visible" && this._view !== "visit") this._tick++; }, 30_000);
@@ -253,6 +254,7 @@ export class KestrelCameras extends LitElement {
     window.removeEventListener("location-changed", this._onLocationChanged);
     window.removeEventListener("popstate", this._onLocationChanged);
     this.removeEventListener("lu-image-error", this._onMediaError);
+    this.removeEventListener("pointerdown", this._onAudioPress, true);
     this._tabs?.dispose();
     this._tabs = undefined;
     window.clearTimeout(this._livePauseTimer);
@@ -344,13 +346,32 @@ export class KestrelCameras extends LitElement {
   };
 
   /** A picture failed for good. When its link is a signed one, ask the server whether the signature is what failed. */
-  private _onMediaError = (event: Event): void => {
-    const src = (event as CustomEvent<{ src?: string }>).detail?.src;
+  private _onMediaError = (event: Event): void => this._checkSignedLink((event as CustomEvent<{ src?: string }>).detail?.src);
+
+  /** The visit clip failed to load. A refused signature (the key changed, or the link ran out) is not a reason to try the same link again. */
+  private _onVideoError = (event: Event): void => this._checkSignedLink((event.currentTarget as HTMLMediaElement).currentSrc);
+
+  private _checkSignedLink(src: string | null | undefined): void {
     if (!isSigned(src)) return;
     const now = Date.now();
     if (now - this._lastMediaCheck < MEDIA_CHECK_MS) return;
     this._lastMediaCheck = now;
+    if (signedLinkExpired(src)) { void this._recover(true); return; }
     void signatureRejected(src).then((rejected) => { if (rejected) void this._recover(true); });
+  }
+
+  /** The recording lists and players do not report a refused link, so a press on one is the moment to look: when a link it holds has run
+   * out (its token says so, nobody is asked) fetch fresh ones now; the press itself still tries the old link once and the next one works. */
+  private _onAudioPress = (event: Event): void => {
+    for (const node of event.composedPath()) {
+      const player = node as { localName?: string; src?: unknown; original?: unknown; rows?: ReadonlyArray<{ src?: string | null; fallback?: string | null }> };
+      if (player.localName !== "kestrel-lu-audio-player" && player.localName !== "kestrel-lu-audio-list") continue;
+      const links = player.localName === "kestrel-lu-audio-player"
+        ? [player.src, player.original]
+        : (player.rows ?? []).flatMap((row) => [row.src, row.fallback]);
+      if (links.some((link) => signedLinkExpired(typeof link === "string" ? link : null))) this._onPictureExpired();
+      return;
+    }
   };
 
   private _onViewShown = (event: CustomEvent<LuViewEventDetail>): void => {
@@ -1199,7 +1220,7 @@ export class KestrelCameras extends LitElement {
       <section class="visit-hero sheet">
         <div class="hero-media">
           ${visit.clip?.state === "ready" && clip
-            ? html`<video class="visit-video" src=${clip} poster=${photo ?? nothing} controls autoplay muted playsinline preload="auto" aria-label=${`${visit.species} visit clip`}></video>`
+            ? html`<video class="visit-video" src=${clip} poster=${photo ?? nothing} controls autoplay muted playsinline preload="auto" aria-label=${`${visit.species} visit clip`} @error=${this._onVideoError}></video>`
             : photo
               ? html`<kestrel-lu-image priority="high" ratio="16/10" .src=${photo} alt=${`${visit.species} at ${visit.camera.name}`}></kestrel-lu-image>`
               : visit.kind === "heard"
@@ -1224,7 +1245,7 @@ export class KestrelCameras extends LitElement {
           <kestrel-lu-button kind="primary" icon="mdi:check" label=${confirmed ? "Confirmed" : "That's right"} ?disabled=${confirmed || this._saving} @click=${() => this._confirmVisit()}></kestrel-lu-button>
           <kestrel-lu-button kind="secondary" label="Wrong?" ?disabled=${this._saving} @click=${this._openWrongPicker}></kestrel-lu-button>
         </div>
-        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording is available for this visit.</span>`}</section>` : nothing}
+        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording was kept for this visit.</span>`}</section>` : nothing}
         ${heard ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Also heard: ${heard.species}</strong><span class="muted">Sound recorded near this visit</span></div><kestrel-lu-button kind="secondary" icon="mdi:check" label="Also heard" ?disabled=${this._saving || this._heardConfirmed} @click=${() => this._confirmVisit(visit.id, true)}></kestrel-lu-button>
           ${this._audioUrl ? this._renderRecording(this._audioUrl, this._callVisit ?? heard, `Call recording of ${heard.species}`) : html`<kestrel-lu-button kind="quiet" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} label=${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"} @click=${() => this._loadCallAudio(heard.visitId)}></kestrel-lu-button>`}
         </section>` : nothing}
