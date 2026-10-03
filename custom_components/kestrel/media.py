@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .birdnet_availability import detection_id_of
+from .birdnet_availability import clip_name_of, detection_id_of, recording_url
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INTERNAL_URL, DOMAIN, MEDIA_KINDS
 from .coordinator import KestrelCoordinator
@@ -38,7 +38,8 @@ def _detection_number(media_id: str) -> int | None:
 class KestrelMediaView(HomeAssistantView):
     """Stream media from the authenticated plugin through Home Assistant."""
 
-    url = "/api/kestrel/media/{kind}/{media_id}"
+    # `.+`: a BirdNET-Go clip name ("2026/10/<file>.opus") has slashes in it; every other kind still refuses them below.
+    url = "/api/kestrel/media/{kind}/{media_id:.+}"
     name = "api:kestrel:media"
     requires_auth = True
 
@@ -46,7 +47,7 @@ class KestrelMediaView(HomeAssistantView):
         self._hass = hass
 
     async def get(self, request: web.Request, kind: str, media_id: str) -> web.StreamResponse:
-        if kind not in MEDIA_KINDS or not media_id or "/" in media_id:
+        if kind not in MEDIA_KINDS or not media_id or ("/" in media_id and kind != "birdnet_clip"):
             return web.Response(status=404, text="Media not found")
 
         headers: dict[str, str] = {}
@@ -63,6 +64,20 @@ class KestrelMediaView(HomeAssistantView):
                 request,
                 async_get_clientsession(self._hass),
                 f"{BIRDNET_GO_INTERNAL_URL}/api/v2/audio/{media_id}",
+                headers,
+                aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+            )
+
+        if kind == "birdnet_clip":
+            # A recording BirdNET-Go saved but announced with detection id 0: only reachable by its clip name.
+            clip = clip_name_of(media_id)
+            url = recording_url(clip) if clip is not None else None
+            if url is None:
+                return web.Response(status=404, text="Media not found")
+            return await self._stream(
+                request,
+                async_get_clientsession(self._hass),
+                url,
                 headers,
                 aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
             )

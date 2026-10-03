@@ -36,13 +36,22 @@ def _signed_media_url(
 ) -> str:
     if kind not in MEDIA_KINDS:
         raise KestrelApiError("Unsupported Kestrel media type")
-    path = f"/api/kestrel/media/{kind}/{quote(unquote(media_id), safe='')}"
+    # A clip name is a path under BirdNET-Go's clips folder: its "/" stays (it is validated where it is served).
+    path = f"/api/kestrel/media/{kind}/{quote(unquote(media_id), safe='/' if kind == 'birdnet_clip' else '')}"
     return async_sign_path(
         hass,
         path,
         timedelta(hours=MEDIA_URL_TTL_HOURS),
         refresh_token_id=refresh_token_id,
     )
+
+
+def _signed_recording_url(hass: HomeAssistant, part: dict[str, Any], refresh_token_id: str | None) -> str | None:
+    """Signed link to BirdNET-Go's recording for a plugin `audio` / `heard` part, only when it is known to exist."""
+    recording = birdnet_availability.recording_of(part)
+    if recording is None or birdnet_availability.audio_available_now(hass, recording[1]) is not True:
+        return None
+    return _signed_media_url(hass, recording[0], recording[1], refresh_token_id)
 
 
 def _apply_preview(
@@ -103,31 +112,20 @@ def _sign_media_paths(
                 )
         audio = result.get("audio")
         if isinstance(audio, dict):
-            recording_id = birdnet_availability.recording_id_of(audio)
-            original = (
-                _signed_media_url(hass, "birdnet_audio", str(recording_id), refresh_token_id)
-                if recording_id is not None
-                and birdnet_availability.audio_available_now(hass, str(recording_id)) is True
-                else None
-            )
+            original = _signed_recording_url(hass, audio, refresh_token_id)
             result["audio"] = original
+            # Only a recording with a real detection id can have a bird-call preview (the audio service is keyed by it).
             _apply_preview(
-                hass, result, "audio", original, recording_id,
+                hass, result, "audio", original, birdnet_availability.recording_id_of(audio),
                 result.get("id", result.get("visit_id")), refresh_token_id,
             )
         heard = result.get("heard")
         if isinstance(heard, dict):
-            heard_recording_id = birdnet_availability.recording_id_of(heard)
-            heard_original = None
-            if heard_recording_id is not None and birdnet_availability.audio_available_now(
-                hass, str(heard_recording_id)
-            ) is True:
-                heard_original = _signed_media_url(
-                    hass, "birdnet_audio", str(heard_recording_id), refresh_token_id
-                )
+            heard_original = _signed_recording_url(hass, heard, refresh_token_id)
+            if heard_original is not None:
                 heard["audio_url"] = heard_original
             _apply_preview(
-                hass, heard, "audio_url", heard_original, heard_recording_id,
+                hass, heard, "audio_url", heard_original, birdnet_availability.recording_id_of(heard),
                 heard.get("visitId"), refresh_token_id,
             )
             if "hasAudio" in heard:

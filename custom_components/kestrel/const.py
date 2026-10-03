@@ -18,9 +18,9 @@ MAX_POLL_TIMEOUT = 25
 DEFAULT_AUDIO_BACKFILL_DAYS = 30
 MAX_AUDIO_BACKFILL_DAYS = 30  # BirdNET-Go and the audio service both keep recordings for 30 days
 
-INTEGRATION_VERSION = "1.1.2"
+INTEGRATION_VERSION = "1.1.3"
 STATIC_PATH = "/kestrel-static"
-MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "live", "birdnet_audio", "birdnet_preview", "species_ref", "species_ref_info"})
+MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "live", "birdnet_audio", "birdnet_clip", "birdnet_preview", "species_ref", "species_ref_info"})
 MEDIA_URL_TTL_HOURS = 12
 
 # Each non-empty batch of plugin events is sent on this dispatcher signal. Dashboard

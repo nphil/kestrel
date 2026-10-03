@@ -117,6 +117,10 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    *Backfill past calls (days)* setting: 30 by default, 0 sends only new calls;
    raising it later only sends what is missing). If the service is off or
    unreachable, calls simply play the original recording.
+   BirdNET-Go sometimes announces a call with detection number 0 but a real clip
+   (the same species was heard on the other camera moments earlier). Those calls
+   are played from the clip by its name, always as the original recording, because
+   the preview service is keyed by detection number.
 5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first
