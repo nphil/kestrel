@@ -33,6 +33,18 @@ export interface VisitSuggestion {
   why: "model" | "heard" | "usual";
 }
 
+/** One species the second listen (Perch, in the audio service) hears more strongly than the one the microphone's detector named. */
+export interface AudioAlternative {
+  species: string;
+  scientific?: string | null;
+  /** 0 to 1: how likely it is, if the sound can only be one of the species that live here. */
+  score: number;
+  /** Persistence: how many half-second steps in a row held at least 90% of the best score. */
+  windowsHigh?: number | null;
+  /** Where in the original clip it is strongest (the best five seconds), in seconds. */
+  window?: { start: number; end: number } | null;
+}
+
 /** The bird-call preview service's report on one recording. `segment` is the matched moment, in seconds
  * from the start of the original clip. */
 export interface AudioInfo {
@@ -40,6 +52,24 @@ export interface AudioInfo {
   segment?: { start: number; end: number } | null;
   cleaned?: boolean;
   method?: string;
+  /** How sure Perch is of the detector's species on the matched moment, as it was heard and as it was shipped. */
+  scores?: { original: number | null; preview: number | null } | null;
+  /** "Could also be": species Perch hears more strongly than the detector's, strongest first. `[]` = nothing stronger; absent = not looked at. */
+  alternatives?: AudioAlternative[];
+  /** Perch's own view of the species the detector named; `rank` 1 = the one it hears most strongly. */
+  announced?: (AudioAlternative & { rank?: number | null }) | null;
+}
+
+/** How sure a heard visit is: a confident call, one kept quietly, one a person should look at. */
+export type Tier = "likely" | "possible" | "check";
+export type TierWhy = "strong" | "repeated" | "models_disagree" | "second_opinion_only" | "weak" | "rare_here" | "new_here";
+/** One listening model's answer for a recording. `named` named the visit's species, `agree` said the same, `other` named a different species. */
+export interface ModelCall {
+  model: string;
+  label: string;
+  species: string;
+  score: number | null;
+  role: "named" | "agree" | "other";
 }
 
 export interface Visit {
@@ -63,6 +93,18 @@ export interface Visit {
   audioOriginal?: string | null;
   /** How `audio` was prepared. While `state` is pending, `audio` is still the original. */
   audioInfo?: AudioInfo | null;
+  /** Heard visits recorded after the upgrade: how sure the call is. Never on a camera ("seen") visit. */
+  tier?: Tier;
+  /** Why that tier, most important reason first. */
+  tierWhy?: TierWhy[];
+  /** 0..1: how likely this species is here this week (BirdNET-Go). Informational. */
+  occurrence?: number | null;
+  /** Other calls of the same species on the same microphone within 5 minutes. */
+  repeats?: number;
+  /** What each listening model said. */
+  models?: ModelCall[];
+  /** Seen visits: the wildlife classifier's confidence (0..1) in the label, for the saved crop. Null or absent = unknown. */
+  labelScore?: number | null;
 }
 
 export interface Species {
@@ -91,6 +133,9 @@ export interface Species {
   referenceImageInfoUrl?: string | null;
 }
 
+/** Who took a species' reference photo and under which licence (`referenceImageInfoUrl`). Any part may be "", `page` is an https link or "". */
+export interface PhotoCredit { source: string; credit: string; licence: string; page: string }
+
 export interface Health {
   detector: { name: string; provider: string; avgMs: number | null; checksToday: number };
   gpu: { usedMiB: number; totalMiB: number; util: number };
@@ -106,6 +151,21 @@ export interface Settings {
   heardNotify: "new_only" | "never";
 }
 
+/** BirdNET-Go's local species filter: how strict it is, and how many species that lets through where the microphone is. */
+export interface RangeFilter {
+  /** 0.01 is 1%: a species must be at least that likely at this place and time of year. */
+  threshold: number;
+  speciesCount: number;
+  latitude: number | null;
+  longitude: number | null;
+  /** When BirdNET-Go last rebuilt its species list; it changes once a new threshold has taken effect. */
+  updatedAt: string | null;
+  /** BirdNET-Go is still rebuilding its species list; `speciesCount` may be the old one. */
+  rebuilding: boolean;
+  /** Only a Home Assistant administrator can change it. */
+  canChange: boolean;
+}
+
 export interface VisitPage { items: Visit[]; next?: string | null; }
 export interface SpeciesDetail {
   species?: Species;
@@ -113,6 +173,38 @@ export interface SpeciesDetail {
   recentVisits?: Visit[];
   calls?: Visit[];
   [key: string]: unknown;
+}
+
+/** One reference recording of a species: a clip from a public sound library (never one of the user's own recordings), played through a signed Home Assistant link. */
+export interface ReferenceClip {
+  /** Opaque: `xc-694038` or `inat-1944677`. */
+  id: string;
+  kind: "song" | "call" | "other";
+  /** What to call it: "Song", "Call", "Recording" (a lone iNaturalist clip), "Clip 1", "Clip 2", "Clip 3" (several). Shown as it comes. */
+  label: string;
+  source: "xeno-canto" | "inaturalist";
+  /** The source's name for people: "Xeno-canto" or "iNaturalist". */
+  sourceName: string;
+  /** The recordist or observer; "" when unknown. */
+  credit: string;
+  /** "CC BY-NC-SA 4.0", "All rights reserved"...; "" when unknown. */
+  licence: string;
+  /** "A" to "E" (Xeno-canto only). */
+  quality: string | null;
+  seconds: number | null;
+  /** The page about this recording at its source. */
+  page: string;
+  /** The signed Home Assistant media link; valid for 12 hours, like every media link. */
+  url: string;
+}
+
+/** What the server says about the reference recordings of one species. `ready` carries 1 to 3 clips; `none` is a stable "no reference recording exists";
+ * `unavailable` is "could not look it up right now, try again". */
+export interface ReferenceSounds {
+  species: string;
+  scientific: string | null;
+  state: "ready" | "none" | "unavailable";
+  clips: ReferenceClip[];
 }
 /** What Home Assistant hands the panel: the toolkit's slice of it, with the calls Kestrel makes typed more strictly. */
 export interface HomeAssistant extends LuHomeAssistant {

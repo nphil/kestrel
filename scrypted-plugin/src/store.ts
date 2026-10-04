@@ -7,6 +7,14 @@ export type VisitGroup = 'bird' | 'mammal' | 'other' | 'unknown';
 export type VisitStatus = 'auto' | 'learned' | 'corrected' | 'confirmed' | 'not_animal' | 'unknown';
 export type ClipState = 'pending' | 'ready' | 'none' | 'deleted';
 
+// How sure Kestrel is about a heard call (heard.ts): Likely may be announced and counts toward the species list,
+// Possible is kept quietly (stored and listed, not counted), Check goes to the review queue.
+export type Tier = 'likely' | 'possible' | 'check';
+export type TierWhy = 'strong' | 'repeated' | 'models_disagree' | 'second_opinion_only' | 'weak' | 'rare_here' | 'new_here';
+// What one model said about a heard visit: `named` named the visit's species, `agree` said the same species,
+// `other` named a different one (the models disagree).
+export interface ModelCall { model: string; label: string; species: string; score: number | null; role: 'named' | 'agree' | 'other' }
+
 export interface Visit {
     id: string;
     camera: { id: string; name: string };
@@ -26,6 +34,18 @@ export interface Visit {
     muted: boolean;
     notify: boolean;
     review?: boolean;
+    // Heard visits recorded since the confidence layer (heard.ts); absent on older ones and on seen visits.
+    tier?: Tier;
+    tierWhy?: TierWhy[];
+    // BirdNET-Go's chance of this species here this week (0-1); null when the message did not carry it.
+    occurrence?: number | null;
+    // How common local sightings say this species is at this time of year (0-1); null when unknown (see seasonal.ts).
+    commonness?: number | null;
+    // Other calls of the same species on the same microphone within five minutes of the first one.
+    repeats?: number;
+    models?: ModelCall[];
+    // Seen visits: the wildlife classifier's confidence in the label (0-1); null/absent when unknown.
+    labelScore?: number | null;
 }
 
 export interface VisitMeta {
@@ -48,6 +68,7 @@ export interface SeenMergeUpdate {
     grp: VisitGroup;
     status: VisitStatus;
     score: number | null;
+    labelScore: number | null;
     startedAt: number;
     // Suggestions after the merge as planned (seen.ts planSeenMerge); 'usual' entries are only
     // kept as-is when the species did not change.
@@ -91,6 +112,25 @@ export interface PurgeResult {
     remainingHeard: number;
 }
 
+// One BirdNET-Go detection as Kestrel kept it (table heard_calls). `visitId` stays null while the call waits for the
+// other model's opinion, and for a call that made no visit of its own.
+export interface HeardCallInput {
+    cameraId: string;
+    at: number;
+    receivedAt: number;
+    species: string;
+    scientific: string | null;
+    grp: VisitGroup;
+    score: number | null;
+    occurrence: number | null;
+    model: string;
+    modelRank: number;
+    modelLabel: string;
+    detectionId: number | null;
+    clip: string | null;
+}
+export interface HeardCallRow extends HeardCallInput { id: number; visitId: string | null }
+
 
 interface RawVisit {
     id: string;
@@ -118,13 +158,43 @@ interface RawVisit {
     last_change_at: number | null;
     undo_data: string | null;
     last_correction_id: number | null;
+    tier: Tier | null;
     updated_at: number;
+}
+
+interface RawHeardCall {
+    id: number;
+    camera_id: string;
+    at: number;
+    received_at: number;
+    species: string;
+    scientific: string | null;
+    grp: VisitGroup;
+    score: number | null;
+    occurrence: number | null;
+    model: string;
+    model_rank: number;
+    model_label: string;
+    detection_id: number | null;
+    clip: string | null;
+    visit_id: string | null;
 }
 
 const MAX_EVENTS = 500;
 const MAX_EMBEDDINGS = 5_000;
 const MAX_CORRECTION_CROPS = 5_000;
 const VISIT_RETENTION_MS = 3 * 365 * 24 * 60 * 60 * 1000;
+// Heard calls (the raw BirdNET-Go detections behind a heard visit) are only needed to pair the two models and to
+// count repeats within minutes; a month is plenty for looking back at what the models said.
+const HEARD_CALL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// A visit counts toward the species list, "first ever", the camera's latest sighting and the like unless it is a heard
+// call that is only Possible or Check and nobody has confirmed or corrected it. A NULL tier (camera visits, older heard
+// visits) counts. `counts` is the same rule for one row.
+const COUNTS_SQL = "(tier IS NULL OR tier='likely' OR status IN ('confirmed','corrected'))";
+function counts(row: { tier?: Tier | null; status: VisitStatus }): boolean {
+    return !row.tier || row.tier === 'likely' || row.status === 'confirmed' || row.status === 'corrected';
+}
 const NEW_YORK_TIME_ZONE = 'America/New_York';
 const NEW_YORK_FORMATTER = new Intl.DateTimeFormat('en-US', {
     timeZone: NEW_YORK_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
@@ -284,6 +354,30 @@ export class KestrelStore {
                 first_at INTEGER NOT NULL,
                 purged_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS heard_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                camera_id TEXT NOT NULL,
+                at INTEGER NOT NULL,
+                received_at INTEGER NOT NULL,
+                species TEXT NOT NULL,
+                scientific TEXT,
+                grp TEXT NOT NULL,
+                score REAL,
+                occurrence REAL,
+                model TEXT NOT NULL,
+                model_rank INTEGER NOT NULL,
+                model_label TEXT NOT NULL,
+                detection_id INTEGER,
+                clip TEXT,
+                visit_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS heard_calls_camera_at ON heard_calls(camera_id, at);
+            CREATE INDEX IF NOT EXISTS heard_calls_at ON heard_calls(at);
+            CREATE TABLE IF NOT EXISTS models_seen (
+                model TEXT PRIMARY KEY,
+                rank INTEGER NOT NULL,
+                last_at INTEGER NOT NULL
+            );
         `);
         // One-time migration: the visits table predates these two columns (BirdNET-Go's
         // own detection reference), so a pre-existing on-disk DB needs them added explicitly --
@@ -291,6 +385,10 @@ export class KestrelStore {
         const visitColumns = new Set((this.db.prepare('PRAGMA table_info(visits)').all() as { name: string }[]).map(column => column.name));
         if (!visitColumns.has('birdnet_detection_id')) this.db.exec('ALTER TABLE visits ADD COLUMN birdnet_detection_id INTEGER');
         if (!visitColumns.has('birdnet_clip')) this.db.exec('ALTER TABLE visits ADD COLUMN birdnet_clip TEXT');
+        // One-time migration: heard visits now carry how sure Kestrel is about them (`tier`, see heard.ts). A NULL tier
+        // means "not rated" -- every older visit and every camera visit -- and counts exactly as before.
+        if (!visitColumns.has('tier')) this.db.exec('ALTER TABLE visits ADD COLUMN tier TEXT');
+        this.db.exec('CREATE INDEX IF NOT EXISTS visits_tier ON visits(tier, started_at DESC)');
         this.recordDetectorCheckStatement = this.db.prepare(`INSERT INTO camera_daily_stats(day,camera_id,checks,empty_checks) VALUES(?,?,1,?)
             ON CONFLICT(day,camera_id) DO UPDATE SET checks=checks+1,empty_checks=empty_checks+excluded.empty_checks`);
         this.recordBirdnetIgnoredStatement = this.db.prepare(`INSERT INTO birdnet_daily_stats(day,ignored) VALUES(?,1)
@@ -342,6 +440,8 @@ export class KestrelStore {
         visit.review = !!row.review_flag;
         visit.firstEver = !!row.first_ever;
         visit.muted = !!row.muted;
+        if (row.tier) visit.tier = row.tier;
+        else delete visit.tier;
         visit.notify = this.shouldNotify(visit);
         return visit;
     }
@@ -362,8 +462,8 @@ export class KestrelStore {
         this.db.prepare(`INSERT INTO visits (
             id,camera_id,camera_name,kind,started_at,species,grp,status,score,detection_label,
             snapshot_file,crop_file,clip_file,audio_file,birdnet_detection_id,birdnet_clip,clip_state,clip_expected_ready_at,
-            review_flag,first_ever,muted,data,last_change_at,undo_data,last_correction_id,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            review_flag,first_ever,muted,data,last_change_at,undo_data,last_correction_id,tier,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             camera_id=excluded.camera_id,camera_name=excluded.camera_name,kind=excluded.kind,
             started_at=excluded.started_at,species=excluded.species,grp=excluded.grp,status=excluded.status,
@@ -373,7 +473,7 @@ export class KestrelStore {
             clip_state=excluded.clip_state,clip_expected_ready_at=excluded.clip_expected_ready_at,
             review_flag=excluded.review_flag,first_ever=excluded.first_ever,muted=excluded.muted,data=excluded.data,
             last_change_at=excluded.last_change_at,undo_data=excluded.undo_data,
-            last_correction_id=excluded.last_correction_id,updated_at=excluded.updated_at`).run(
+            last_correction_id=excluded.last_correction_id,tier=excluded.tier,updated_at=excluded.updated_at`).run(
             visit.id, visit.camera.id, visit.camera.name, visit.kind, visit.startedAt, visit.species, visit.grp,
             visit.status, visit.score, has('detectionLabel') ? meta.detectionLabel ?? null : prior?.detection_label ?? null,
             snapshotFile, cropFile, clipFile, audioFile, birdnetDetectionId, birdnetClip, visit.clip.state, visit.clip.expectedReadyAt,
@@ -381,6 +481,7 @@ export class KestrelStore {
             has('lastChangeAt') ? meta.lastChangeAt ?? null : prior?.last_change_at ?? null,
             has('undoData') ? meta.undoData ?? null : prior?.undo_data ?? null,
             has('lastCorrectionId') ? meta.lastCorrectionId ?? null : prior?.last_correction_id ?? null,
+            visit.tier ?? null,
             updatedAt,
         );
     }
@@ -390,7 +491,8 @@ export class KestrelStore {
             return false;
         if (visit.kind === 'seen')
             return true;
-        return this.getSetting('heardNotify', 'new_only') !== 'never' && visit.firstEver;
+        // A call that is only Possible or Check is never announced; a person confirming or correcting it makes it count.
+        return counts(visit) && this.getSetting('heardNotify', 'new_only') !== 'never' && visit.firstEver;
     }
 
     // The seen path's cooldown: was this species already SEEN on this camera since `since`? A bird
@@ -454,7 +556,7 @@ export class KestrelStore {
             UPDATE visits SET first_ever=1 WHERE rowid IN (
                 SELECT rowid FROM (
                     SELECT rowid, ROW_NUMBER() OVER (PARTITION BY species ORDER BY started_at ASC, rowid ASC) AS rn FROM visits
-                    WHERE species NOT IN (SELECT species FROM known_species)
+                    WHERE species NOT IN (SELECT species FROM known_species) AND ${COUNTS_SQL}
                 ) WHERE rn=1
             )
         `);
@@ -508,6 +610,7 @@ export class KestrelStore {
             if (visit.clip.state === 'pending' && visit.clip.expectedReadyAt !== null) visit.clip.expectedReadyAt += shift;
         }
         visit.score = update.score;
+        visit.labelScore = update.labelScore;
         visit.status = update.status;
         const meta: VisitMeta = {};
         if (update.detectionLabel !== null) meta.detectionLabel = update.detectionLabel;
@@ -551,10 +654,11 @@ export class KestrelStore {
         return removed;
     }
 
-    private recomputeFirstEverForSpecies(species: string): void {
+    // The earliest visit that counts holds the "first ever" flag for its species (none when the species is already known).
+    recomputeFirstEverForSpecies(species: string): void {
         this.db.prepare('UPDATE visits SET first_ever=0 WHERE species=?').run(species);
         if (this.db.prepare('SELECT 1 FROM known_species WHERE species=?').get(species)) return;
-        this.db.prepare('UPDATE visits SET first_ever=1 WHERE rowid=(SELECT rowid FROM visits WHERE species=? ORDER BY started_at ASC, rowid ASC LIMIT 1)').run(species);
+        this.db.prepare(`UPDATE visits SET first_ever=1 WHERE rowid=(SELECT rowid FROM visits WHERE species=? AND ${COUNTS_SQL} ORDER BY started_at ASC, rowid ASC LIMIT 1)`).run(species);
     }
 
     // One-time repair for a raccoon that was filed twice (see seen.ts): folds `dropId` into
@@ -587,12 +691,78 @@ export class KestrelStore {
         return 'merged';
     }
 
-    // "Has this species ever been recorded?" -- the question behind every first-ever flag and alert.
-    // Species whose visits were purged (purgeHeardBefore) stay known, so a fresh start does not make
-    // every bird "new" again.
+    // "Has this species ever been recorded?" -- the question behind every first-ever flag and alert. A heard call that is
+    // only Possible or Check does not answer it (see COUNTS_SQL). Species whose visits were purged (purgeHeardBefore)
+    // stay known, so a fresh start does not make every bird "new" again.
     hasSpecies(species: string): boolean {
-        return !!this.db.prepare("SELECT 1 FROM visits WHERE species=? AND status NOT IN ('not_animal','unknown') LIMIT 1").get(species)
+        return !!this.db.prepare(`SELECT 1 FROM visits WHERE species=? AND status NOT IN ('not_animal','unknown') AND ${COUNTS_SQL} LIMIT 1`).get(species)
             || !!this.db.prepare('SELECT 1 FROM known_species WHERE species=?').get(species);
+    }
+
+    // --- Heard calls: every BirdNET-Go detection Kestrel received, as the models said it (heard.ts decides what it means) ---
+
+    // Keeps one call. A message delivered twice (same microphone, species, model and second) is kept once; the repeat
+    // returns undefined.
+    recordHeardCall(call: HeardCallInput): number | undefined {
+        if (this.db.prepare('SELECT 1 FROM heard_calls WHERE camera_id=? AND species=? AND model=? AND at=? LIMIT 1').get(call.cameraId, call.species, call.model, call.at))
+            return undefined;
+        const result = this.db.prepare(`INSERT INTO heard_calls(camera_id,at,received_at,species,scientific,grp,score,occurrence,model,model_rank,model_label,detection_id,clip)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(call.cameraId, call.at, call.receivedAt, call.species, call.scientific, call.grp, call.score,
+            call.occurrence, call.model, call.modelRank, call.modelLabel, call.detectionId, call.clip);
+        return Number(result.lastInsertRowid);
+    }
+
+    private decodeHeardCall(row: RawHeardCall): HeardCallRow {
+        return {
+            id: Number(row.id), cameraId: row.camera_id, at: row.at, receivedAt: row.received_at, species: row.species, scientific: row.scientific,
+            grp: row.grp, score: row.score, occurrence: row.occurrence, model: row.model, modelRank: row.model_rank, modelLabel: row.model_label,
+            detectionId: row.detection_id, clip: row.clip, visitId: row.visit_id,
+        };
+    }
+
+    getHeardCall(id: number): HeardCallRow | undefined {
+        const row = this.db.prepare('SELECT * FROM heard_calls WHERE id=?').get(id) as RawHeardCall | undefined;
+        return row ? this.decodeHeardCall(row) : undefined;
+    }
+
+    // The calls on one microphone between two moments, oldest first.
+    heardCallsNear(cameraId: string, from: number, to: number): HeardCallRow[] {
+        return (this.db.prepare('SELECT * FROM heard_calls WHERE camera_id=? AND at BETWEEN ? AND ? ORDER BY at ASC, id ASC').all(cameraId, from, to) as unknown as RawHeardCall[])
+            .map(row => this.decodeHeardCall(row));
+    }
+
+    attachHeardCall(id: number, visitId: string): void {
+        this.db.prepare('UPDATE heard_calls SET visit_id=? WHERE id=?').run(visitId, id);
+    }
+
+    // Every BirdNET-Go message says which model made it, whether or not it became a call (an insect is dropped, an
+    // unwatched microphone is ignored): remembering that is what tells which model is the main one.
+    noteModelSeen(model: string, rank: number, at: number): void {
+        this.db.prepare('INSERT INTO models_seen(model,rank,last_at) VALUES(?,?,?) ON CONFLICT(model) DO UPDATE SET rank=excluded.rank,last_at=MAX(last_at,excluded.last_at)').run(model, rank, at);
+    }
+
+    // The highest model rank that has spoken since `since` on any microphone: the model whose word counts as THE call.
+    primaryModelRank(since: number): number {
+        const row = this.db.prepare('SELECT MAX(rank) AS rank FROM models_seen WHERE last_at>=?').get(since) as { rank: number | null };
+        return row.rank ?? 0;
+    }
+
+    // How many calls of this species were heard on this microphone in [from, to), not counting `exceptId`.
+    countHeardCalls(cameraId: string, species: string, from: number, to: number, exceptId: number): number {
+        const row = this.db.prepare('SELECT COUNT(*) AS n FROM heard_calls WHERE camera_id=? AND species=? AND at>=? AND at<? AND id<>?').get(cameraId, species, from, to, exceptId) as { n: number };
+        return Number(row.n);
+    }
+
+    // Heard visits on this camera that started within `windowMs` of `at`, nearest first.
+    findHeardVisitsNear(cameraId: string, at: number, windowMs: number): Visit[] {
+        return (this.db.prepare("SELECT * FROM visits WHERE camera_id=? AND kind='heard' AND started_at BETWEEN ? AND ? ORDER BY ABS(started_at-?) ASC, started_at ASC LIMIT 10")
+            .all(cameraId, at - windowMs, at + windowMs, at) as unknown as RawVisit[]).map(row => this.decodeVisit(row));
+    }
+
+    // The camera's latest visit that counts (a Possible or Check heard call is not "the latest animal").
+    latestCountedVisit(cameraId: string): Visit | undefined {
+        const row = this.db.prepare(`SELECT * FROM visits WHERE camera_id=? AND ${COUNTS_SQL} ORDER BY started_at DESC, id DESC LIMIT 1`).get(cameraId) as RawVisit | undefined;
+        return row ? this.decodeVisit(row) : undefined;
     }
 
     // Fresh start for heard visits: removes every HEARD visit that started strictly before `before`
@@ -602,8 +772,8 @@ export class KestrelStore {
     // `known_species`, so hasSpecies stays true and nothing is flagged "first ever" again. With
     // `execute` false nothing changes: it only reports what would go.
     purgeHeardBefore(before: number, execute: boolean): PurgeResult {
-        const rows = this.db.prepare("SELECT id, species, status, started_at, birdnet_detection_id FROM visits WHERE kind='heard' AND started_at<? ORDER BY started_at, rowid")
-            .all(before) as { id: string; species: string; status: VisitStatus; started_at: number; birdnet_detection_id: number | null }[];
+        const rows = this.db.prepare("SELECT id, species, status, tier, started_at, birdnet_detection_id FROM visits WHERE kind='heard' AND started_at<? ORDER BY started_at, rowid")
+            .all(before) as { id: string; species: string; status: VisitStatus; tier: Tier | null; started_at: number; birdnet_detection_id: number | null }[];
         const detectionIds = rows.map(row => row.birdnet_detection_id).filter((id): id is number => typeof id === 'number');
         const result: PurgeResult = {
             executed: execute, before, removed: rows.length, detectionIds,
@@ -618,7 +788,7 @@ export class KestrelStore {
                 ON CONFLICT(species) DO UPDATE SET first_at=MIN(first_at,excluded.first_at)`);
             const now = Date.now();
             for (const row of rows) {
-                if (row.status === 'not_animal' || row.status === 'unknown') continue;
+                if (row.status === 'not_animal' || row.status === 'unknown' || !counts(row)) continue;
                 remember.run(row.species, row.started_at, now);
             }
             this.db.prepare("DELETE FROM visits WHERE kind='heard' AND started_at<?").run(before);
@@ -657,14 +827,14 @@ export class KestrelStore {
         return { items, next: items.length === limit ? items[items.length - 1].startedAt : null };
     }
 
-    // Species most often recorded (seen or heard) at this camera in the last `since`..now window,
-    // excluding the visit's own species and anything that isn't a confirmed/auto animal ID. A
-    // single GROUP BY, not a row fetch-and-count in JS -- cheap enough to run at ingest.
+    // Species a person has confirmed (or corrected a visit to) at this camera since `since`, most often first,
+    // excluding the visit's own species. Only human-verified visits count: a model's own unchecked output must not
+    // become the list of birds it suggests next. A single GROUP BY, cheap enough to run at ingest.
     usualSpeciesAtCamera(cameraId: string, excludeSpecies: string, since: number, limit: number): string[] {
         const rows = this.db.prepare(`
             SELECT species FROM visits
             WHERE camera_id=? AND started_at>=? AND species<>? AND species<>'Unidentified animal'
-            AND status NOT IN ('not_animal','unknown')
+            AND status IN ('confirmed','corrected')
             GROUP BY species ORDER BY COUNT(*) DESC, species ASC LIMIT ?
         `).all(cameraId, since, excludeSpecies, limit) as { species: string }[];
         return rows.map(row => row.species);
@@ -724,7 +894,7 @@ export class KestrelStore {
     }
 
     speciesList(): unknown[] {
-        const rows = this.db.prepare("SELECT * FROM visits WHERE status NOT IN ('not_animal','unknown') AND species NOT IN ('Unidentified animal','unknown') ORDER BY started_at").all() as unknown as RawVisit[];
+        const rows = this.db.prepare(`SELECT * FROM visits WHERE status NOT IN ('not_animal','unknown') AND species NOT IN ('Unidentified animal','unknown') AND ${COUNTS_SQL} ORDER BY started_at`).all() as unknown as RawVisit[];
         const now = Date.now();
         const yearStart = new Date(new Date(now).getFullYear(), 0, 1).getTime();
         const species = new Map<string, {
@@ -884,6 +1054,7 @@ export class KestrelStore {
         const cutoff = now - 30 * 24 * 60 * 60 * 1000;
         this.db.prepare('DELETE FROM camera_daily_stats WHERE day<?').run(newYorkDayKey(now - 30 * 24 * 60 * 60 * 1000));
         this.db.prepare('DELETE FROM birdnet_daily_stats WHERE day<?').run(newYorkDayKey(now - 30 * 24 * 60 * 60 * 1000));
+        this.db.prepare('DELETE FROM heard_calls WHERE at<?').run(now - HEARD_CALL_RETENTION_MS);
         const old = this.db.prepare('SELECT id,snapshot_file,crop_file FROM visits WHERE started_at<? AND (snapshot_file IS NOT NULL OR crop_file IS NOT NULL)')
             .all(cutoff) as { id: string; snapshot_file: string | null; crop_file: string | null }[];
         for (const row of old) {

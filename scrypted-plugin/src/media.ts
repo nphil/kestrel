@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Camera, ImageEmbedding, MediaObject, ObjectDetector } from '@scrypted/sdk';
+import type { Camera, ImageEmbedding, MediaObject, ObjectDetection, ObjectDetector } from '@scrypted/sdk';
 import { LIVE_PICTURE_QUALITY, LIVE_PICTURE_WIDTH } from './live';
 import { sdk } from './sdkFix';
 
@@ -89,6 +89,26 @@ export async function embedCrop(crop: Buffer): Promise<Buffer | undefined> {
         return undefined;
     const media = await sdk.mediaManager.createMediaObject(crop, 'image/jpeg');
     return device.getImageEmbedding(media);
+}
+
+// What the wildlife classifier (Scrypted device 248) makes of a crop: its best guesses with their confidence. Scrypted's NVR
+// puts a label on a detection only when the classifier is at least 70% sure and never passes the confidence on, so it is
+// asked directly. Rejects when the classifier does not answer in time.
+export async function classifyCrop(crop: Buffer, timeoutMs: number): Promise<{ className: string; score: number }[]> {
+    const classifier = sdk.systemManager.getDeviceById('248') as unknown as ObjectDetection | undefined;
+    if (!classifier || typeof classifier.detectObjects !== 'function')
+        return [];
+    const media = await sdk.mediaManager.createMediaObject(crop, 'image/jpeg');
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        const result = await Promise.race([
+            classifier.detectObjects(media),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('The classifier did not answer in time')), timeoutMs); }),
+        ]);
+        return (result.detections ?? []).filter(item => typeof item.score === 'number').map(item => ({ className: item.className, score: item.score }));
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 // One current picture from the camera for a Live tile: a periodic request (the camera plugin may answer

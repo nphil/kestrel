@@ -9,6 +9,7 @@ CONF_POLL_TIMEOUT = "poll_timeout"
 CONF_AUDIO_URL = "audio_url"
 CONF_AUDIO_KEY = "audio_key"
 CONF_AUDIO_BACKFILL_DAYS = "audio_backfill_days"
+CONF_XENO_CANTO_KEY = "xeno_canto_key"
 AUDIO_KEY_HEADER = "X-Kestrel-Audio-Key"
 
 DEFAULT_URL = "http://192.168.1.69:11080/endpoint/@nphil/kestrel/public"
@@ -20,7 +21,7 @@ MAX_AUDIO_BACKFILL_DAYS = 30  # BirdNET-Go and the audio service both keep recor
 
 INTEGRATION_VERSION = "1.1.3"
 STATIC_PATH = "/kestrel-static"
-MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "live", "birdnet_audio", "birdnet_clip", "birdnet_preview", "species_ref", "species_ref_info"})
+MEDIA_KINDS = frozenset({"snap", "crop", "clip", "audio", "species", "camera", "live", "birdnet_audio", "birdnet_clip", "birdnet_preview", "species_ref", "species_ref_info", "species_sound"})
 MEDIA_URL_TTL_HOURS = 12
 
 # Each non-empty batch of plugin events is sent on this dispatcher signal. Dashboard
@@ -34,16 +35,10 @@ SIGNAL_EVENTS = f"{DOMAIN}_events"
 BIRDNET_GO_INTERNAL_URL = "http://db21ed7f-birdnet-go:8080"
 BIRDNET_GO_INGRESS_PATH = "/hassio/ingress/db21ed7f_birdnet-go"
 
-# Per-item availability verdicts (see birdnet_availability.py) for media that
-# BirdNET-Go may not actually have, even though it recognizes the name/id:
-# referenceImage (species with no provider photo) and heard-visit audio (a
-# low-confidence detection whose clip BirdNET-Go never saved). Image positive
-# matches BirdNET-Go's own 30-day image cache; image negative is rechecked
-# sooner in case a provider gets one later. Audio positive never expires (a
-# saved clip is not deleted); audio negative is rechecked after a couple of minutes, since a
-# clip can land a few seconds after its MQTT detection message.
-BIRDNET_IMAGE_POSITIVE_CACHE_DAYS = 30
-BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS = 7
+# Per-item availability verdict (see birdnet_availability.py) for heard-visit audio that BirdNET-Go may not
+# actually have (a low-confidence detection whose clip it never saved). Positive never expires (a saved clip
+# is not deleted); negative is rechecked after a couple of minutes, since a clip can land a few seconds after
+# its MQTT detection message.
 BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES = 2
 
 # Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).

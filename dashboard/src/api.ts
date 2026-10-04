@@ -1,5 +1,5 @@
-import { stableUrl } from "./urls.ts";
-import type { Camera, Health, HomeAssistant, KestrelCardConfig, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
+import { pathOf, stableUrl } from "./urls.ts";
+import type { Camera, Health, HomeAssistant, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
 
 export function callWS<T>(hass: HomeAssistant, type: string, fields: Record<string, unknown> = {}): Promise<T> {
   return hass.callWS<T>({ type, ...fields });
@@ -16,10 +16,14 @@ export const api = {
   review: (hass: HomeAssistant) => callWS<VisitPage | Visit[]>(hass, "kestrel/review"),
   species: (hass: HomeAssistant) => callWS<Species[] | { items: Species[] }>(hass, "kestrel/species"),
   speciesDetail: (hass: HomeAssistant, name: string) => callWS<SpeciesDetail | Species>(hass, "kestrel/species/detail", { species: name }),
+  // The server's raw answer: `referenceSounds()` makes it safe to use.
+  speciesReference: (hass: HomeAssistant, species: string) => callWS<unknown>(hass, "kestrel/species/reference", { species }),
   labels: (hass: HomeAssistant) => callWS<unknown>(hass, "kestrel/labels"),
   health: (hass: HomeAssistant) => callWS<Health>(hass, "kestrel/health"),
   settings: (hass: HomeAssistant) => callWS<Settings>(hass, "kestrel/settings/get"),
   setSettings: (hass: HomeAssistant, settings: Settings) => callWS<Settings>(hass, "kestrel/settings/set", { settings }),
+  rangeFilter: (hass: HomeAssistant) => callWS<RangeFilter>(hass, "kestrel/range_filter/get"),
+  setRangeFilter: (hass: HomeAssistant, threshold: number) => callWS<RangeFilter>(hass, "kestrel/range_filter/set", { threshold }),
 };
 
 /** True when the server says the thing asked for isn't there (a merged or removed visit). */
@@ -120,10 +124,14 @@ export function speciesPhoto(species: Species): string | null {
   return mediaUrl(species.photo_url ?? species.photo ?? species.image ?? null);
 }
 
-export function speciesReferencePhoto(detail: unknown, species?: Species): string | null {
+/** The species record inside a `kestrel/species/detail` answer (the answer itself when it is not nested). */
+export function speciesRecord(detail: unknown): Record<string, unknown> {
   const item = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
-  const nested = item.species && typeof item.species === "object" ? item.species as Record<string, unknown> : item;
-  const direct = nested.referenceImage;
+  return item.species && typeof item.species === "object" ? item.species as Record<string, unknown> : item;
+}
+
+export function speciesReferencePhoto(detail: unknown, species?: Species): string | null {
+  const direct = speciesRecord(detail).referenceImage;
   return mediaUrl(typeof direct === "string" ? direct : species?.referenceImage ?? null);
 }
 
@@ -133,6 +141,67 @@ export function speciesPicture(species: Species): { url: string | null; isRefere
   if (own) return { url: own, isReference: false };
   const reference = speciesReferencePhoto(null, species);
   return { url: reference, isReference: reference !== null };
+}
+
+const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+
+/** What the server said about who took a reference photo; null when there is nothing to show. A page that is not an https link is dropped. */
+export function photoInfo(value: unknown): PhotoCredit | null {
+  const raw = (value ?? {}) as Record<string, unknown>; // a number or a string has none of these fields either
+  const page = text(raw.page);
+  const info = { source: text(raw.source), credit: text(raw.credit), licence: text(raw.licence), page: page.startsWith("https://") ? page : "" };
+  return info.source || info.credit || info.licence ? info : null;
+}
+
+const credits = new Map<string, PhotoCredit>();
+
+/** Asks once per photo (kept by path, whatever the signature) who took it. Never throws: 204, an error or an answer that cannot be read is null,
+ * and only a credit is kept, so a photo the server did not know yet is asked about again next time. */
+export async function loadPhotoCredit(url: string): Promise<PhotoCredit | null> {
+  const key = pathOf(url);
+  const kept = credits.get(key);
+  if (kept) return kept;
+  try {
+    const response = await fetch(url);
+    const info = response.status === 200 ? photoInfo(await response.json()) : null;
+    if (info) credits.set(key, info);
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+function referenceClip(value: unknown): ReferenceClip | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const id = text(raw.id);
+  const url = text(raw.url);
+  // A bare path the integration has not signed would resolve under the panel's own address and never play.
+  if (!id || !/^(?:https?:)?\/\/|^\//.test(url)) return null;
+  const page = text(raw.page);
+  return {
+    id,
+    kind: raw.kind === "song" || raw.kind === "call" ? raw.kind : "other",
+    label: text(raw.label) || "Recording",
+    source: raw.source as ReferenceClip["source"],
+    sourceName: text(raw.sourceName),
+    credit: text(raw.credit),
+    licence: text(raw.licence),
+    quality: text(raw.quality) || null,
+    seconds: typeof raw.seconds === "number" && Number.isFinite(raw.seconds) && raw.seconds > 0 ? raw.seconds : null,
+    // The page is offered as a link: only a web address is taken, never a script.
+    page: /^https?:\/\//i.test(page) ? page : "",
+    url: stableUrl(url) as string,
+  };
+}
+
+/** What the server said about a species' reference recordings, whatever it sent. An answer that cannot be read, or says `ready` without a
+ * clip that can be played, is `unavailable` (try again), never a crash. Each clip keeps the same link from one response to the next (see urls.ts). */
+export function referenceSounds(value: unknown): ReferenceSounds {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const clips = raw.state === "ready" && Array.isArray(raw.clips) ? raw.clips.map(referenceClip).filter((clip): clip is ReferenceClip => clip !== null) : [];
+  const state = raw.state === "none" ? "none" : raw.state === "ready" && clips.length ? "ready" : "unavailable";
+  return { species: text(raw.species), scientific: text(raw.scientific) || null, state, clips };
 }
 
 /** Keeps a camera's picture link the same from one response to the next (see urls.ts). */

@@ -24,6 +24,7 @@ from .const import (
     CONF_AUDIO_KEY,
     CONF_AUDIO_URL,
     CONF_URL,
+    CONF_XENO_CANTO_KEY,
     DEFAULT_AUDIO_BACKFILL_DAYS,
     DOMAIN,
     INTEGRATION_VERSION,
@@ -35,6 +36,8 @@ from .const import (
 )
 from .coordinator import KestrelCoordinator
 from .media import async_register_media_view
+from .reference_photos import ReferencePhotos
+from .reference_sounds import ReferenceSounds
 from .websocket_api import async_setup_websocket_api
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,6 +88,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     )
     domain_data["audio"] = audio
     audio.async_start()
+    reference = ReferenceSounds(hass, entry.options.get(CONF_XENO_CANTO_KEY))
+    await reference.async_load()
+    domain_data["reference_sounds"] = reference
+    photos = ReferencePhotos(hass)
+    await photos.async_load()
+    domain_data["reference_photos"] = photos
 
     module_url = domain_data.get("frontend_module_url")
     if module_url and not domain_data.get("panel_registered"):
@@ -107,6 +116,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     async def stop_on_shutdown(event: object) -> None:
         await coordinator.async_stop()
         await audio.async_stop()
+        await reference.async_stop()
+        await photos.async_stop()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_on_shutdown))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -121,6 +132,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
     audio = hass.data.get(DOMAIN, {}).pop("audio", None)
     if audio is not None:
         await audio.async_stop()
+    reference = hass.data.get(DOMAIN, {}).pop("reference_sounds", None)
+    if reference is not None:
+        await reference.async_stop()
+    photos = hass.data.get(DOMAIN, {}).pop("reference_photos", None)
+    if photos is not None:
+        await photos.async_stop()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         domain_data = hass.data.get(DOMAIN, {})
@@ -132,8 +149,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> None:
-    """Forget the announced-visit memory when the config entry is deleted."""
+    """Forget the announced-visit memory, the reference sounds and the reference photos when the config entry is deleted."""
     await AnnouncedVisits(hass, entry.entry_id).async_remove()
+    await ReferenceSounds(hass).async_remove()
+    await ReferencePhotos(hass).async_remove()
 
 
 async def async_remove_config_entry_device(

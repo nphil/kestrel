@@ -68,6 +68,21 @@ mkdir -p data && curl -s https://ml-inat-competition-datasets.s3.amazonaws.com/2
 .venv/bin/python build/export.py --species species/atlanta.json --out dist/wildlife-atlanta
 ```
 
+### Seasonal prior (not part of the model)
+
+`species/atlanta-weekly.json` says how common each species is around Atlanta in each of
+the year's 48 quarter-months, for the plugin to judge whether a detection is plausible
+this week. Stdlib only, no login; reruns from a local cache:
+
+```bash
+python3 build/seasonal.py                          # iNaturalist, Fulton + DeKalb GA, 2016-2025
+python3 build/seasonal.py --ebird-tsv fulton.tsv dekalb.tsv   # eBird bar-chart TSVs for birds
+```
+
+eBird's login and bar-chart pages sit behind a bot check, so the TSVs have to be downloaded
+by hand from ebird.org/barchart (US-GA-121, US-GA-089). The TSV reader has only been run
+on a synthetic file, not a real eBird download.
+
 ## Test it
 
 ```bash

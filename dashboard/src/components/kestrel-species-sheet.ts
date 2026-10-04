@@ -1,11 +1,13 @@
 import { BASE_CSS, type AudioListRow, type LuCloseDetail, type RailItem } from "lucent-ha";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
-import { api, speciesPicture, visitAudio, visitAudioOriginal, visitPage, visitSnapshot } from "../api.ts";
+import { api, loadPhotoCredit, speciesPicture, visitAudio, visitAudioOriginal, visitPage, visitSnapshot } from "../api.ts";
 import { clamp, dateTime, sentence, timestamp, when } from "../format.ts";
-import type { Camera, HomeAssistant, Species, Visit, VisitKind } from "../types.ts";
-import { sameMedia } from "../urls.ts";
+import type { Camera, HomeAssistant, PhotoCredit, Species, Visit, VisitKind } from "../types.ts";
+import { pathOf, sameMedia } from "../urls.ts";
 import { HEARD_HERO_CSS, heardHero } from "../ui/heard-hero.ts";
-import { GROUP_LABEL, KIND, evidenceWord, recordingNotes } from "../vocab.ts";
+import { photoCaption } from "../ui/photo-credit.ts";
+import { GROUP_LABEL, KIND, evidenceWord, recordingNotes, tierWord, visitConfidence } from "../vocab.ts";
+import "./kestrel-reference-sound.ts";
 
 interface Section { items: Visit[]; next: string | null; state: "loading" | "ready" | "error" }
 type Sections = Record<VisitKind, Section>;
@@ -63,6 +65,7 @@ export class KestrelSpeciesSheet extends LitElement {
     canMute: { type: Boolean, attribute: "can-mute" },
     _sections: { state: true },
     _photoFailed: { state: true },
+    _credit: { state: true },
   };
 
   declare hass: HomeAssistant | undefined;
@@ -73,9 +76,11 @@ export class KestrelSpeciesSheet extends LitElement {
   declare canMute: boolean;
   declare _sections: Sections;
   declare _photoFailed: boolean;
+  declare _credit: PhotoCredit | null;
 
   private _loadedFor = "";
   private _requests: Record<VisitKind, number> = { seen: 0, heard: 0 };
+  private _creditKey = "";
   private _rail: RailItem[] = [];
   private _rows: AudioListRow[] = [];
 
@@ -87,6 +92,7 @@ export class KestrelSpeciesSheet extends LitElement {
     this.canMute = false;
     this._sections = fresh();
     this._photoFailed = false;
+    this._credit = null;
   }
 
   disconnectedCallback(): void {
@@ -96,6 +102,14 @@ export class KestrelSpeciesSheet extends LitElement {
   }
 
   protected willUpdate(_changed: PropertyValues<this>): void {
+    // Who took the reference photo: asked once per photo; an answer that arrives after the species changed finds another key and is ignored.
+    const infoUrl = this.species && speciesPicture(this.species).isReference ? this.species.referenceImageInfoUrl : null;
+    const key = infoUrl ? pathOf(infoUrl) : "";
+    if (key !== this._creditKey) {
+      this._creditKey = key;
+      this._credit = null;
+      if (infoUrl) void loadPhotoCredit(infoUrl).then((credit) => { if (key === this._creditKey) this._credit = credit; });
+    }
     const name = this.species?.species ?? "";
     if (!name || name === this._loadedFor) return;
     this._loadedFor = name;
@@ -137,8 +151,10 @@ export class KestrelSpeciesSheet extends LitElement {
 
   private _audioRow(visit: Visit): AudioListRow {
     const time = sentence(when(visit.startedAt));
-    const score = typeof visit.score === "number" ? `${Math.round(visit.score * 100)}%` : undefined;
-    const { mark } = recordingNotes(visit.audioInfo);
+    const sure = visitConfidence(visit);
+    const score = sure === undefined ? undefined : `${Math.round(sure * 100)}%`;
+    const tier = tierWord(visit);
+    const mark = [tier === "Likely" ? "" : tier, recordingNotes(visit.audioInfo).mark].filter(Boolean).join(" · ");
     const src = visitAudio(visit);
     const original = visitAudioOriginal(visit);
     return { id: visit.id, src, ...(original && !sameMedia(original, src) ? { fallback: original } : {}), title: time, caption: visit.camera.name, ...(score ? { meta: score } : {}), ...(mark ? { mark } : {}), label: `recording from ${time.toLowerCase()} at ${visit.camera.name}${mark ? `, ${mark.toLowerCase()}` : ""}` };
@@ -265,6 +281,7 @@ export class KestrelSpeciesSheet extends LitElement {
   }
 
   static styles = [BASE_CSS, HEARD_HERO_CSS, css`
+    .credit { margin-top: var(--lu-space-1); overflow-wrap: anywhere; }
     :host { display: contents; }
     h3, p { margin: 0; }
     h3 { margin-bottom: var(--lu-space-3); font-size: var(--lu-type-label); font-weight: 600; }
@@ -309,9 +326,11 @@ export class KestrelSpeciesSheet extends LitElement {
           <kestrel-lu-image .src=${picture.url ?? ""} ratio="16/10" alt=${species.species} @lu-image-error=${() => { this._photoFailed = true; }}>${species.heard ? heardHero(KIND.heard.icon, "fallback") : nothing}</kestrel-lu-image>
           ${species.heard && !picture.url ? heardHero(KIND.heard.icon) : nothing}
           ${showChip ? html`<kestrel-lu-chip class="chip" overlay label="Reference photo"></kestrel-lu-chip>` : nothing}
+          ${showChip ? photoCaption(this._credit) : nothing}
         </div>
         <div class="total"><strong>${species.count30d}</strong><span>${species.count30d === 1 ? "visit" : "visits"} in the last 30 days</span></div>
       </div>
+      <kestrel-reference-sound .hass=${this.hass} .species=${species.species}></kestrel-reference-sound>
       ${this._renderSection("seen", species)}
       ${this._renderSection("heard", species)}
       ${this._renderHours(species)}

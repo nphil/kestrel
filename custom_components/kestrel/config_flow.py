@@ -26,6 +26,7 @@ from .const import (
     CONF_AUDIO_URL,
     CONF_POLL_TIMEOUT,
     CONF_URL,
+    CONF_XENO_CANTO_KEY,
     DEFAULT_AUDIO_BACKFILL_DAYS,
     DEFAULT_POLL_TIMEOUT,
     DEFAULT_URL,
@@ -34,6 +35,7 @@ from .const import (
     MAX_POLL_TIMEOUT,
     MIN_POLL_TIMEOUT,
 )
+from .reference_sounds import check_xeno_canto_key
 
 
 class KestrelConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -87,7 +89,7 @@ class KestrelConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class KestrelOptionsFlow(OptionsFlowWithReload):
-    """Configure the plugin's event wait and the optional bird-call preview service."""
+    """Configure the plugin's event wait, the optional bird-call preview service and the optional Xeno-canto key."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
@@ -99,8 +101,11 @@ class KestrelOptionsFlow(OptionsFlowWithReload):
         if user_input is not None:
             audio_url = str(user_input.get(CONF_AUDIO_URL) or "").strip().rstrip("/")
             audio_key = str(user_input.get(CONF_AUDIO_KEY) or "").strip()
+            xeno_canto_key = str(user_input.get(CONF_XENO_CANTO_KEY) or "").strip()
             if audio_url or audio_key:
                 errors = await self._async_check_audio(audio_url, audio_key)
+            if xeno_canto_key and (problem := await check_xeno_canto_key(self.hass, xeno_canto_key)):
+                errors[CONF_XENO_CANTO_KEY] = f"xeno_canto_{problem}"
             if not errors:
                 return self.async_create_entry(
                     title="",
@@ -111,6 +116,7 @@ class KestrelOptionsFlow(OptionsFlowWithReload):
                         CONF_AUDIO_BACKFILL_DAYS: user_input.get(
                             CONF_AUDIO_BACKFILL_DAYS, DEFAULT_AUDIO_BACKFILL_DAYS
                         ),
+                        CONF_XENO_CANTO_KEY: xeno_canto_key,
                     },
                 )
 
@@ -144,6 +150,12 @@ class KestrelOptionsFlow(OptionsFlowWithReload):
                     ): vol.All(
                         vol.Coerce(int),
                         vol.Range(min=0, max=MAX_AUDIO_BACKFILL_DAYS),
+                    ),
+                    vol.Optional(
+                        CONF_XENO_CANTO_KEY,
+                        description={"suggested_value": current.get(CONF_XENO_CANTO_KEY, "")},
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                     ),
                 }
             ),

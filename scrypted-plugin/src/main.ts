@@ -7,12 +7,15 @@ import type { HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, 
 import { ScryptedDeviceBase, ScryptedInterface } from '@scrypted/sdk';
 import mqtt, { type MqttClient } from 'mqtt';
 import { ChangeGate } from './changes';
+import { HeardIngest, modelOf, occurrenceOf } from './heard';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
 import { LIVE_CAPTURE_DEADLINE_MS, LIVE_CAPTURE_TIMEOUT_MS, LivePictureCache, etagMatches, type LivePicture } from './live';
 import { parseLongPollTimeoutMs } from './longpoll';
-import { captureDetection, captureLivePicture, embedCrop, ensureMediaDirectories, saveCapture } from './media';
-import { KeyedQueue, SameMomentTracker, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
+import { captureDetection, captureLivePicture, classifyCrop, embedCrop, ensureMediaDirectories, saveCapture } from './media';
+import { commonnessFor } from './seasonal';
+import { SEASONAL_PRIOR } from './seasonal-prior';
+import { KeyedQueue, SameMomentTracker, UNIDENTIFIED_ANIMAL, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
 import { KestrelStore, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
@@ -30,7 +33,9 @@ const CLIP_POLL_MS = 5_000;
 const MEDIA_BUDGET_BYTES = 300 * 1024 * 1024;
 const MAX_LONG_POLLS = 100;
 const DETECTOR_SESSION_IDLE_MS = 3_000;
-const USUAL_SUGGESTIONS_WINDOW_MS = 30 * 24 * 60 * 60_000;
+// "Usual" suggestions come from visits a person confirmed, which are rarer than model output, so they look back further.
+const USUAL_SUGGESTIONS_WINDOW_MS = 90 * 24 * 60 * 60_000;
+const LABEL_SCORE_TIMEOUT_MS = 5_000;
 const USUAL_SUGGESTIONS_LIMIT = 5;
 const SETTINGS: Setting[] = [
     { key: CAMERA_SETTING, title: 'Wildlife cameras', description: 'Select Scrypted cameras for animal detections and BirdNET matching.', type: 'device', deviceFilter: 'VideoCamera', multiple: true },
@@ -43,7 +48,7 @@ const SETTINGS: Setting[] = [
     { key: 'apiKey', title: 'Kestrel API key (copy into Home Assistant)', type: 'string', readonly: true },
 ];
 
-type Detection = { className?: string; label?: string | null; score?: number | null; id?: string; boundingBox?: number[] };
+type Detection = { className?: string; label?: string | null; score?: number | null; labelScore?: number | null; id?: string; boundingBox?: number[] };
 type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestamp?: number; durationMs?: number; processingMs?: number };
 // health/drops1h describe the camera device's own Online state (Scrypted's aggregate online
 // flag, tracked in real time -- see setupOnlineListeners/handleOnlineChange below), NOT the
@@ -52,7 +57,7 @@ type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestam
 // same camera (e.g. the low-res analysis stream) still has data -- that is not visible here.
 type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; picture: string; lastDetection: { species: string; at: number; visitId: string; kind: VisitKind; grp: VisitGroup } | null };
 type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[]; durationTotal: number; durationSamples: number };
-type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
+type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; labelScore?: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
 type DetectorSession = { sawObject: boolean; timer: NodeJS.Timeout };
 type DeviceWithSettings = { name?: string; interfaces?: string[]; mixins?: string[]; getSettings?: () => Promise<Setting[]> };
 type BrokerMessage = Record<string, unknown>;
@@ -210,6 +215,7 @@ async function* readStream(path: string, start: number, end: number): AsyncGener
 
 class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler {
     private store?: KestrelStore;
+    private heard?: HeardIngest;
     private ready: Promise<void>;
     private baseDir = '';
     private mediaDirs?: { root: string; snapshots: string; crops: string; audio: string };
@@ -240,6 +246,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private clipTimer?: NodeJS.Timeout;
     private healthTimer?: NodeJS.Timeout;
     private maintenanceTimer?: NodeJS.Timeout;
+    private heardTimer?: NodeJS.Timeout;
     private brokerGeneration = 0;
     private released = false;
 
@@ -257,6 +264,25 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.mediaDirs = await ensureMediaDirectories(this.baseDir);
         this.store = new KestrelStore(this.databasePath);
         this.store.onVisitsDeleted = ids => this.announceDeletedVisits(ids);
+        this.heard = new HeardIngest({
+            store: this.store,
+            cooldownMs: () => this.cooldownMs(),
+            cameraName: cameraId => this.cameras.get(cameraId)?.name,
+            isMuted: species => this.mutedSpecies().includes(species),
+            usualSuggestions: (cameraId, species) => this.usualSuggestions(cameraId, species),
+            commonness: (scientific, at) => commonnessFor(SEASONAL_PRIOR, scientific, at),
+            newId: () => randomUUID(),
+            created: visit => this.publishEvent('visit_new', visit),
+            updated: visit => this.publishEvent('visit_updated', visit),
+            link: visit => linkSeenAndHeard(this.db, visit, other => this.publishEvent('visit_updated', other)),
+            failed: error => this.console.warn(`A BirdNET-Go detection could not be turned into a visit: ${String(error)}`),
+        });
+        // BirdNET v3.0 was installed and enabled next to Perch on 2026-10-03 and is the model whose word counts. Say so once,
+        // so Perch is a second opinion from the first minute; the memory expires by itself after a day if v3.0 never speaks.
+        if (!this.store.getSetting('mainModelSeededV1')) {
+            this.store.noteModelSeen('birdnet_v3', 3, Date.now());
+            this.store.setSetting('mainModelSeededV1', String(Date.now()));
+        }
         if (!this.store.getSetting('apiKey')) this.store.setSetting('apiKey', randomBytes(32).toString('hex'));
         if (!this.store.getSetting(CAMERA_SETTING)) this.store.setSetting(CAMERA_SETTING, JSON.stringify(DEFAULT_CAMERAS));
         if (!this.store.getSetting('cooldownMinutes')) this.store.setSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES));
@@ -444,12 +470,13 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                     clearTimeout(pending.timer);
                     this.pending.delete(pending.key);
                     pending.score = detection.score ?? pending.score;
+                    pending.labelScore = asNumber(detection.labelScore) ?? pending.labelScore ?? null;
                     await this.finishDetection(pending, detection.label, detection.label);
                 } else {
                     const capture = captureDetection(cameraId, event.detectionId || detectionId, detection.boundingBox);
                     const record: PendingDetection = {
                         key: cameraId + ':' + (detectionId || randomUUID()), cameraId, detectionId, startedAt,
-                        score: detection.score ?? null, label: detection.label, detectionLabel: detection.label, box: detection.boundingBox,
+                        score: detection.score ?? null, labelScore: asNumber(detection.labelScore) ?? null, label: detection.label, detectionLabel: detection.label, box: detection.boundingBox,
                         capture, timer: undefined,
                     };
                     await this.finishDetection(record, detection.label, detection.label);
@@ -533,18 +560,26 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         // after that does the per-species cooldown (earlier SEEN visits only) choose skip or create.
         const decision = decideSeenCommit(this.db, this.sameMoment, this.cooldownMs(),
             { cameraId: pending.cameraId, startedAt: pending.startedAt, species: finalSpecies });
-        if (decision.action === 'merge') return this.mergeDetection(decision.target, pending, capture, finalSpecies, visitStatus, detectionLabel);
+        if (decision.action === 'merge') {
+            // Asking the classifier takes a moment, so only a detection that can change the visit is asked about: a better
+            // picture, another label, or a visit that has no label score yet.
+            const target = decision.target;
+            const worthAsking = target.labelScore == null || finalSpecies !== target.species || (pending.score ?? -1) > (target.score ?? -1);
+            const labelScore = worthAsking ? await this.labelScoreFor(pending, capture.crop, detectionLabel) : null;
+            return this.mergeDetection(target, pending, capture, finalSpecies, visitStatus, detectionLabel, labelScore);
+        }
         if (decision.action === 'skip') return undefined;
         if (!this.mediaDirs) throw new Error('Media storage has not initialized');
         const id = randomUUID();
         const { snapshotFile, cropFile } = await saveCapture(this.mediaDirs, id, capture);
         const camera = this.cameras.get(pending.cameraId);
         if (!camera) return undefined;
+        const labelScore = await this.labelScoreFor(pending, capture.crop, detectionLabel);
         const firstEver = !this.db.hasSpecies(finalSpecies);
         const grp = groupForSpecies(finalSpecies, 'seen');
         const visit: Visit = {
             id, camera: { id: camera.id, name: camera.name }, kind: 'seen', startedAt: pending.startedAt, species: finalSpecies, grp,
-            status: visitStatus, score: pending.score, snapshot: `media/snap/${id}.jpg`, crop: `media/crop/${id}.jpg`,
+            status: visitStatus, score: pending.score, labelScore, snapshot: `media/snap/${id}.jpg`, crop: `media/crop/${id}.jpg`,
             clip: { state: 'pending', expectedReadyAt: pending.startedAt + CLIP_EXPECTED_DELAY_MS }, heard: null, audio: null,
             suggestions: this.suggestionsFor(camera.id, finalSpecies, detectionLabel), firstEver, muted: this.mutedSpecies().includes(finalSpecies), notify: false,
         };
@@ -562,14 +597,14 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     // keeps the species (ties: the earlier detection), the other label becomes a 'model'
     // suggestion, and a better score also supplies the photo. The visit keeps its one clip, one
     // visit_new, and only publishes visit_updated when the merge changed something.
-    private async mergeDetection(target: Visit, pending: PendingDetection, capture: { snapshot: Buffer; crop: Buffer }, finalSpecies: string, visitStatus: 'auto' | 'learned', detectionLabel: string): Promise<Visit> {
+    private async mergeDetection(target: Visit, pending: PendingDetection, capture: { snapshot: Buffer; crop: Buffer }, finalSpecies: string, visitStatus: 'auto' | 'learned', detectionLabel: string, labelScore: number | null): Promise<Visit> {
         const merged = mergeSeenDetection({
             store: this.db,
             tracker: this.sameMoment,
             groupFor: species => groupForSpecies(species, 'seen'),
             usualSuggestions: (cameraId, species) => this.usualSuggestions(cameraId, species),
             isMuted: species => this.mutedSpecies().includes(species),
-        }, target, { species: finalSpecies, score: pending.score, startedAt: pending.startedAt, status: visitStatus, detectionLabel });
+        }, target, { species: finalSpecies, score: pending.score, labelScore, startedAt: pending.startedAt, status: visitStatus, detectionLabel });
         if (!merged.changed) return merged.visit;
         // The database change is complete before the photo is rewritten; the photo's file name is
         // the visit's id, so the stored paths do not change.
@@ -584,6 +619,21 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const saved = this.db.getVisit(target.id) ?? merged.visit;
         this.publishEvent('visit_updated', saved);
         return saved;
+    }
+
+    // The wildlife classifier's confidence in its label for this crop. Scrypted's own `labelScore` is used when an event
+    // carries one; the NVR does not (it labels a detection only when the classifier is at least 70% sure and drops the
+    // number), so the classifier is asked about the saved crop. null when it cannot say.
+    private async labelScoreFor(pending: PendingDetection, crop: Buffer, label: string): Promise<number | null> {
+        if (typeof pending.labelScore === 'number') return pending.labelScore;
+        if (label === UNIDENTIFIED_ANIMAL) return null;
+        try {
+            const guess = (await classifyCrop(crop, LABEL_SCORE_TIMEOUT_MS)).find(item => item.className === label);
+            return guess ? guess.score : null;
+        } catch (error) {
+            this.console.warn(`Could not ask the classifier how sure it is on camera ${pending.cameraId}: ${String(error)}`);
+            return null;
+        }
     }
 
     private cooldownMs(): number {
@@ -635,7 +685,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         for (const camera of this.allVideoCameras().values()) {
             const online = systemDeviceValue<boolean>(camera.id, 'online') !== false;
             const runtime = this.runtime(camera.id);
-            const latest = this.db.listVisits({ camera: camera.id, limit: 1 }).items[0];
+            const latest = this.db.latestCountedVisit(camera.id);
             items.push({ id: camera.id, name: camera.name, nvrCardId: camera.nvrCardId, online, health: this.cameraHealth(camera.id, online),
                 drops1h: runtime.drops.length, wildlife: this.cameras.has(camera.id), picture: `media/live/${camera.id}.jpg`,
                 lastDetection: latest ? { species: latest.species, at: latest.startedAt, visitId: latest.id, kind: latest.kind, grp: latest.grp } : null });
@@ -705,6 +755,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         // A real, parseable BirdNET-Go detection was received on the topic -- mark it heard even if the
         // source doesn't map to a watched camera below, so health.birdnet reflects real broker traffic.
         this.db.setSetting('birdnetLastHeardAt', String(startedAt));
+        const model = modelOf(message);
+        this.heard?.noteModel(model.key, model.rank, Date.now());
         const sourceValue = message.sourceName ?? message.SourceName ?? message.source ?? message.Source ?? message.camera ?? message.Camera;
         const cameraId = this.cameraForBirdnetSource(String(sourceValue ?? ''));
         if (!cameraId) return;
@@ -722,29 +774,17 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             this.db.recordBirdnetIgnored();
             return;
         }
-        // Same cooldown as seen visits (10 min per camera+species by default): a bird that keeps
-        // calling triggers BirdNET-Go repeatedly, so fold repeats into the one existing visit
-        // instead of creating a new row per detection.
-        const cooldown = Math.max(0, Number(this.db.getSetting('cooldownMinutes', String(DEFAULT_COOLDOWN_MINUTES)))) * 60_000;
-        if (this.db.findRecentHeardVisit(cameraId, species, startedAt - cooldown)) return;
-        const firstEver = !this.db.hasSpecies(species);
-        const id = randomUUID();
-        // BirdNET-Go's own reference to its detection and clip -- Kestrel never fetches or
-        // stores the audio itself; the HA integration reaches BirdNET-Go directly for it.
-        const birdnetDetectionId = asNumber(message.detectionId ?? message.DetectionID ?? message.detection_id) ?? null;
+        // BirdNET-Go's own reference to its detection and clip -- Kestrel never fetches or stores the audio itself;
+        // the HA integration reaches BirdNET-Go directly for it.
+        const detectionId = asNumber(message.detectionId ?? message.DetectionID ?? message.detection_id) ?? null;
         const clipValue = message.ClipName ?? message.clipName ?? message.clip_name;
-        const birdnetClip = typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null;
-        const visit: Visit = {
-            id, camera: { id: camera.id, name: camera.name }, kind: 'heard', startedAt, species, grp, status: 'auto', score,
-            snapshot: null, crop: null, clip: { state: 'none', expectedReadyAt: null }, heard: null,
-            audio: birdnetDetectionId !== null || birdnetClip !== null ? { birdnetDetectionId, birdnetClip } : null,
-            suggestions: this.usualSuggestions(cameraId, species),
-            firstEver, muted: this.mutedSpecies().includes(species), notify: false,
-        };
-        visit.notify = !visit.muted && this.db.getSetting('heardNotify', 'new_only') !== 'never' && firstEver;
-        this.db.saveVisit(visit, { birdnetDetectionId, birdnetClip });
-        await this.linkRelatedVisit(visit);
-        this.publishEvent('visit_new', this.db.getVisit(id) ?? visit);
+        // The call waits a few seconds for the other model's opinion before it becomes a visit (heard.ts). A bird that
+        // keeps calling inside the cooldown is more evidence for the visit it has, not a new row per detection.
+        this.heard?.receive({
+            cameraId, at: startedAt, receivedAt: Date.now(), species, scientific: typeof scientificValue === 'string' && scientificValue.trim() ? scientificValue.trim() : null,
+            grp, score, occurrence: occurrenceOf(message), model: model.key, modelRank: model.rank, modelLabel: model.label,
+            detectionId, clip: typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null,
+        });
     }
 
     private cameraForBirdnetSource(source: string): string | undefined {
@@ -839,6 +879,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const correctionId = this.db.recordCorrection(updated, from, target, false, raw.snapshot_file, raw.crop_file);
         this.db.saveVisit(updated, { lastChangeAt: Date.now(), undoData: JSON.stringify(current), lastCorrectionId: correctionId, detectionLabel: raw.detection_label, review: false });
         this.db.refreshSpeciesBestForVisit(id);
+        this.refreshFirstEver(current.kind, current.species, target);
         if (raw.crop_file) {
             try {
                 const embedding = await embedCrop(await readFile(raw.crop_file));
@@ -867,6 +908,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         }
         const correctionId = this.db.recordCorrection(updated, from, current.species, true, raw.snapshot_file, raw.crop_file);
         this.db.saveVisit(updated, { lastChangeAt: Date.now(), undoData: JSON.stringify(current), lastCorrectionId: correctionId, review: false });
+        this.refreshFirstEver(current.kind, current.species);
         if (raw.crop_file) {
             try {
                 const embedding = await embedCrop(await readFile(raw.crop_file));
@@ -891,11 +933,20 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const restored: Visit = { ...current, species: previous.species, grp: previous.grp, status: previous.status, muted: previous.muted, notify: previous.notify, review: previous.review, heard: previous.heard };
         this.db.deleteCorrection(raw.last_correction_id);
         this.db.saveVisit(restored, { lastChangeAt: null, undoData: null, lastCorrectionId: null, review: !!previous.review });
+        this.refreshFirstEver(current.kind, current.species, previous.species);
         this.db.refreshSpeciesBestForVisit(id);
         this.db.considerSpeciesBest(restored, raw.snapshot_file, raw.crop_file);
         const result = this.db.getVisit(id) ?? restored;
         this.publishEvent('visit_updated', result);
         return result;
+    }
+
+    // A heard visit that a person confirmed, corrected or undid may start or stop counting toward its species, and the
+    // first visit that counts holds "first ever". (Pseudo-species such as "not an animal" have no first visit.)
+    private refreshFirstEver(kind: VisitKind, ...species: string[]): void {
+        if (kind !== 'heard') return;
+        for (const name of new Set(species))
+            if (name !== 'not_animal' && name !== 'unknown') this.db.recomputeFirstEverForSpecies(name);
     }
 
     private async settingsGet(): Promise<{ mutedSpecies: string[]; heardNotify: 'new_only' | 'never' }> {
@@ -1213,6 +1264,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private startTimers(): void {
         this.clipTimer = setInterval(() => { void this.pollClips().catch(error => this.console.warn(`Clip maintenance failed: ${String(error)}`)); }, CLIP_POLL_MS);
         this.healthTimer = setInterval(() => { void this.refreshCameraStatus().catch(error => this.console.warn(`Camera status refresh failed: ${String(error)}`)); }, 30_000);
+        this.heardTimer = setInterval(() => this.heard?.flush(Date.now()), 1_000);
         this.scheduleMaintenance();
     }
 
@@ -1244,6 +1296,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (this.client) this.client.end(true);
         if (this.clipTimer) clearInterval(this.clipTimer);
         if (this.healthTimer) clearInterval(this.healthTimer);
+        clearInterval(this.heardTimer);
         if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
         for (const wake of this.eventWaiters) wake();
         this.eventWaiters.clear();

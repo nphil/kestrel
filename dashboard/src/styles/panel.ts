@@ -11,6 +11,7 @@ export const PANEL_CSS = [BASE_CSS, SURFACE_CSS, HEARD_HERO_CSS, css`
   /* ---- views ---- */
   [data-view] { display: block; container-type: inline-size; min-width: 0; }
   h2, h3, p { margin: 0; }
+  .credit { margin-top: var(--lu-space-1); overflow-wrap: anywhere; }
   h2 { font-size: var(--lu-type-title); font-weight: 620; letter-spacing: -.012em; line-height: 1.2; }
   h3 { margin-bottom: var(--lu-space-3); font-size: var(--lu-type-label); font-weight: 600; }
   p { line-height: 1.45; }
@@ -109,6 +110,7 @@ export const PANEL_CSS = [BASE_CSS, SURFACE_CSS, HEARD_HERO_CSS, css`
   .card-head h3 { margin-bottom: var(--lu-space-1); font-size: var(--lu-type-body); font-weight: 620; }
   .card-head p { font-size: var(--lu-type-label); }
   .review-thumb { width: 56px; --lu-image-radius: var(--lu-radius-control); }
+  .review-why { margin: calc(-1 * var(--lu-space-2)) 0 var(--lu-space-2); padding-inline: calc(var(--lu-space-3) * 2 + 56px) var(--lu-space-3); color: var(--lu-ink-2); font-size: var(--lu-type-label); line-height: 1.35; }
   .simple-list { display: grid; margin: 0; padding: 0; list-style: none; }
   .simple-list li { display: flex; min-height: var(--lu-target); align-items: center; justify-content: space-between; gap: var(--lu-space-3); border-bottom: 1px solid var(--lu-edge); color: var(--lu-ink-2); font-size: var(--lu-type-label); }
   .simple-list li:last-child { border-bottom: 0; }

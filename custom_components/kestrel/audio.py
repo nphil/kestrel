@@ -16,6 +16,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine
@@ -53,6 +54,10 @@ _BACKFILL_PACE = 0.5  # pause after each recording sent
 _BACKFILL_KNOWN_PACE = 0.02  # pause after skipping a call the service already has
 _BACKFILL_START_DELAY = 20.0  # let startup, and the BirdNET species-name lookup, settle first
 _BACKFILL_RESCAN = 6 * 3600.0
+_MAX_ALTERNATIVES = 5  # the service sends three; this only bounds what one payload can carry
+_MAX_SPECIES_BYTES = 1024 * 1024  # BirdNET-Go's species list is about 40 KB
+_SPECIES_START_DELAY = 30.0  # let startup settle before the first look at BirdNET-Go's species list
+_SPECIES_INTERVAL = 900.0  # how often it is looked at again (BirdNET-Go rebuilds it daily, and whenever its filter changes)
 _PREFETCH_LIMIT = 100
 _PREFETCH_TIMEOUT = 2.5
 _MAX_TRACKED = 20_000
@@ -75,15 +80,26 @@ class PreviewInfo:
     segment: dict[str, float] | None = None
     cleaned: bool = False
     method: str | None = None
+    scores: dict[str, float | None] | None = None  # how sure Perch is of BirdNET-Go's species on the matched moment: {original, preview}
+    alternatives: tuple[dict[str, Any], ...] | None = None  # what else Perch hears more strongly; None = not looked at, () = nothing
+    announced: dict[str, Any] | None = None  # Perch's own view of the species BirdNET-Go named
     checked_at: float = field(default_factory=time.monotonic, compare=False)
 
     def as_payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "state": self.state,
             "segment": self.segment,
             "cleaned": self.cleaned,
             "method": self.method,
         }
+        # Only what the service said: an older service, or a call it had not looked at, adds nothing to a payload.
+        if self.scores is not None:
+            payload["scores"] = dict(self.scores)
+        if self.alternatives is not None:
+            payload["alternatives"] = [dict(alternative) for alternative in self.alternatives]
+        if self.announced is not None:
+            payload["announced"] = dict(self.announced)
+        return payload
 
 
 @dataclass(slots=True)
@@ -129,6 +145,57 @@ def detection_ids(value: Any, found: list[int] | None = None) -> list[int]:
     return found
 
 
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+def _count(value: Any, least: int) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= least else None
+
+
+def _text(value: Any) -> str | None:
+    return value.strip()[:120] if isinstance(value, str) and value.strip() else None
+
+
+def _perch_view(item: Any) -> dict[str, Any] | None:
+    """One species as the service scored it: its name, how strongly Perch hears it (0 to 1) and where in the clip. None for anything else."""
+    if not isinstance(item, dict):
+        return None
+    species, score = _text(item.get("species")), _number(item.get("score"))
+    if species is None or score is None or not 0 <= score <= 1:
+        return None
+    window = item.get("window")
+    start, end = (_number(window.get(key)) for key in ("start", "end")) if isinstance(window, dict) else (None, None)
+    return {
+        "species": species,
+        "scientific": _text(item.get("scientific")),
+        "score": round(score, 4),
+        "windowsHigh": _count(item.get("windowsHigh"), 0),
+        "window": {"start": start, "end": end} if start is not None and end is not None else None,
+    }
+
+
+def _parse_alternatives(value: Any) -> tuple[dict[str, Any], ...] | None:
+    if not isinstance(value, list):
+        return None  # an older service, or a call it has not looked at
+    views = (_perch_view(item) for item in value)
+    return tuple(view for view in views if view is not None)[:_MAX_ALTERNATIVES]
+
+
+def _parse_announced(value: Any) -> dict[str, Any] | None:
+    view = _perch_view(value)
+    if view is not None:
+        view["rank"] = _count(value.get("rank"), 1)
+    return view
+
+
+def _parse_scores(value: Any) -> dict[str, float | None] | None:
+    if not isinstance(value, dict):
+        return None
+    scores = {key: _number(value.get(key)) for key in ("original", "preview")}
+    return scores if any(score is not None for score in scores.values()) else None
+
+
 def _parse_info(data: Any) -> PreviewInfo | None:
     """Read the service's /info answer; anything unexpected is treated as unknown."""
     if not isinstance(data, dict) or data.get("state") not in ("pending", "ready", "failed"):
@@ -151,6 +218,9 @@ def _parse_info(data: Any) -> PreviewInfo | None:
         segment=segment,
         cleaned=bool(data.get("cleaned")),
         method=method if isinstance(method, str) else None,
+        scores=_parse_scores(data.get("scores")),
+        alternatives=_parse_alternatives(data.get("alternatives")),
+        announced=_parse_announced(data.get("announced")),
     )
 
 
@@ -204,6 +274,8 @@ class AudioPreviews:
         self._rescan = asyncio.Event()
         self._live_inflight = 0
         self._backfill = _Backfill()
+        self._species_version: str | None = None  # BirdNET-Go's species list as last sent to the service (None = send it)
+        self._species_state: dict[str, Any] | None = None  # what the service said about that list
 
     # --- configuration -----------------------------------------------------------------------
 
@@ -228,6 +300,7 @@ class AudioPreviews:
         self._unsubscribe = async_dispatcher_connect(self._hass, SIGNAL_EVENTS, self._on_events)
         self._spawn(self._track_loop(), "kestrel audio tracker")
         self._spawn(self._health_loop(), "kestrel audio health")
+        self._spawn(self._species_loop(), "kestrel audio species")
         if self._backfill_days > 0:
             self._spawn(self._backfill_loop(), "kestrel audio backfill")
         else:
@@ -266,6 +339,7 @@ class AudioPreviews:
                 reason,
             )
         self._reachable = False
+        self._species_version = None  # the service may come back empty: send it the species list again
 
     async def _request(
         self,
@@ -697,6 +771,68 @@ class AudioPreviews:
         depth = queue.get("depth") if isinstance(queue, dict) else None
         return depth if isinstance(depth, int) and not isinstance(depth, bool) else None
 
+    # --- the species list --------------------------------------------------------------------
+
+    async def _species_loop(self) -> None:
+        """Keep the service's idea of "local" the same as BirdNET-Go's: the species its location filter lets through at this time of year.
+
+        The service measures Perch's scores against that list, so a "could also be" is a bird that lives here, not one of 14,000."""
+        await asyncio.sleep(_SPECIES_START_DELAY)
+        while True:
+            delay = _SPECIES_INTERVAL
+            try:
+                await self._send_species()
+            except AudioServiceError:
+                delay = _HEALTH_INTERVAL  # the service is down: try again soon
+            await asyncio.sleep(delay)
+
+    async def _send_species(self) -> None:
+        listing = await self._fetch_species()
+        if listing is None:
+            return
+        version = f"{listing['updatedAt']}|{len(listing['species'])}"
+        if version == self._species_version:
+            return
+        status, state = await self._request(
+            "PUT",
+            "/v1/local-species",
+            data=json.dumps(listing).encode(),
+            headers={"Content-Type": "application/json"},
+            timeout=_UPLOAD,
+        )
+        if status != 200 or not isinstance(state, dict):
+            _LOGGER.debug("Kestrel audio service did not take the species list: HTTP %s", status)  # an older service has no such call
+            return
+        self._species_version = version
+        self._species_state = {key: state.get(key) for key in ("count", "matched", "changed")}
+
+    async def _fetch_species(self) -> dict[str, Any] | None:
+        """BirdNET-Go's species list as the service wants it, or None when BirdNET-Go cannot be asked just now."""
+        session = async_get_clientsession(self._hass)
+        try:
+            async with session.request(
+                "GET", f"{BIRDNET_GO_INTERNAL_URL}/api/v2/range/species/list", timeout=_UPLOAD, allow_redirects=False
+            ) as response:
+                if response.status != 200:
+                    return None
+                raw = await _read_limited(response, _MAX_SPECIES_BYTES)
+            payload = json.loads(raw) if raw else None
+        except (aiohttp.ClientError, TimeoutError, OSError, ValueError) as err:
+            _LOGGER.debug("Could not fetch BirdNET-Go's species list: %s", err)
+            return None
+        species = payload.get("species") if isinstance(payload, dict) else None
+        if not isinstance(species, list):
+            return None
+        entries = [
+            {"scientific": item["scientificName"].strip(), "common": _text(item.get("commonName"))}
+            for item in species
+            if isinstance(item, dict) and isinstance(item.get("scientificName"), str) and item["scientificName"].strip()
+        ]
+        if not entries:
+            return None
+        updated = payload.get("lastUpdated")
+        return {"source": "BirdNET-Go range filter", "updatedAt": updated if isinstance(updated, str) else None, "species": entries}
+
     # --- diagnostics -------------------------------------------------------------------------
 
     async def async_diagnostics(self) -> dict[str, Any]:
@@ -718,6 +854,7 @@ class AudioPreviews:
             "waiting_for_service": len(self._pending),
             "backfill_days": self._backfill_days,
             "backfill": dataclasses.asdict(self._backfill),
+            "local_species": self._species_state,
         }
         if stats is not None:
             result["stats"] = stats

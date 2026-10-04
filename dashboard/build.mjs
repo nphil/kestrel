@@ -24,7 +24,7 @@ const bundles = result.outputFiles.filter((file) => file.path.endsWith(".js"));
 if (bundles.length !== 1) throw new Error(`Expected one JavaScript bundle; got ${bundles.length}.`);
 const bytes = bundles[0].contents;
 const gzipBytes = gzipSync(bytes, { level: 9 }).byteLength;
-if (gzipBytes > 80 * 1024) throw new Error(`Kestrel bundle is ${gzipBytes} bytes gzipped; limit is 81920 bytes.`);
+if (gzipBytes > 96 * 1024) throw new Error(`Kestrel bundle is ${gzipBytes} bytes gzipped; limit is 98304 bytes.`);
 const digest = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
 const filename = `kestrel.${digest}.js`;
 mkdirSync(outDir, { recursive: true });

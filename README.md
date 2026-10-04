@@ -24,8 +24,14 @@ for those.
   "Saving clip…" progress bar while the recorder finishes, then the clip plays.
   Tap an old notification later and it just plays.
 - **Wildlife** — your life list: every species seen or heard, best photo (or a
-  labelled reference photo), first/last seen, which cameras, what time of day,
-  new-this-year badges, and the recorded call for heard species.
+  labelled reference photo with its photographer and licence), first/last seen,
+  which cameras, what time of day, new-this-year badges, and the recorded call for
+  heard species.
+- **Play reference** — on any species (its sheet, and a heard visit) *Play reference*
+  plays what it actually sounds like, labelled *Reference · Xeno-canto* or
+  *Reference · iNaturalist* so it is never mistaken for one of your own recordings,
+  with who recorded it and under which licence. Birds get a *Song* and a *Call* when
+  the source has them.
 - **Corrections** — "Wrong?" on any visit: pick the right species (suggestions
   first), *Not an animal* or *Can't tell*. The visit is fixed everywhere at once,
   similar-looking animals at that camera are relabelled after a few corrections of
@@ -121,7 +127,28 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    (the same species was heard on the other camera moments earlier). Those calls
    are played from the clip by its name, always as the original recording, because
    the preview service is keyed by detection number.
-5. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
+   **Local species filter**: the panel's gear button (Settings) shows how many species
+   BirdNET-Go currently allows near you and lets a Home Assistant administrator choose
+   how strict that is (Loose 1%, Balanced 3%, Strict 5%, Very strict 10%). Kestrel
+   changes only BirdNET-Go's range-filter threshold and keeps its other settings;
+   BirdNET-Go then rebuilds its species list, which takes a few seconds.
+5. **Optional: reference sounds and photos** — nothing to set up: *Play reference* uses
+   recordings from [iNaturalist](https://www.inaturalist.org). For clearer, quality-rated
+   songs and calls, add a free [Xeno-canto](https://xeno-canto.org) API key (shown on
+   your account page there) under Settings → Devices & Services → Kestrel → Configure;
+   it is tried first and iNaturalist fills in what it lacks. A species is looked up
+   the first time you press the button and the answer is kept 45 days (7 days when
+   nothing was found). A recording is downloaded the first time it is played and kept
+   on the Home Assistant host (at most 64 MB in `.storage/kestrel_reference`, least
+   recently played removed first). (Cornell's Macaulay Library, which Merlin uses, is
+   not an option: its search is behind a bot check.)
+   **Reference photos** work the same way and need nothing either: a species without a
+   photo of your own gets BirdNET-Go's picture if it has one (birds), else iNaturalist's
+   default photo (mammals, frogs, insects), else the picture of its Wikipedia article.
+   The panel names the photographer and licence under the picture. Looked-up pictures
+   are kept 30 days (a week when no source has one) and downloaded on first view into
+   `.storage/kestrel_reference_photos` (at most 48 MB, least recently shown removed first).
+6. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first
    created; later changes to that visit (its clip finishing, a correction, a merge)
@@ -129,7 +156,11 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
 
 ## Privacy and footprint
 
-- Everything runs locally; nothing is sent to a cloud service.
+- Everything runs locally, with one exception: *Play reference* and the reference photos
+  ask iNaturalist, Wikipedia (and Xeno-canto, if you added a key) for a recording or
+  picture of a species **by name**, from the Home Assistant host. No picture, recording
+  or camera data is sent, the browser never contacts those sites, and your Xeno-canto
+  key goes only to Xeno-canto and is never written to a log or to diagnostics.
 - The plugin API requires a key; media reaches the browser only through Home
   Assistant with signed, expiring links.
 - Snapshots and crops are kept 30 days (except the best photo per species and
@@ -151,3 +182,11 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
   exported classifier inherits this.
 - Inter typeface (`tools/fonts`): SIL Open Font License.
 - BirdNET-Go and its models keep their own licences.
+- Reference recordings belong to their recordists (Xeno-canto: Creative Commons,
+  mostly BY-NC-SA; iNaturalist: the observer's licence, sometimes all rights
+  reserved). Kestrel names the recordist and links to the recording's page; it is for
+  personal, non-commercial listening.
+- Reference photos belong to their photographers (iNaturalist: the photographer's
+  licence, often all rights reserved; Wikipedia: the Wikimedia Commons licence, shown
+  with the picture). Kestrel names the photographer and links to the source; it is for
+  personal, non-commercial viewing.

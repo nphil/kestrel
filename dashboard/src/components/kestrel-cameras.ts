@@ -5,20 +5,25 @@ import {
 import { LitElement, html, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { keyed } from "lit/directives/keyed.js";
 import { repeat } from "lit/directives/repeat.js";
-import { api, asVisit, cameraArray, cameraPicture, extractLabels, isNotFound, routePath, routeView, speciesArray, speciesFromLocation, speciesPhoto, speciesPicture, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
+import { api, asVisit, cameraArray, cameraPicture, extractLabels, isNotFound, loadPhotoCredit, routePath, routeView, speciesArray, speciesFromLocation, speciesPhoto, speciesPicture, speciesRecord, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
 import { ago, clamp, dateTime, formatMiB, sentence, timestamp, when } from "../format.ts";
 import { RETRY_MS, isSigned, signatureRejected, signedLinkExpired } from "../recovery.ts";
 import { PANEL_CSS } from "../styles/panel.ts";
-import type { AudioInfo, Camera, CameraDetection, Health, HomeAssistant, KestrelCardConfig, KestrelPush, Settings, Species, Visit, VisitSuggestion } from "../types.ts";
+import type { AudioInfo, Camera, CameraDetection, Health, HomeAssistant, KestrelCardConfig, KestrelPush, PhotoCredit, Settings, Species, Visit, VisitSuggestion } from "../types.ts";
 import { heardHero } from "../ui/heard-hero.ts";
+import { photoCaption } from "../ui/photo-credit.ts";
 import { forgetStableUrls, keptLink, sameMedia } from "../urls.ts";
-import { GROUP_LABEL, KIND, asKind, evidenceCount, evidenceWord, recordingNotes } from "../vocab.ts";
+import { GROUP_LABEL, KIND, asKind, couldAlsoBe, evidenceCount, evidenceWord, percentSure, recordingNotes, tierWhyLine, tierWord, visitConfidence } from "../vocab.ts";
 import { filterCounts, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberedFilter, type SpeciesFilter } from "../wildlife.ts";
 import "../ui/live-picture.ts";
+import "./kestrel-alternatives.ts";
 import "./kestrel-live-player.ts";
+import "./kestrel-settings-sheet.ts";
 import { forgetSheetCache, forgetVisit } from "./kestrel-species-sheet.ts";
+import { forgetReferenceCache } from "./kestrel-reference-sound.ts";
 import type { KestrelLivePlayer } from "./kestrel-live-player.ts";
 import type { KestrelSpeciesSheet } from "./kestrel-species-sheet.ts";
+import type { KestrelSettingsSheet } from "./kestrel-settings-sheet.ts";
 
 /** Views that stay in the page once shown, hidden while away, so coming back costs a repaint, not a rebuild. */
 type CachedView = "live" | "wildlife" | "insights";
@@ -76,6 +81,8 @@ export class KestrelCameras extends LitElement {
     _progress: { state: true },
     _helpOpen: { state: true },
     _helpMounted: { state: true },
+    _settingsOpen: { state: true },
+    _settingsMounted: { state: true },
     _visitGone: { state: true },
     _callVisit: { state: true },
     _livePaused: { state: true },
@@ -85,6 +92,7 @@ export class KestrelCameras extends LitElement {
     _audioUrl: { state: true },
     _visitReferencePhoto: { state: true },
     _visitReferencePhotoFailed: { state: true },
+    _visitCredit: { state: true },
     _heardConfirmed: { state: true },
     _epoch: { state: true },
   };
@@ -116,6 +124,8 @@ export class KestrelCameras extends LitElement {
   declare _progress: number;
   declare _helpOpen: boolean;
   declare _helpMounted: boolean;
+  declare _settingsOpen: boolean;
+  declare _settingsMounted: boolean;
   /** The id of a visit the server no longer has (merged into another or removed), and the camera it was from. */
   declare _visitGone: { id: string; camera: { id: string; name: string } | null } | null;
   /** Live is out of sight and its streams have been stopped (after a short grace, so flipping tabs doesn't restart them). */
@@ -129,6 +139,7 @@ export class KestrelCameras extends LitElement {
   declare _audioUrl: string | null;
   declare _visitReferencePhoto: string | null;
   declare _visitReferencePhotoFailed: boolean;
+  declare _visitCredit: PhotoCredit | null;
   declare _heardConfirmed: boolean;
   /** Counts the times every signed link was thrown away; audio players start over with it. */
   declare _epoch: number;
@@ -193,6 +204,8 @@ export class KestrelCameras extends LitElement {
     this._progress = 0;
     this._helpOpen = false;
     this._helpMounted = false;
+    this._settingsOpen = false;
+    this._settingsMounted = false;
     this._visitGone = null;
     this._livePaused = false;
     this._callVisit = null;
@@ -202,6 +215,7 @@ export class KestrelCameras extends LitElement {
     this._audioUrl = null;
     this._visitReferencePhoto = null;
     this._visitReferencePhotoFailed = false;
+    this._visitCredit = null;
     this._heardConfirmed = false;
     this._epoch = 0;
     this.narrow = false;
@@ -213,7 +227,7 @@ export class KestrelCameras extends LitElement {
     this._hass = value;
     // Home Assistant hands over a new `hass` for every change in the house: the children that need it get it directly, and the
     // panel itself only renders again when something it draws changed (see `shouldUpdate`).
-    for (const child of this.renderRoot?.querySelectorAll<LuAppShell | KestrelLivePlayer | KestrelSpeciesSheet>("kestrel-lu-app-shell, kestrel-live-player, kestrel-species-sheet") ?? []) child.hass = value;
+    for (const child of this.renderRoot?.querySelectorAll<LuAppShell | KestrelLivePlayer | KestrelSpeciesSheet | KestrelSettingsSheet>("kestrel-lu-app-shell, kestrel-live-player, kestrel-species-sheet, kestrel-settings-sheet") ?? []) child.hass = value;
     this.requestUpdate("hass", previous);
     // The reconnect watch follows the connection; it is told when the connection object changes, because the panel may not render for this.
     if (value?.connection !== previous?.connection) this._link.hostUpdate();
@@ -660,10 +674,16 @@ export class KestrelCameras extends LitElement {
     this._audioUrl = visitAudio(visit);
     this._visitReferencePhoto = null;
     this._visitReferencePhotoFailed = false;
+    this._visitCredit = null;
     if (visit.kind === "heard" && !visitSnapshot(visit) && this._hass) {
       try {
         const detail = await api.speciesDetail(this._hass, visit.species);
-        if (this._isActive(generation) && id === this._visitId) this._visitReferencePhoto = speciesReferencePhoto(detail);
+        if (this._isActive(generation) && id === this._visitId) {
+          this._visitReferencePhoto = speciesReferencePhoto(detail);
+          const info = speciesRecord(detail).referenceImageInfoUrl;
+          // Who took it: asked in the background; shown only while this visit is still the one on screen.
+          if (this._visitReferencePhoto && typeof info === "string") void loadPhotoCredit(info).then((credit) => { if (id === this._visitId) this._visitCredit = credit; });
+        }
       } catch { /* fall back to the heard-only hero */ }
     }
     this._syncClipTimer();
@@ -732,6 +752,7 @@ export class KestrelCameras extends LitElement {
   private _forgetSignedState(): void {
     forgetStableUrls();
     forgetSheetCache();
+    forgetReferenceCache();
     this._visitSeeds.clear();
     this._failedReferenceImages = new Set();
     this._visitReferencePhotoFailed = false;
@@ -849,6 +870,9 @@ export class KestrelCameras extends LitElement {
 
   private _openHelp(): void { this._helpMounted = true; this._helpOpen = true; }
   private _onHelpClose = (): void => { this._helpOpen = false; };
+
+  private _openSettings(): void { this._settingsMounted = true; this._settingsOpen = true; }
+  private _onSettingsClose = (): void => { this._settingsOpen = false; };
 
   private async _correctVisit(species: string): Promise<void> {
     const current = this._visit;
@@ -1177,9 +1201,9 @@ export class KestrelCameras extends LitElement {
       <section class="review-section sheet">
         <div class="card-head"><div><h3>Needs a look</h3><p class="muted">Visits that may need a correction.</p></div><kestrel-lu-chip kind=${this._review.length ? "info" : "neutral"} label=${`${this._review.length} to review`}></kestrel-lu-chip></div>
         ${this._review.length
-          ? this._review.slice(0, 12).map((visit) => html`<kestrel-lu-row interactive chevron .heading=${visit.species || "Unidentified animal"} .detail=${`${visit.camera.name} · ${ago(visit.startedAt)}`} @pointerdown=${() => this._warmVisit(visit.id)} @click=${() => this._openVisit(visit.id)}>
+          ? this._review.slice(0, 12).map((visit) => { const why = tierWhyLine(visit); return html`<kestrel-lu-row interactive chevron .heading=${visit.species || "Unidentified animal"} .detail=${`${visit.camera.name} · ${ago(visit.startedAt)}`} @pointerdown=${() => this._warmVisit(visit.id)} @click=${() => this._openVisit(visit.id)}>
               <kestrel-lu-image slot="leading" class="review-thumb" ratio="1" .src=${visitSnapshot(visit) ?? ""} alt=""></kestrel-lu-image>
-            </kestrel-lu-row>`)
+            </kestrel-lu-row>${why ? html`<p class="review-why">${why}</p>` : nothing}`; })
           : html`<p class="empty-inline">Nothing needs a review right now.</p>`}
       </section>
       <kestrel-lu-grid kind="custom" .min=${240}>
@@ -1216,6 +1240,9 @@ export class KestrelCameras extends LitElement {
     const heard = visit.heard ?? null;
     const progress = pending ? this._progress : 0;
     const kind = asKind(visit.kind) ?? "seen";
+    const tier = tierWord(visit);
+    const why = tierWhyLine(visit);
+    const sure = visitConfidence(visit);
     return html`<article class="visit-view">
       <section class="visit-hero sheet">
         <div class="hero-media">
@@ -1226,7 +1253,7 @@ export class KestrelCameras extends LitElement {
               : visit.kind === "heard"
                 ? html`<kestrel-lu-image ratio="16/10" .src=${this._visitReferencePhoto ?? ""} alt=${`${visit.species} reference photo`} @lu-image-error=${() => this._onVisitReferenceImageError()}>${heardHero(KIND.heard.icon, "fallback")}</kestrel-lu-image>${this._visitReferencePhoto ? nothing : heardHero(KIND.heard.icon)}`
                 : html`<kestrel-lu-image ratio="16/10" .src=${""} alt=${visit.species || "Unidentified animal"}></kestrel-lu-image>`}
-          ${visit.kind === "heard" && !photo && this._visitReferencePhoto && !this._visitReferencePhotoFailed ? html`<kestrel-lu-chip class="snapshot-chip" overlay label="Reference photo"></kestrel-lu-chip>` : nothing}
+          ${visit.kind === "heard" && !photo && this._visitReferencePhoto && !this._visitReferencePhotoFailed ? html`<kestrel-lu-chip class="snapshot-chip" overlay label="Reference photo"></kestrel-lu-chip>${photoCaption(this._visitCredit)}` : nothing}
         </div>
         ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">The recording is still being finalized. This view updates when it's ready.</p></div>` : nothing}
         ${visit.clip?.state === "none" && visit.kind !== "heard" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
@@ -1234,8 +1261,9 @@ export class KestrelCameras extends LitElement {
         ${visit.clip?.state === "ready" && !clip ? html`<p class="media-note">The clip is ready, but its signed link isn't available yet.</p>` : nothing}
       </section>
       <div class="visit-summary">
-        <div class="visit-title-row"><div><h2>${visit.species || "Unidentified animal"}</h2><p class="muted">${visit.camera.name} · ${dateTime(visit.startedAt)}</p></div><span class="score" role="img" aria-label=${`${Math.round((visit.score ?? 0) * 100)} percent sure`}>${Math.round((visit.score ?? 0) * 100)}<small>%</small></span></div>
+        <div class="visit-title-row"><div><h2>${visit.species || "Unidentified animal"}</h2><p class="muted">${visit.camera.name} · ${dateTime(visit.startedAt)}</p>${tier && tier !== "Likely" && why ? html`<p class="muted tier-why">${why}</p>` : nothing}</div>${sure === undefined ? nothing : html`<span class="score" role="img" aria-label=${`${Math.round(sure * 100)} percent sure`}>${Math.round(sure * 100)}<small>%</small></span>`}</div>
         <div class="visit-tags">
+          ${tier ? html`<kestrel-lu-chip kind=${tier === "Likely" ? "positive" : tier === "Possible" ? "neutral" : "warning"} label=${tier}></kestrel-lu-chip>` : nothing}
           <kestrel-lu-chip icon=${KIND[kind].icon} label=${evidenceWord(visit)}></kestrel-lu-chip>
           <kestrel-lu-chip label=${GROUP_LABEL[visit.grp] ?? GROUP_LABEL.unknown}></kestrel-lu-chip>
           <kestrel-lu-chip kind=${confirmed ? "positive" : "neutral"} label=${this._statusLabel(visit.status)}></kestrel-lu-chip>
@@ -1245,9 +1273,10 @@ export class KestrelCameras extends LitElement {
           <kestrel-lu-button kind="primary" icon="mdi:check" label=${confirmed ? "Confirmed" : "That's right"} ?disabled=${confirmed || this._saving} @click=${() => this._confirmVisit()}></kestrel-lu-button>
           <kestrel-lu-button kind="secondary" label="Wrong?" ?disabled=${this._saving} @click=${this._openWrongPicker}></kestrel-lu-button>
         </div>
-        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording was kept for this visit.</span>`}</section>` : nothing}
+        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording was kept for this visit.</span>`}${this._renderReference(visit.species, visit.status)}${this._renderAlternatives(visit)}</section>` : nothing}
         ${heard ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Also heard: ${heard.species}</strong><span class="muted">Sound recorded near this visit</span></div><kestrel-lu-button kind="secondary" icon="mdi:check" label="Also heard" ?disabled=${this._saving || this._heardConfirmed} @click=${() => this._confirmVisit(visit.id, true)}></kestrel-lu-button>
           ${this._audioUrl ? this._renderRecording(this._audioUrl, this._callVisit ?? heard, `Call recording of ${heard.species}`) : html`<kestrel-lu-button kind="quiet" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} label=${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"} @click=${() => this._loadCallAudio(heard.visitId)}></kestrel-lu-button>`}
+          ${this._renderReference(heard.species)}
         </section>` : nothing}
       </div>
     </article>`;
@@ -1268,6 +1297,23 @@ export class KestrelCameras extends LitElement {
     const notes = recordingNotes(source?.audioInfo);
     return keyed(this._epoch, html`<kestrel-lu-audio-player .src=${src} .original=${original && !sameMedia(original, src) ? original : ""} .mark=${notes.mark} .caption=${notes.caption} label=${label} preload="metadata"></kestrel-lu-audio-player>`);
   }
+
+  /** "Play reference" for a species named on this page: what it sounds like, from a public sound library, under the recording of it. Not for a visit
+   * marked "not an animal" or unsure: there is no species to play. */
+  private _renderReference(species: string, status: Visit["status"] = "auto") {
+    if (!species || status === "not_animal" || status === "unknown") return nothing;
+    return html`<kestrel-reference-sound compact .hass=${this._hass} .species=${species}></kestrel-reference-sound>`;
+  }
+
+  /** "Could also be" for a heard visit: the species a second listen to the recording hears more strongly than the detector's, each with its "Play reference"
+   * button. Choosing one corrects the visit exactly as the "What was it?" picker does. Nothing when the recording has no such list. */
+  private _renderAlternatives(visit: Visit) {
+    const items = couldAlsoBe(visit);
+    if (!items.length) return nothing;
+    return html`<kestrel-alternatives .hass=${this._hass} .alternatives=${items} ?disabled=${this._saving} @pick=${this._onPickAlternative}></kestrel-alternatives>`;
+  }
+
+  private _onPickAlternative = (event: Event): void => { void this._correctVisit((event as CustomEvent<{ species: string }>).detail.species); };
 
   private _statusLabel(status: Visit["status"]): string {
     const labels: Record<Visit["status"], string> = { auto: "Model guess", learned: "Learned", corrected: "Corrected", confirmed: "Confirmed", not_animal: "Not an animal", unknown: "Not sure" };
@@ -1295,8 +1341,16 @@ export class KestrelCameras extends LitElement {
 
   private _renderPickerBody(visit: Visit) {
     const reasonLabels: Record<VisitSuggestion["why"], string> = { usual: "Common here", model: "Model's 2nd guess", heard: "Heard here" };
+    const query = this._search.trim().toLowerCase();
+    // A heard visit's "Could also be" species come first, with their reference buttons; while typing they are ordinary rows, so a search still finds them.
+    const alternatives = couldAlsoBe(visit);
+    const showAlternatives = !query && alternatives.length > 0;
     const seen = new Set<string>(visit.species ? [visit.species] : []);
     const rows: { name: string; reason?: string }[] = [];
+    for (const alternative of alternatives) {
+      seen.add(alternative.species);
+      if (!showAlternatives) rows.push({ name: alternative.species, reason: `${percentSure(alternative.score)} sure` });
+    }
     for (const suggestion of Array.isArray(visit.suggestions) ? visit.suggestions : []) {
       if (!suggestion.species || seen.has(suggestion.species)) continue;
       seen.add(suggestion.species);
@@ -1312,9 +1366,9 @@ export class KestrelCameras extends LitElement {
       seen.add(name);
       rows.push({ name });
     }
-    const query = this._search.trim().toLowerCase();
     const candidates = (query ? rows.filter((row) => row.name.toLowerCase().includes(query)) : rows).slice(0, 16);
     return html`<input class="species-search" type="search" autofocus placeholder="Search species" aria-label="Search species" .value=${this._search} @input=${(event: Event) => { this._search = (event.currentTarget as HTMLInputElement).value; }}>
+      ${showAlternatives ? html`<kestrel-alternatives .hass=${this._hass} .alternatives=${alternatives} ?disabled=${this._saving} @pick=${this._onPickAlternative}></kestrel-alternatives>` : nothing}
       ${candidates.map((row) => html`<kestrel-lu-row interactive chevron .heading=${row.name} .detail=${row.reason ?? ""} @click=${() => this._correctVisit(row.name)}></kestrel-lu-row>`)}
       ${candidates.length === 0 ? html`<kestrel-lu-state kind="empty" compact message="No matching species."></kestrel-lu-state>` : nothing}`;
   }
@@ -1325,6 +1379,11 @@ export class KestrelCameras extends LitElement {
     return html`<kestrel-lu-sheet .open=${this._helpOpen} .history=${this._isPanel} engine="native" layer="help" heading="Keyboard shortcuts" subheading="Single keys work anywhere in Kestrel." @lu-close=${this._onHelpClose}>
       ${rows.map(([key, label]) => html`<kestrel-lu-row .heading=${label}><kbd slot="trailing">${key}</kbd></kestrel-lu-row>`)}
     </kestrel-lu-sheet>`;
+  }
+
+  private _renderSettingsSheet() {
+    if (!this._settingsMounted) return nothing;
+    return html`<kestrel-settings-sheet .hass=${this._hass} .open=${this._settingsOpen} .history=${this._isPanel} @close=${this._onSettingsClose}></kestrel-settings-sheet>`;
   }
 
   // ---- drawing: the frame --------------------------------------------------------------------------------------------------------
@@ -1350,7 +1409,7 @@ export class KestrelCameras extends LitElement {
 
   private _renderBody() {
     return html`${this._error ? html`<kestrel-lu-state class="error-banner" kind="error" compact heading="Couldn't load this view" .message=${this._error} @lu-retry=${() => this._loadForView()}></kestrel-lu-state>` : nothing}
-      ${this._renderViews()}${this._renderSpeciesSheet()}${this._renderPickerSheet()}${this._renderHelpSheet()}`;
+      ${this._renderViews()}${this._renderSpeciesSheet()}${this._renderPickerSheet()}${this._renderHelpSheet()}${this._renderSettingsSheet()}`;
   }
 
   private _renderConnection() {
@@ -1368,6 +1427,7 @@ export class KestrelCameras extends LitElement {
     return html`
       ${this._view === "live" ? html`<kestrel-lu-button slot="actions" kind="quiet" icon="mdi:open-in-new" ?icon-only=${compact} label="Open in Scrypted" href=${SCRYPTED_URL} target="_blank"></kestrel-lu-button>` : nothing}
       <kestrel-lu-button slot="actions" class="shortcuts" kind="quiet" icon-only icon="mdi:keyboard-outline" label="Keyboard shortcuts" title="Keyboard shortcuts" @click=${() => this._openHelp()}></kestrel-lu-button>
+      ${this._view === "visit" ? nothing : html`<kestrel-lu-button slot="actions" kind="quiet" icon-only icon="mdi:cog-outline" label="Settings" title="Settings" @click=${() => this._openSettings()}></kestrel-lu-button>`}
       ${menu ? html`<kestrel-lu-button slot="actions" kind="quiet" icon-only icon="mdi:menu" label=${this._hass?.localize?.("ui.sidebar.sidebar_toggle") || "Show sidebar"} @click=${() => toggleHaMenu(this)}></kestrel-lu-button>` : nothing}`;
   }
 

@@ -158,3 +158,56 @@ working, and it's what every run in this report actually used. Full detail is in
   every run finished — all `--rm`, all gone).
 - The raw ambient recordings captured from your cameras for this test (60-second clips from
   Front Door and Back Door) have been deleted from this machine.
+
+## Follow-up: run BirdNET+ V3.0 *next to* Perch, and how to combine them
+
+**Short answer: yes, run V3.0 alongside Perch for a trial period, but let V3.0 make the call
+and use Perch only as a second opinion. Do not average or merge the two scores — merging
+gave no better answers than V3.0 alone.** (`audio-eval/fuse_models.py`, same 483 clips,
+same scoring as `score_results.py`; its first step re-checks that it reproduces that script's
+single-model numbers, and it does.)
+
+| Setup (all 483 clips) | Right #1 guess: loud / medium / faint / all | At 0.50: right when it speaks / found | At 0.70: right when it speaks / found | Background false alarms |
+|---|---|---|---|---|
+| Perch v2 alone | 59.0 / 49.7 / 32.3 / 47.0 % | 67.4 / 24.0 % | 72.5 / 16.4 % | 0 / 25 |
+| **V3.0 alone** | **65.2 / 57.1 / 44.7 / 55.7 %** | **75.0 / 38.5 %** | **75.0 / 24.8 %** | 0 / 25 |
+| Average of both | 65.8 / 56.5 / 44.1 / 55.5 % | 72.1 / 29.4 % | 76.6 / 17.6 % | 0 / 25 |
+| Higher of the two ("max") | 64.6 / 55.9 / 44.7 / 55.1 % | 73.3 / 41.0 % | 73.8 / 28.0 % | 0 / 25 |
+| Either one ≥ 0.50 (Perch first, else V3.0) | 64.0 / 55.9 / 44.7 / 54.9 % | 73.0 / 40.8 % | 76.8 / 24.0 % | 0 / 25 |
+| "Agree-boost" (raise score when both name the same bird) | 64.6 / 55.9 / 44.7 / 55.1 % | 72.1 / 43.9 % | 72.7 / 34.2 % | 0 / 25 |
+
+"Found" = right answers ÷ all 483 clips (a silent or wrong clip counts as a miss).
+
+What the table says, in plain terms:
+
+- **V3.0 alone beats Perch alone at every loudness level** and at both thresholds. Perch
+  gets a clip right that V3.0 gets wrong in only 16 of 483 clips (V3.0 wins the other way in 58),
+  so there is little for Perch to add.
+- **Every merge rule lands on the same trade-off as just lowering V3.0's own threshold.**
+  Agree-boost at 0.50 (72.1% right when it speaks, 43.9% found) is almost exactly V3.0 alone at
+  0.40 (72.2%, 43.1%). Averaging is worse than V3.0 alone. So there is no merge worth the extra
+  moving part.
+- **Disagreement flag:** when the two models name different birds and at least one is ≥ 0.50,
+  that is **37 of 483 clips (7.7%)** — 17 loud, 12 medium, 8 faint — and 0 of the 25
+  background-only clips. In 28 of those 37, one of the two was right, so a human glance would
+  fix most of them. A stricter flag (both ≥ 0.50 and *different*) fires on only **13 clips
+  (2.7%)** but misses the 8 faint ones and the one-model-silent cases. Leaving the 37 flagged
+  clips out lifts precision just ~3 points (73.3% → 76.4%).
+- **Agreement is not proof.** When V3.0 ≥ 0.50 and Perch also names the same bird, it's right
+  73% of the time (137 clips); when Perch is silent it's right 82.7% (98 clips). Most of the
+  "agreed but wrong" cases (27 of 37) come from 6 of the 25 ambient clips — most likely a real
+  Carolina Wren / Cardinal in the camera audio itself that both models picked up (I did not
+  listen to confirm). So a "both agree" badge is not a reliable confidence boost on this test;
+  don't build one into scoring.
+
+**What to do:** add V3.0 as a second model in BirdNET-Go (it supports several), keep Perch,
+and treat V3.0 as the main detection at 0.50. Show Perch's answer only as "other model
+disagrees → review" (the 7.7% flag above). Run both for a few weeks, compare against what
+actually visits, then decide whether to retire Perch. It costs about 16–20 extra CPU-seconds
+per audio minute on top of Perch's 10.
+
+**Limits of this test:** the 483 clips are 161 recordings mixed at three loudness levels (so
+really ~161 independent samples), 25 background-only clips is a small false-alarm test, V3.0 is
+still a preview, and BirdNET-Go may report each model's detections separately — I did not
+verify how it surfaces two models at once, so any merge/flag would have to happen in
+Kestrel's own code. Full numbers: `audio-eval/data/results/fusion-summary.json`.

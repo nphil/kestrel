@@ -1,9 +1,9 @@
-"""Authenticated streaming media proxy for Kestrel plugin files, BirdNET-Go audio and bird-call previews."""
+"""Authenticated streaming media proxy for Kestrel plugin files, BirdNET-Go audio, bird-call previews and reference sounds and photos."""
 
 from __future__ import annotations
 
+import json
 import logging
-from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -96,24 +96,43 @@ class KestrelMediaView(HomeAssistantView):
             )
 
         if kind in ("species_ref", "species_ref_info"):
-            # Static reference photo/attribution from BirdNET-Go's image cache
-            # (wikimedia/avicommons), keyed by scientific name -- long cache, these
-            # never change once fetched.
-            name = quote(media_id, safe="")
-            url = (
-                f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/image/{name}"
-                if kind == "species_ref"
-                else f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/species-image/info?name={name}"
-            )
+            # A species' picture when Kestrel has none of its own, or who took it (reference_photos.py): BirdNET-Go's image cache,
+            # else iNaturalist's default photo, else the Wikipedia page image. The link names the species. A picture the sources
+            # simply do not have is decoration that is not there, "no content" rather than an error: a browser's image element
+            # treats a 204 as "no picture" without logging a failed request.
+            nothing = web.Response(status=204, headers={"Cache-Control": "private, max-age=300"})
+            photos = self._hass.data.get(DOMAIN, {}).get("reference_photos")
+            if photos is None:
+                return nothing
+            if kind == "species_ref_info":
+                info = await photos.async_info(media_id)
+                if info is None:
+                    return nothing
+                return web.Response(text=json.dumps(info), headers={"Content-Type": "application/json", "Cache-Control": "private, max-age=3600"})
+            picture = await photos.async_image(media_id)
+            if picture is None:
+                return nothing
+            if picture.path is not None:  # a photo kept here: Range, ETag and 304 are the file response's
+                return web.FileResponse(picture.path, headers={"Content-Type": picture.content_type, "Cache-Control": "public, max-age=2592000"})
             return await self._stream(
                 request,
                 async_get_clientsession(self._hass),
-                url,
+                picture.stream,
                 headers,
                 aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
                 cache_control="public, max-age=2592000",
                 optional=True,
             )
+
+        if kind == "species_sound":
+            # A reference recording of a species (Xeno-canto / iNaturalist), kept on disk by reference_sounds.py and served from there
+            # (Range, ETag and 304 included). Only a clip id the service issued names a file; anything else is not found.
+            sounds = self._hass.data.get(DOMAIN, {}).get("reference_sounds")
+            found = await sounds.async_audio(media_id) if sounds is not None else None
+            if found is None:
+                return web.Response(status=404, text="Media not found")
+            path, content_type = found
+            return web.FileResponse(path, headers={"Content-Type": content_type, "Cache-Control": "private, max-age=2592000"})
 
         coordinator: KestrelCoordinator | None = self._hass.data.get(DOMAIN, {}).get("coordinator")
         if coordinator is None:

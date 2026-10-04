@@ -15,7 +15,7 @@ from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from . import birdnet_availability
+from . import birdnet_availability, range_filter
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS, SIGNAL_EVENTS
 from .coordinator import KestrelCoordinator
@@ -98,18 +98,12 @@ def _sign_media_paths(
                 hass, "species", species + ".jpg", refresh_token_id
             )
         elif has_photo is False and isinstance(species, str) and species:
-            scientific_name = (
-                hass.data.get(DOMAIN, {})
-                .get("birdnet_species_map", {})
-                .get(species.strip().lower())
-            )
-            if scientific_name and birdnet_availability.image_available_now(hass, scientific_name) is not False:
-                result["referenceImage"] = _signed_media_url(
-                    hass, "species_ref", scientific_name, refresh_token_id
-                )
-                result["referenceImageInfoUrl"] = _signed_media_url(
-                    hass, "species_ref_info", scientific_name, refresh_token_id
-                )
+            # Kestrel has no photo of its own: offer the reference picture (BirdNET-Go's, else iNaturalist's, else Wikipedia's;
+            # reference_photos.py picks when the picture is asked for) unless every source is known to have none.
+            photos = hass.data.get(DOMAIN, {}).get("reference_photos")
+            if photos is not None and photos.offer(species):
+                result["referenceImage"] = _signed_media_url(hass, "species_ref", species, refresh_token_id)
+                result["referenceImageInfoUrl"] = _signed_media_url(hass, "species_ref_info", species, refresh_token_id)
         audio = result.get("audio")
         if isinstance(audio, dict):
             original = _signed_recording_url(hass, audio, refresh_token_id)
@@ -298,6 +292,35 @@ async def ws_species_detail(
     )
 
 
+@websocket_api.websocket_command(
+    {vol.Required("type"): "kestrel/species/reference", vol.Required("species"): vol.All(str, vol.Length(min=1, max=100))}
+)
+@websocket_api.async_response
+async def ws_species_reference(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """A reference recording of a species ("Play reference"): who made it, where it comes from, and a signed link to it.
+
+    Looked up the first time it is asked for, then remembered (reference_sounds.py). `state` is "ready", "none" (no
+    recording exists) or "unavailable" (a source could not be asked just now; ask again later).
+    """
+    sounds = hass.data.get(DOMAIN, {}).get("reference_sounds")
+    if sounds is None:
+        connection.send_error(msg["id"], "not_ready", "Reference sounds are not set up")
+        return
+    try:
+        result = await sounds.async_lookup(msg["species"])
+        result["clips"] = [
+            {**clip, "url": _signed_media_url(hass, "species_sound", clip["id"], connection.refresh_token_id)}
+            for clip in result["clips"]
+        ]
+    except Exception:
+        _LOGGER.exception("Kestrel reference sound lookup failed")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], result)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "kestrel/labels"})
 @websocket_api.async_response
 async def ws_labels(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
@@ -335,6 +358,50 @@ async def ws_settings_set(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
     await _async_api_call(hass, connection, msg, "PUT", "settings", body=msg["settings"])
+
+
+@websocket_api.websocket_command({vol.Required("type"): "kestrel/range_filter/get"})
+@websocket_api.async_response
+async def ws_range_filter_get(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """BirdNET-Go's local species filter: strictness, species allowed, location. Anyone signed in may look."""
+    try:
+        state = await range_filter.async_read(hass)
+    except KestrelApiError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Kestrel could not read the BirdNET-Go species filter")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], {**state, "canChange": bool(connection.user.is_admin)})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "kestrel/range_filter/set", vol.Required("threshold"): vol.Any(int, float)}
+)
+@websocket_api.async_response
+async def ws_range_filter_set(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Change the species filter's strictness. Administrators only: it changes what BirdNET-Go reports."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Only a Home Assistant administrator can change this")
+        return
+    try:
+        state = await range_filter.async_set_threshold(hass, msg["threshold"])
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_format", str(err))
+        return
+    except KestrelApiError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Kestrel could not change the BirdNET-Go species filter")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], {**state, "canChange": True})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "kestrel/subscribe"})
@@ -381,10 +448,13 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         ws_review,
         ws_species,
         ws_species_detail,
+        ws_species_reference,
         ws_labels,
         ws_health,
         ws_settings_get,
         ws_settings_set,
+        ws_range_filter_get,
+        ws_range_filter_set,
         ws_subscribe,
     ):
         websocket_api.async_register_command(hass, handler)

@@ -12,12 +12,14 @@ import unittest
 
 import voluptuous as vol
 
-from ha_stubs import FakeResponse, FakeSession, HomeAssistant, SESSION, config_flow_module
+from ha_stubs import FakeResponse, FakeSession, HomeAssistant, SESSION, config_flow_module, reference_module
 
 import aiohttp  # the stub installed by ha_stubs
 
 URL = "http://audio.test:8787"
 KEY = "test-audio-key-0123456789"
+XC = reference_module.XC_API
+XC_KEY = "xc-test-key-0123456789"
 
 
 class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -36,7 +38,8 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await self.flow().async_step_init({"poll_timeout": 25})
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(
-            result["data"], {"poll_timeout": 25, "audio_url": "", "audio_key": "", "audio_backfill_days": 30}
+            result["data"],
+            {"poll_timeout": 25, "audio_url": "", "audio_key": "", "audio_backfill_days": 30, "xeno_canto_key": ""},
         )
         self.assertEqual(self.session.calls, [])
 
@@ -46,7 +49,8 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(
-            result["data"], {"poll_timeout": 10, "audio_url": URL, "audio_key": KEY, "audio_backfill_days": 7}
+            result["data"],
+            {"poll_timeout": 10, "audio_url": URL, "audio_key": KEY, "audio_backfill_days": 7, "xeno_canto_key": ""},
         )
         [stats] = self.session.calls_to("GET", f"{URL}/v1/stats")
         self.assertEqual(stats["headers"], {"X-Kestrel-Audio-Key": KEY})
@@ -109,6 +113,43 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         for bad in (0, 99):
             with self.assertRaises(vol.Invalid):
                 schema({"poll_timeout": bad})
+
+    async def test_a_xeno_canto_key_is_saved_tidied_and_checked_with_xeno_canto(self) -> None:
+        self.session.route("GET", XC, FakeResponse(200, {"numRecordings": "1", "recordings": []}))
+        result = await self.flow().async_step_init({"poll_timeout": 25, "xeno_canto_key": f"  {XC_KEY} "})
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"]["xeno_canto_key"], XC_KEY)
+        [check] = self.session.calls_to("GET", XC)
+        self.assertEqual(check["params"]["key"], XC_KEY)
+        self.assertEqual(self.session.calls_to("GET", f"{URL}/healthz"), [], "the audio service was not involved")
+
+    async def test_a_key_xeno_canto_refuses_or_cannot_check_is_reported_on_its_own_field(self) -> None:
+        for answer, error in (
+            (FakeResponse(401, {"error": "client_error"}), "xeno_canto_invalid_key"),
+            (FakeResponse(403), "xeno_canto_invalid_key"),
+            (FakeResponse(500), "xeno_canto_cannot_connect"),
+            (aiohttp.ClientError("offline"), "xeno_canto_cannot_connect"),
+        ):
+            self.session.route("GET", XC, answer)
+            result = await self.flow().async_step_init({"poll_timeout": 25, "xeno_canto_key": XC_KEY})
+            self.assertEqual(result["type"], "form", error)
+            self.assertEqual(result["errors"], {"xeno_canto_key": error})
+            suggested = {marker.schema: marker.description for marker in result["data_schema"].schema}
+            self.assertEqual(suggested["xeno_canto_key"], {"suggested_value": XC_KEY}, "what was typed stays in the form")
+
+    async def test_a_bad_audio_service_and_a_bad_key_are_both_reported(self) -> None:
+        self.session.route("GET", f"{URL}/v1/stats", FakeResponse(401, {"error": "unauthorized"}))
+        self.session.route("GET", XC, FakeResponse(401, {"error": "client_error"}))
+        result = await self.flow().async_step_init(
+            {"poll_timeout": 25, "audio_url": URL, "audio_key": KEY, "xeno_canto_key": XC_KEY}
+        )
+        self.assertEqual(result["errors"], {"base": "audio_invalid_auth", "xeno_canto_key": "xeno_canto_invalid_key"})
+
+    async def test_the_saved_xeno_canto_key_is_offered_again_and_the_field_is_optional(self) -> None:
+        form = await self.flow({"poll_timeout": 7, "xeno_canto_key": XC_KEY}).async_step_init()
+        markers = {marker.schema: marker for marker in form["data_schema"].schema}
+        self.assertEqual(markers["xeno_canto_key"].description, {"suggested_value": XC_KEY})
+        self.assertEqual(form["data_schema"]({"poll_timeout": 25}).get("xeno_canto_key"), None)
 
 
 if __name__ == "__main__":

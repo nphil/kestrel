@@ -162,4 +162,8 @@ def _event_attributes(visit: dict[str, Any], camera_name: str) -> dict[str, Any]
         "kind": visit.get("kind", "seen"),
         "notify": bool(visit.get("notify", False)),
         "first_ever": bool(visit.get("firstEver", visit.get("first_ever", False))),
+        # How sure Kestrel is about a heard call ("likely", "possible" or "check"; None for a camera visit or an older call)
+        # and the wildlife classifier's confidence in a camera visit's label: an automation can hold back what is not sure.
+        "tier": visit.get("tier"),
+        "label_score": visit.get("labelScore"),
     }

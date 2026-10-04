@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { KestrelStore } from '../src/store.ts';
+import { DatabaseSync } from 'node:sqlite';
 
 function makeVisit(id, species, score, startedAt, cameraId = '88') {
     return {
@@ -229,42 +230,181 @@ test('regroupHeardVisits reclassifies known non-bird species, drops insects unle
     }
 });
 
-test('usualSpeciesAtCamera ranks by count within the window, excludes the given species and non-identifications, and stays per-camera', async () => {
+test('usualSpeciesAtCamera suggests only birds a person confirmed (or corrected a visit to) at this camera, most often first', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'kestrel-usual-test-'));
     const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
     try {
         const now = Date.parse('2026-09-28T12:00:00Z');
-        const windowMs = 30 * 24 * 60 * 60 * 1000;
+        const windowMs = 90 * 24 * 60 * 60 * 1000;
         const within = (daysAgo) => now - daysAgo * 24 * 60 * 60 * 1000;
         let n = 0;
-        const seen = (species, daysAgo, camera = '88') => store.saveVisit(makeVisit(`v${n++}`, species, 0.8, within(daysAgo), camera));
-        const heard = (species, daysAgo, camera = '88') => store.saveVisit(makeHeardVisit(`h${n++}`, species, within(daysAgo), camera));
+        const visit = (species, daysAgo, status = 'confirmed', camera = '88') => store.saveVisit({ ...makeHeardVisit(`h${n++}`, species, within(daysAgo), camera), status });
+        const seen = (species, daysAgo, status = 'confirmed') => store.saveVisit({ ...makeVisit(`s${n++}`, species, 0.8, within(daysAgo)), status });
 
-        // Robin: 3 sightings (seen+heard mixed) -- should rank first.
-        seen('American Robin', 1); heard('American Robin', 2); seen('American Robin', 5);
-        // Jay: 2 sightings -- second place.
-        seen('Blue Jay', 3); heard('Blue Jay', 10);
-        // Wren and Crow: 1 sighting each -- tied for third, alphabetical tiebreak (Crow before Wren).
-        seen('Carolina Wren', 15);
-        seen('American Crow', 20);
-        // Excluded: not_animal/unknown status, and the literal "Unidentified animal" species, even
-        // though they would otherwise be frequent enough to rank.
-        const notAnimal = makeVisit('excl-1', 'Squirrel', 0.9, within(1), '88'); notAnimal.status = 'not_animal';
-        store.saveVisit(notAnimal);
-        const unknownStatus = makeVisit('excl-2', 'Fox', 0.9, within(1), '88'); unknownStatus.status = 'unknown';
-        store.saveVisit(unknownStatus);
-        seen('Unidentified animal', 1);
-        // Outside the 30-day window -- must not count.
-        seen('Great Horned Owl', 45);
-        // A different camera entirely -- must not leak in.
-        seen('Northern Cardinal', 1, '103');
+        // Robin: 3 verified visits (a sighting and two calls) -- ranks first, but it is the visit's own species.
+        seen('American Robin', 1); visit('American Robin', 2, 'corrected'); visit('American Robin', 5);
+        // Jay: 2. Wren and Crow: 1 each, tied, so alphabetical (Crow before Wren).
+        visit('Blue Jay', 3); seen('Blue Jay', 10);
+        visit('Carolina Wren', 15);
+        visit('American Crow', 20);
+        // What a model said and nobody checked is never a suggestion, however often it said it.
+        for (let i = 0; i < 6; i++) visit('Great Horned Owl', 1 + i, 'auto');
+        // Not an animal / can't tell are not birds, and the placeholder is not a species.
+        visit('Squirrel', 1, 'not_animal'); visit('Fox', 1, 'unknown'); visit('Unidentified animal', 1, 'confirmed');
+        // Outside the window, and another camera, do not count.
+        visit('Wood Thrush', 100);
+        visit('Northern Cardinal', 1, 'confirmed', '103');
 
-        const usual = store.usualSpeciesAtCamera('88', 'American Robin', now - windowMs, 5);
-        assert.deepEqual(usual, ['Blue Jay', 'American Crow', 'Carolina Wren'],
-            'own species excluded; ranked by count then alphabetically; window/status/other-camera exclusions applied');
+        assert.deepEqual(store.usualSpeciesAtCamera('88', 'American Robin', now - windowMs, 5), ['Blue Jay', 'American Crow', 'Carolina Wren']);
+        assert.deepEqual(store.usualSpeciesAtCamera('88', 'zzz-nonexistent', now - windowMs, 2), ['American Robin', 'Blue Jay'], 'the limit is respected');
+        assert.deepEqual(store.usualSpeciesAtCamera('103', 'zzz-nonexistent', now - windowMs, 5), ['Northern Cardinal'], 'and it stays per camera');
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});
 
-        const limited = store.usualSpeciesAtCamera('88', 'zzz-nonexistent', now - windowMs, 2);
-        assert.deepEqual(limited, ['American Robin', 'Blue Jay'], 'limit is respected');
+function ratedHeardVisit(id, species, startedAt, tier, status = 'auto') {
+    return { ...makeHeardVisit(id, species, startedAt), tier, status, firstEver: false };
+}
+
+test('a heard call that is only Possible or Check does not count toward the species list or "first ever" until a person confirms or corrects it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-counts-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        const now = Date.now();
+        store.saveVisit(ratedHeardVisit('likely', 'Blue Jay', now - 3_000, 'likely'));
+        store.saveVisit(ratedHeardVisit('possible', 'Tufted Titmouse', now - 2_000, 'possible'));
+        store.saveVisit(ratedHeardVisit('check', 'Dunlin', now - 1_000, 'check'), { review: true });
+        store.saveVisit(makeHeardVisit('unrated', 'Carolina Wren', now - 4_000));
+
+        assert.equal(store.hasSpecies('Blue Jay'), true);
+        assert.equal(store.hasSpecies('Carolina Wren'), true, 'a visit from before the confidence layer counts as it always did');
+        assert.equal(store.hasSpecies('Tufted Titmouse'), false);
+        assert.equal(store.hasSpecies('Dunlin'), false);
+        assert.deepEqual(store.speciesList().map(item => item.species).sort(), ['Blue Jay', 'Carolina Wren']);
+        assert.equal(store.latestCountedVisit('88').id, 'likely', 'a newer Possible or Check call is not the camera\'s latest sighting');
+        assert.deepEqual(store.listReview().map(visit => visit.id), ['check'], 'a Check call is in the review queue');
+        assert.deepEqual(store.listVisits({ kind: 'heard' }).items.map(visit => visit.id).sort(), ['check', 'likely', 'possible', 'unrated'], 'but every call is still listed');
+
+        store.recomputeFirstEverForSpecies('Blue Jay');
+        store.recomputeFirstEverForSpecies('Dunlin');
+        assert.equal(store.getVisit('likely').firstEver, true);
+        assert.equal(store.getVisit('check').firstEver, false, 'a call that does not count is never the first visit');
+        assert.equal(store.getVisit('likely').notify, true);
+        assert.equal(store.getVisit('possible').notify, false);
+
+        // A person confirms the Dunlin: now it counts, and it holds the first-ever flag.
+        store.saveVisit({ ...store.getVisit('check'), status: 'confirmed' }, { review: false });
+        store.recomputeFirstEverForSpecies('Dunlin');
+        assert.equal(store.hasSpecies('Dunlin'), true);
+        assert.equal(store.getVisit('check').firstEver, true);
+        assert.equal(store.getVisit('check').notify, true);
+        // ...and correcting the Possible call to a bird counts that bird.
+        store.saveVisit({ ...store.getVisit('possible'), species: 'Hairy Woodpecker', status: 'corrected' });
+        assert.equal(store.hasSpecies('Hairy Woodpecker'), true);
+        assert.equal(store.hasSpecies('Tufted Titmouse'), false);
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('a fresh start (purge) only remembers species whose heard visits counted', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-purge-tier-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        store.saveVisit(ratedHeardVisit('likely', 'Blue Jay', 1_000, 'likely'));
+        store.saveVisit(ratedHeardVisit('possible', 'Tufted Titmouse', 2_000, 'possible'));
+        store.saveVisit(ratedHeardVisit('confirmed-check', 'Dunlin', 3_000, 'check', 'confirmed'));
+        const result = store.purgeHeardBefore(10_000, true);
+        assert.equal(result.removed, 3);
+        assert.equal(store.hasSpecies('Blue Jay'), true);
+        assert.equal(store.hasSpecies('Dunlin'), true, 'a confirmed call is remembered');
+        assert.equal(store.hasSpecies('Tufted Titmouse'), false, 'a Possible call never made its species known');
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('a database from before the confidence layer opens, gains the tier column and heard_calls, and its visits keep counting', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-migrate-test-'));
+    const path = join(directory, 'kestrel.sqlite');
+    try {
+        const old = new DatabaseSync(path);
+        // visits exactly as it was before birdnet_detection_id, birdnet_clip and tier existed.
+        old.exec(`CREATE TABLE visits (
+            id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, camera_name TEXT NOT NULL, kind TEXT NOT NULL, started_at INTEGER NOT NULL,
+            species TEXT NOT NULL, grp TEXT NOT NULL, status TEXT NOT NULL, score REAL, detection_label TEXT, snapshot_file TEXT, crop_file TEXT,
+            clip_file TEXT, audio_file TEXT, clip_state TEXT NOT NULL DEFAULT 'pending', clip_expected_ready_at INTEGER,
+            review_flag INTEGER NOT NULL DEFAULT 0, first_ever INTEGER NOT NULL DEFAULT 0, muted INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL,
+            last_change_at INTEGER, undo_data TEXT, last_correction_id INTEGER, updated_at INTEGER NOT NULL)`);
+        const visit = makeHeardVisit('old-heard', 'Blue Jay', Date.now() - 60_000);
+        old.prepare(`INSERT INTO visits(id,camera_id,camera_name,kind,started_at,species,grp,status,score,clip_state,review_flag,first_ever,muted,data,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('old-heard', '88', 'Backyard Camera', 'heard', visit.startedAt, 'Blue Jay', 'bird', 'auto', 0.8, 'none', 0, 1, 0, JSON.stringify(visit), Date.now());
+        old.close();
+
+        for (let opening = 0; opening < 2; opening++) {
+            const store = new KestrelStore(path);
+            try {
+                const columns = store.db.prepare('PRAGMA table_info(visits)').all().map(column => column.name);
+                assert.ok(columns.includes('tier'), `the tier column exists (opening ${opening + 1})`);
+                assert.ok(columns.includes('birdnet_detection_id'));
+                assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM heard_calls').get().n, 0, 'the heard_calls table exists');
+                const decoded = store.getVisit('old-heard');
+                assert.equal(decoded.tier, undefined, 'an older visit is not rated');
+                assert.equal(decoded.firstEver, true);
+                assert.equal(store.hasSpecies('Blue Jay'), true);
+                assert.deepEqual(store.speciesList().map(item => item.species), ['Blue Jay']);
+                store.saveVisit({ ...decoded, tier: 'possible' });
+                assert.equal(store.getVisit('old-heard').tier, 'possible', 'and the new column is written and read back');
+                store.saveVisit({ ...store.getVisit('old-heard'), tier: undefined });
+            } finally {
+                store.close();
+            }
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('heard calls: a repeat delivery is kept once, repeats are counted per microphone and species, the main model is the best one heard lately, and old calls are pruned', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-calls-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        const day = 24 * 60 * 60 * 1000;
+        const now = Date.parse('2026-10-03T13:00:00Z');
+        const call = (species, at, extra = {}) => ({
+            cameraId: '88', at, receivedAt: at + 15_000, species, scientific: null, grp: 'bird', score: 0.8, occurrence: 0.4,
+            model: 'perch_v2', modelRank: 2, modelLabel: 'Perch v2', detectionId: 1, clip: null, ...extra,
+        });
+        const first = store.recordHeardCall(call('Blue Jay', now));
+        assert.equal(typeof first, 'number');
+        assert.equal(store.recordHeardCall(call('Blue Jay', now)), undefined, 'the same message delivered twice');
+        const sameSecondOtherModel = store.recordHeardCall(call('Blue Jay', now, { model: 'birdnet_v3', modelRank: 3, modelLabel: 'BirdNET v3.0' }));
+        assert.equal(typeof sameSecondOtherModel, 'number', 'a different model hearing it in the same second is its own call');
+        const earlier = store.recordHeardCall(call('Blue Jay', now - 2 * 60_000));
+        store.recordHeardCall(call('Blue Jay', now - 2 * 60_000, { cameraId: '103' }));
+        store.recordHeardCall(call('American Crow', now - 2 * 60_000));
+        store.recordHeardCall(call('Blue Jay', now - 6 * 60_000));
+        assert.equal(store.countHeardCalls('88', 'Blue Jay', now - 5 * 60_000, now, first), 1, 'the call 2 minutes ago; not the other model\'s call of the same second, the 6-minute-old call, another microphone, another bird or itself');
+        assert.equal(store.getHeardCall(earlier).visitId, null);
+        store.attachHeardCall(earlier, 'v1');
+        assert.equal(store.getHeardCall(earlier).visitId, 'v1');
+        assert.deepEqual(store.heardCallsNear('88', now - 3 * 60_000, now - 1 * 60_000).map(item => item.species).sort(), ['American Crow', 'Blue Jay']);
+
+        store.noteModelSeen('perch_v2', 2, now - 2 * day);
+        store.noteModelSeen('birdnet_v3', 3, now - 3 * 60 * 60_000);
+        assert.equal(store.primaryModelRank(now - day), 3, 'v3.0 spoke in the last day');
+        assert.equal(store.primaryModelRank(now - 60_000), 0, 'nobody has spoken in the last minute');
+        store.noteModelSeen('birdnet_v3', 3, now - 5 * day);
+        assert.equal(store.primaryModelRank(now - day), 3, 'a message that arrives out of order never moves a model\'s last time back');
+
+        store.recordHeardCall(call('Old Call', now - 40 * day));
+        await store.prune(now, join(directory, 'media'), 1_000_000);
+        assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM heard_calls WHERE species='Old Call'").get().n, 0, 'calls older than a month are pruned');
+        assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM heard_calls WHERE species='Blue Jay'").get().n > 0, true);
     } finally {
         store.close();
         await rm(directory, { recursive: true, force: true });

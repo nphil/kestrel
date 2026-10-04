@@ -49,7 +49,7 @@ def call(visit_id: str, detection_id: int, *, species: str = "Carolina Wren", ag
     }
 
 
-def info_json(state: str, detection_id: int, *, cleaned: bool = False, method: str = "trim") -> dict:
+def info_json(state: str, detection_id: int, *, cleaned: bool = False, method: str = "trim", **extra: object) -> dict:
     ready = state == "ready"
     return {
         "detectionId": detection_id, "state": state,
@@ -58,7 +58,24 @@ def info_json(state: str, detection_id: int, *, cleaned: bool = False, method: s
         "scores": None, "loudnessLufs": -16.0 if ready else None, "durationS": 5.5 if ready else None,
         "createdAt": "2026-10-01T22:00:00Z", "readyAt": None, "queuePosition": None if ready else 1,
         "error": "boom" if state == "failed" else None,
+        **extra,
     }
+
+
+ALTERNATIVES = [
+    {"species": "Barred Owl", "scientific": "Strix varia", "score": 0.4213, "raw": 0.2, "windowsHigh": 3, "window": {"start": 1.0, "end": 6.0}},
+    {"species": "Great Horned Owl", "scientific": "Bubo virginianus", "score": 0.2, "raw": 0.1, "windowsHigh": 1, "window": {"start": 4.5, "end": 9.5}},
+]
+ANNOUNCED = {"species": "Carolina Wren", "scientific": "Thryothorus ludovicianus", "score": 0.1021, "raw": 0.05, "windowsHigh": 2,
+             "window": {"start": 2.0, "end": 7.0}, "rank": 4}
+BIRDNET_LIST = {
+    "species": [
+        {"label": "Strix varia_Barred Owl", "scientificName": "Strix varia", "commonName": "Barred Owl"},
+        {"label": "Cyanocitta cristata_Blue Jay", "scientificName": "Cyanocitta cristata", "commonName": "Blue Jay"},
+        {"label": "_Nameless", "scientificName": "  ", "commonName": "Nameless"},
+    ],
+    "count": 3, "lastUpdated": "2026-10-03T21:30:39.895374856-04:00", "threshold": 0.03, "genera": ["Strix", "Cyanocitta"],
+}
 
 
 async def settle() -> None:
@@ -603,6 +620,160 @@ class ReliabilityTests(AudioTestCase):
         await self.previews._track_once()
         polled = {int(url.split("/")[-2]) for method, url, _ in self.session.calls if url.endswith("/info")}
         self.assertEqual(polled, set(range(100, 112)))
+
+
+class PerchViewTests(AudioTestCase):
+    """What Perch makes of the whole clip (the service's `alternatives`, `announced` and `scores`) reaches the dashboard unchanged in meaning."""
+
+    async def ready_payload(self, **extra: object) -> dict:
+        self.info_route(360, FakeResponse(200, info_json("ready", 360, **extra)))
+        visit = call("h1", 360)
+        await self.previews.async_prefetch(visit)
+        return self.sign(visit)["audioInfo"]
+
+    async def test_alternatives_the_announced_species_and_scores_are_passed_on(self) -> None:
+        info = await self.ready_payload(scores={"original": 0.31, "preview": 0.33}, alternatives=ALTERNATIVES, announced=ANNOUNCED)
+        self.assertEqual(info["scores"], {"original": 0.31, "preview": 0.33})
+        self.assertEqual(
+            info["alternatives"],
+            [
+                {"species": "Barred Owl", "scientific": "Strix varia", "score": 0.4213, "windowsHigh": 3, "window": {"start": 1.0, "end": 6.0}},
+                {"species": "Great Horned Owl", "scientific": "Bubo virginianus", "score": 0.2, "windowsHigh": 1, "window": {"start": 4.5, "end": 9.5}},
+            ],
+        )
+        self.assertEqual(
+            info["announced"],
+            {"species": "Carolina Wren", "scientific": "Thryothorus ludovicianus", "score": 0.1021, "windowsHigh": 2,
+             "window": {"start": 2.0, "end": 7.0}, "rank": 4},
+        )
+        self.assertEqual((info["state"], info["method"]), ("ready", "trim"))
+
+    async def test_a_heard_call_of_a_seen_visit_carries_them_too(self) -> None:
+        self.info_route(360, FakeResponse(200, info_json("ready", 360, alternatives=ALTERNATIVES)))
+        seen_visit = {"id": "s1", "kind": "seen", "heard": {
+            "visitId": "h1", "species": "Carolina Wren", "hasAudio": True, "birdnetDetectionId": 360, "birdnetClip": "clip.wav"}}
+        await self.previews.async_prefetch(seen_visit)
+        heard = self.sign(seen_visit)["heard"]["audioInfo"]
+        self.assertEqual([a["species"] for a in heard["alternatives"]], ["Barred Owl", "Great Horned Owl"])
+
+    async def test_a_clip_perch_found_nothing_else_in_says_so_and_one_it_never_looked_at_says_nothing(self) -> None:
+        looked = await self.ready_payload(alternatives=[])
+        self.assertEqual(looked["alternatives"], [])
+        self.previews._cache.clear()
+        older = await self.ready_payload()  # a service (or a job) from before alternatives existed
+        self.assertNotIn("alternatives", older)
+        self.assertNotIn("announced", older)
+        self.assertNotIn("scores", older)
+
+    async def test_pending_and_failed_calls_carry_none_of_it(self) -> None:
+        for state in ("pending", "failed"):
+            self.previews._cache.clear()
+            self.info_route(360, FakeResponse(200, info_json(state, 360, alternatives=ALTERNATIVES, announced=ANNOUNCED, scores={"original": 0.3})))
+            visit = call("h1", 360)
+            await self.previews.async_prefetch(visit)
+            self.assertEqual(self.sign(visit)["audioInfo"], {"state": state, "segment": None, "cleaned": False, "method": None}, state)
+
+    async def test_whatever_is_malformed_in_the_answer_is_dropped_instead_of_passed_on(self) -> None:
+        bad = [
+            {"species": "", "score": 0.5}, {"species": "Over", "score": 1.5}, {"species": "Words", "score": "high"}, {"species": "Flag", "score": True},
+            {"score": 0.4}, "Bird", None, 7,
+            {"species": " Good Bird ", "score": 0.3, "windowsHigh": -1, "window": {"start": "a", "end": 3}},
+        ]
+        info = await self.ready_payload(alternatives=bad, scores={"original": "x", "preview": 0.4}, announced={"species": "Wren", "score": 2})
+        self.assertEqual(info["alternatives"], [{"species": "Good Bird", "scientific": None, "score": 0.3, "windowsHigh": None, "window": None}])
+        self.assertEqual(info["scores"], {"original": None, "preview": 0.4})
+        self.assertNotIn("announced", info)
+        self.previews._cache.clear()
+        for junk in ("x", {"a": 1}, 3):
+            self.assertNotIn("alternatives", await self.ready_payload(alternatives=junk, scores=junk, announced=junk))
+            self.previews._cache.clear()
+
+    async def test_a_payload_never_carries_more_than_five_alternatives(self) -> None:
+        many = [{"species": f"Bird {i}", "score": 0.9 - i / 100} for i in range(9)]
+        info = await self.ready_payload(alternatives=many)
+        self.assertEqual([a["species"] for a in info["alternatives"]], [f"Bird {i}" for i in range(5)])
+
+
+class SpeciesListTests(AudioTestCase):
+    """The service measures Perch against the species BirdNET-Go lets through here; Home Assistant keeps it told."""
+
+    def serve_list(self, *responses: object) -> None:
+        self.session.route("GET", f"{BIRDNET}/api/v2/range/species/list", *(responses or (FakeResponse(200, BIRDNET_LIST),)))
+
+    def take_list(self, *responses: object) -> None:
+        answer = FakeResponse(200, {"count": 2, "matched": 2, "changed": True, "custom": True})
+        self.session.route("PUT", f"{URL}/v1/local-species", *(responses or (answer,)))
+
+    def puts(self) -> list[dict]:
+        return self.session.calls_to("PUT", f"{URL}/v1/local-species")
+
+    async def test_birdnet_gos_list_goes_to_the_service_as_names_only(self) -> None:
+        self.serve_list()
+        self.take_list()
+        await self.previews._send_species()
+        (put,) = self.puts()
+        self.assertEqual(
+            json.loads(put["data"]),
+            {"source": "BirdNET-Go range filter", "updatedAt": "2026-10-03T21:30:39.895374856-04:00",
+             "species": [{"scientific": "Strix varia", "common": "Barred Owl"}, {"scientific": "Cyanocitta cristata", "common": "Blue Jay"}]},
+        )
+        self.assertEqual(put["headers"], {"X-Kestrel-Audio-Key": KEY, "Content-Type": "application/json"})
+        self.assertEqual((await self.previews.async_diagnostics())["local_species"], {"count": 2, "matched": 2, "changed": True})
+
+    async def test_an_unchanged_list_is_sent_once_a_changed_one_is_sent_again(self) -> None:
+        self.take_list()
+        self.serve_list()
+        await self.previews._send_species()
+        await self.previews._send_species()
+        self.assertEqual(len(self.puts()), 1)
+        self.serve_list(FakeResponse(200, {**BIRDNET_LIST, "lastUpdated": "2026-10-04T08:00:00-04:00"}))
+        await self.previews._send_species()
+        self.assertEqual(len(self.puts()), 2)
+
+    async def test_a_service_that_was_away_gets_the_list_again(self) -> None:
+        self.take_list()
+        self.serve_list()
+        await self.previews._send_species()
+        with self.assertLogs("kestrel_pkg.audio", level="WARNING"):
+            self.previews._mark_unreachable("test")  # it may come back with an empty data folder
+        await self.previews._send_species()
+        self.assertEqual(len(self.puts()), 2)
+
+    async def test_birdnet_go_being_down_or_confused_sends_nothing(self) -> None:
+        for answer in (
+            aiohttp.ClientError("refused"), FakeResponse(503), FakeResponse(200, {"species": []}), FakeResponse(200, body=b"not json"),
+            FakeResponse(200, {"species": "x"}), FakeResponse(200, ["x"]),
+        ):
+            self.serve_list(answer)
+            await self.previews._send_species()
+        self.assertEqual(self.puts(), [])
+
+    async def test_a_service_without_the_call_is_left_alone(self) -> None:
+        self.serve_list()  # the fake service answers 404 to the PUT, as a service from before the species list does
+        await self.previews._send_species()
+        diagnostics = await self.previews.async_diagnostics()
+        self.assertIsNone(diagnostics["local_species"])
+        self.assertIs(diagnostics["reachable"], True)
+
+    async def test_the_service_being_down_is_an_error_for_the_loop_to_retry_not_a_crash(self) -> None:
+        self.serve_list()
+        self.take_list(aiohttp.ClientError("connection refused"))
+        with self.assertLogs("kestrel_pkg.audio", level="WARNING"), self.assertRaises(audio_module.AudioServiceError):
+            await self.previews._send_species()
+        self.take_list()
+        await self.previews._send_species()
+        self.assertEqual(len(self.puts()), 2)
+
+    async def test_the_loop_sends_the_list_soon_after_start_and_stops_with_the_integration(self) -> None:
+        self.serve_list()
+        self.take_list()
+        with mock.patch.object(audio_module, "_SPECIES_START_DELAY", 0), mock.patch.object(audio_module, "_SPECIES_INTERVAL", 3600):
+            self.previews.async_start()
+            await settle()
+            await settle()
+        self.assertEqual(len(self.puts()), 1)
+        await self.previews.async_stop()
+        self.assertEqual(self.previews._tasks, set())
 
 
 class DiagnosticsTests(AudioTestCase):

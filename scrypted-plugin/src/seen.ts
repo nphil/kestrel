@@ -24,6 +24,8 @@ export type MergeStatus = 'auto' | 'learned' | 'corrected' | 'confirmed' | 'not_
 export interface ExistingSeen {
     species: string;
     score: number | null;
+    // The wildlife classifier's confidence in the label (0-1), when it is known.
+    labelScore?: number | null;
     startedAt: number;
     status: MergeStatus;
     suggestions: Suggestion[];
@@ -32,6 +34,7 @@ export interface ExistingSeen {
 export interface IncomingSeen {
     species: string;
     score: number | null;
+    labelScore?: number | null;
     startedAt: number;
     status: 'auto' | 'learned';
     detectionLabel: string;
@@ -47,6 +50,7 @@ export interface SeenMergePlan {
     speciesChanged: boolean;
     species: string;
     score: number | null;
+    labelScore: number | null;
     status: MergeStatus;
     // The earliest detection of the merged group.
     startedAt: number;
@@ -91,14 +95,17 @@ export function planSeenMerge(existing: ExistingSeen, incoming: IncomingSeen): S
     const keep: SeenMergePlan = {
         changed: startedAt !== existing.startedAt,
         incomingWins: false, replaceMedia: false, speciesChanged: false,
-        species: existing.species, score: existing.score, status: existing.status, startedAt,
+        species: existing.species, score: existing.score, labelScore: existing.labelScore ?? null, status: existing.status, startedAt,
         detectionLabel: null, suggestions: base,
     };
     if (USER_DECIDED.has(existing.status))
         return { ...keep, changed: false, startedAt: existing.startedAt, suggestions: existing.suggestions };
 
-    const incomingScore = rank(incoming.score);
-    const existingScore = rank(existing.score);
+    // Two detections are compared by the classifier's confidence in its label when both have one, and by the camera's
+    // box score otherwise: they measure different things and are never mixed.
+    const labelled = typeof existing.labelScore === 'number' && typeof incoming.labelScore === 'number';
+    const incomingScore = rank((labelled ? incoming.labelScore : incoming.score) ?? null);
+    const existingScore = rank((labelled ? existing.labelScore : existing.score) ?? null);
     const higher = incomingScore > existingScore;
     const tieEarlier = incomingScore === existingScore && incoming.startedAt < existing.startedAt;
     const incomingLabeled = incoming.species !== UNIDENTIFIED_ANIMAL;
@@ -106,7 +113,9 @@ export function planSeenMerge(existing: ExistingSeen, incoming: IncomingSeen): S
 
     // Same species (or two unidentified): nothing to relabel; a better score upgrades the photo.
     if (incoming.species === existing.species || (!incomingLabeled && !existingLabeled)) {
-        if (higher) return { ...keep, changed: true, incomingWins: true, replaceMedia: true, score: incoming.score };
+        if (higher) return { ...keep, changed: true, incomingWins: true, replaceMedia: true, score: incoming.score, labelScore: incoming.labelScore ?? null };
+        // A label score the visit lacks (the classifier could not be asked before) is kept when it arrives.
+        if (incomingLabeled && existing.labelScore == null && incoming.labelScore != null) return { ...keep, changed: true, labelScore: incoming.labelScore };
         return keep;
     }
     // An unidentified detection has no label to contribute to a labelled visit.
@@ -116,7 +125,7 @@ export function planSeenMerge(existing: ExistingSeen, incoming: IncomingSeen): S
     if (incomingWins) {
         return {
             changed: true, incomingWins: true, replaceMedia: true, speciesChanged: true,
-            species: incoming.species, score: incoming.score, status: incoming.status, startedAt,
+            species: incoming.species, score: incoming.score, labelScore: incoming.labelScore ?? null, status: incoming.status, startedAt,
             detectionLabel: incoming.detectionLabel,
             suggestions: addModelSuggestion(base.filter(item => item.species !== incoming.species), existing.species, incoming.species),
         };
@@ -241,6 +250,7 @@ export function mergeSeenDetection(ports: SeenMergePorts, target: Visit, incomin
         grp: plan.speciesChanged ? ports.groupFor(plan.species) : target.grp,
         status: plan.status,
         score: plan.score,
+        labelScore: plan.labelScore,
         startedAt: plan.startedAt,
         suggestions: plan.suggestions,
         usual: plan.speciesChanged ? ports.usualSuggestions(target.camera.id, plan.species) : [],

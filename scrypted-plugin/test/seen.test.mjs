@@ -61,16 +61,16 @@ function newCommitter(store, { usual = () => [] } = {}) {
     return {
         tracker,
         events,
-        commit({ species, score, startedAt, camera, grp = 'mammal' }) {
+        commit({ species, score, startedAt, camera, grp = 'mammal', labelScore = null }) {
             const decision = decideSeenCommit(store, tracker, COOLDOWN_MS, { cameraId: camera.id, startedAt, species });
             if (decision.action === 'skip') return { action: 'skip' };
             if (decision.action === 'merge') {
-                const merged = mergeSeenDetection(ports, decision.target, { species, score, startedAt, status: 'auto', detectionLabel: species });
+                const merged = mergeSeenDetection(ports, decision.target, { species, score, labelScore, startedAt, status: 'auto', detectionLabel: species });
                 if (merged.changed) events.push(['visit_updated', merged.visit.id]);
                 return { action: 'merge', changed: merged.changed, replaceMedia: merged.plan.replaceMedia, visit: store.getVisit(decision.target.id) };
             }
             const id = `visit-${++created}`;
-            const visit = seenVisit(id, species, score, startedAt, { camera, grp, firstEver: !store.hasSpecies(species) });
+            const visit = seenVisit(id, species, score, startedAt, { camera, grp, labelScore, firstEver: !store.hasSpecies(species) });
             store.saveVisit(visit, { detectionLabel: species, snapshotFile: `/m/snap/${id}.jpg`, cropFile: `/m/crop/${id}.jpg` });
             store.considerSpeciesBest(visit, `/m/snap/${id}.jpg`, `/m/crop/${id}.jpg`);
             tracker.remember(camera.id, id, startedAt);
@@ -502,5 +502,52 @@ test('species rows carry seen/heard counts, last times and last cameras alongsid
         assert.equal(wren.lastSeenCamera, null);
         assert.equal(wren.lastHeardAt, now - 10 * 60 * 1000);
         assert.equal(wren.lastHeardCamera, '106');
+    });
+});
+
+// --- The classifier's own confidence (labelScore) ranks detections, not the camera's box score --------
+// Real numbers: the saved crop of the Backyard raccoon (box score 0.92) is 99% a raccoon to the classifier; the
+// Back Door flying squirrel (box score 0.76) is 64%; a false alarm (box score 0.86) gets no label at all.
+
+test('two detections are ranked by the classifier\'s confidence when both have one, so a higher box score does not win a doubtful label', () => {
+    const doubtfulSquirrel = { species: 'Southern Flying Squirrel', score: 0.9, labelScore: 0.64, startedAt: T1, status: 'auto', detectionLabel: 'Southern Flying Squirrel' };
+    const keeps = planSeenMerge(existing('Common Raccoon', 0.84, T0, { labelScore: 0.995 }), doubtfulSquirrel);
+    assert.equal(keeps.species, 'Common Raccoon');
+    assert.equal(keeps.labelScore, 0.995);
+    assert.equal(keeps.score, 0.84);
+    const takesOver = planSeenMerge(existing('Southern Flying Squirrel', 0.9, T0, { labelScore: 0.64 }),
+        { species: 'Common Raccoon', score: 0.84, labelScore: 0.995, startedAt: T1, status: 'auto', detectionLabel: 'Common Raccoon' });
+    assert.equal(takesOver.species, 'Common Raccoon');
+    assert.equal(takesOver.speciesChanged, true);
+    assert.equal(takesOver.score, 0.84);
+    assert.equal(takesOver.labelScore, 0.995, 'the visit\'s label score follows the detection that won');
+    assert.equal(takesOver.replaceMedia, true);
+});
+
+test('label scores and box scores are never mixed: a detection without a label score is compared by box score', () => {
+    const older = existing('Common Raccoon', 0.7, T0);
+    const withLabel = planSeenMerge(older, { species: 'Common Raccoon', score: 0.6, labelScore: 0.99, startedAt: T1, status: 'auto', detectionLabel: 'Common Raccoon' });
+    assert.equal(withLabel.replaceMedia, false, 'the newcomer\'s box score is lower, so its photo does not replace the visit\'s');
+    assert.equal(withLabel.score, 0.7);
+    assert.equal(withLabel.labelScore, 0.99, 'but the label score the visit lacked is kept');
+    assert.equal(withLabel.changed, true);
+    const noLabelAgain = planSeenMerge(existing('Common Raccoon', 0.7, T0, { labelScore: 0.9 }), incoming('Common Raccoon', 0.95, T1));
+    assert.equal(noLabelAgain.replaceMedia, true, 'only the newcomer has no label score, so the box scores decide');
+    assert.equal(noLabelAgain.labelScore, null, 'and the label score belonged to the old photo, which is gone');
+});
+
+test('the label score is stored with the visit and follows the winning detection through a merge', async () => {
+    await withStore(store => {
+        const committer = newCommitter(store);
+        const first = committer.commit({ ...detection('Southern Flying Squirrel', 0.9, T0), labelScore: 0.64 });
+        assert.equal(first.visit.labelScore, 0.64);
+        assert.equal(first.visit.score, 0.9, 'the box score is kept too');
+        const second = committer.commit({ ...detection('Common Raccoon', 0.84, T1), labelScore: 0.995 });
+        assert.equal(second.action, 'merge');
+        assert.equal(second.visit.species, 'Common Raccoon');
+        assert.equal(second.visit.labelScore, 0.995);
+        assert.equal(second.visit.score, 0.84);
+        assert.equal(store.getVisit(first.visit.id).labelScore, 0.995, 'persisted');
+        assert.deepEqual(second.visit.suggestions.filter(item => item.why === 'model'), [{ species: 'Southern Flying Squirrel', why: 'model' }]);
     });
 });

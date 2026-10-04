@@ -107,6 +107,9 @@ class HomeAssistant:
         while self._tasks:
             await asyncio.wait(list(self._tasks))
 
+    async def async_add_executor_job(self, target: object, *args: object) -> object:
+        return target(*args)  # run in place: the tests need no thread
+
 
 class _FakeContent:
     def __init__(self, data: bytes, hang: bool = False) -> None:
@@ -134,7 +137,11 @@ class FakeResponse:
         self.status = status
         self.headers = dict(headers or {})
         data = json.dumps(json_data).encode() if json_data is not None else body
+        self._data = data
         self.content = _FakeContent(data, hang)
+
+    async def json(self, content_type: str | None = None) -> object:
+        return json.loads(self._data)
 
     async def __aenter__(self) -> "FakeResponse":
         return self
@@ -198,6 +205,14 @@ class FakeStreamResponse(FakeWebResponse):
 
     async def write_eof(self) -> None:
         pass
+
+
+class FakeFileResponse(FakeWebResponse):
+    """aiohttp.web.FileResponse: remembers which file it would send (the real one adds Range, ETag and 304 itself)."""
+
+    def __init__(self, path: object, *, headers: dict | None = None) -> None:
+        super().__init__(status=200, headers=headers)
+        self.path = path
 
 
 class KestrelApiError(Exception):
@@ -264,6 +279,15 @@ class _TextSelector:
         return value
 
 
+def _redact(data: object, to_redact: set) -> object:
+    """Home Assistant's async_redact_data: values under the named keys are replaced, at any depth."""
+    if isinstance(data, dict):
+        return {key: "**REDACTED**" if key in to_redact else _redact(value, to_redact) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_redact(item, to_redact) for item in data]
+    return data
+
+
 def _install_stubs() -> None:
     _module("homeassistant")
     _module("homeassistant.core", HomeAssistant=HomeAssistant, callback=lambda fn: fn)
@@ -310,9 +334,10 @@ def _install_stubs() -> None:
         async_dispatcher_connect=async_dispatcher_connect,
         async_dispatcher_send=async_dispatcher_send,
     )
+    _module("homeassistant.helpers.redact", async_redact_data=_redact)
     _module("homeassistant.util")
     _module("homeassistant.util.dt", utcnow=lambda: datetime.now(timezone.utc))
-    web = _module("aiohttp.web", Response=FakeWebResponse, StreamResponse=FakeStreamResponse, Request=object)
+    web = _module("aiohttp.web", Response=FakeWebResponse, StreamResponse=FakeStreamResponse, FileResponse=FakeFileResponse, Request=object)
     _module(
         "aiohttp",
         ClientError=type("ClientError", (Exception,), {}),
@@ -340,6 +365,9 @@ const_module = importlib.import_module("kestrel_pkg.const")
 audio_module = importlib.import_module("kestrel_pkg.audio")
 media_module = importlib.import_module("kestrel_pkg.media")
 config_flow_module = importlib.import_module("kestrel_pkg.config_flow")
+reference_module = importlib.import_module("kestrel_pkg.reference_sounds")
+reference_photos_module = importlib.import_module("kestrel_pkg.reference_photos")
+diagnostics_module = importlib.import_module("kestrel_pkg.diagnostics")
 
 FRONT = {"id": "55", "name": "Front Door Camera"}
 BACK = {"id": "88", "name": "Backyard Camera"}

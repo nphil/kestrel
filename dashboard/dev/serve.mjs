@@ -6,7 +6,8 @@
 //   /dev/**                         files of dashboard/dev (build the harness first: node dev/build.mjs), never cached
 //   /api/kestrel/media/<kind>/<id>  stands in for the integration's signed media route: needs `?authSig=` and refuses any other
 //                                   query parameter except width/height (like Home Assistant's signed links), then answers with
-//                                   fixtures/placeholder.svg, fixtures/call.mp3 (audio, audio-original) or fixtures/clip.mp4 (clip).
+//                                   fixtures/placeholder.svg, fixtures/call.mp3 (audio, audio-original, species_sound: a reference recording) or fixtures/clip.mp4 (clip).
+//                                   `reference-info/<species slug>` is JSON, not a file: who took a reference photo (see PHOTO_INFO: two credits, 204, 500).
 //                                   It cannot know the harness's signing epoch: a test's request interceptor does (dev/smoke/lib).
 //   anything else without a file extension (/kestrel/live, /lovelace/0 ...)  dev/index.html, the single-page fallback.
 import { createServer } from "node:http";
@@ -17,8 +18,15 @@ import { fileURLToPath } from "node:url";
 const devDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(devDir, "..");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".map": "application/json", ".json": "application/json", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".webmanifest": "application/manifest+json" };
-const MEDIA_FILE = { clip: "clip.mp4", audio: "call.mp3", "audio-original": "call.mp3" };
+const MEDIA_FILE = { clip: "clip.mp4", audio: "call.mp3", "audio-original": "call.mp3", species_sound: "call.mp3" };
 const ALLOWED_PARAMS = new Set(["authSig", "width", "height"]);
+/** `reference-info/<slug>`: the credit for a species' reference photo as the integration answers it. A number is a bare status (204: nothing known, 500: a failing server); a slug not listed is 204. */
+const PHOTO_INFO = {
+  "common-raccoon": { source: "iNaturalist", credit: "Jane Birder", licence: "CC BY-NC", page: "https://www.inaturalist.org/photos/123" },
+  "blue-jay": { source: "Wikipedia", credit: "", licence: "CC BY-SA 4.0", page: "https://en.wikipedia.org/wiki/Blue_jay" },
+  "house-finch": 204,
+  "tufted-titmouse": 500,
+};
 const HEADERS = { "Cache-Control": "no-store" };
 
 /** Sends `file` with Range support (Chromium will not play a video or seek audio without it). */
@@ -53,10 +61,15 @@ function handle(request, response) {
   let path;
   try { path = decodeURIComponent(url.pathname); } catch { return deny(response, 400, "bad path"); }
 
-  const media = /^\/api\/kestrel\/media\/([^/]+)\/[^/]+$/.exec(path);
+  const media = /^\/api\/kestrel\/media\/([^/]+)\/([^/]+)$/.exec(path);
   if (media) {
     const params = [...url.searchParams.keys()];
     if (!url.searchParams.get("authSig") || params.some((name) => !ALLOWED_PARAMS.has(name))) return deny(response, 401, "Unauthorized");
+    if (media[1] === "reference-info") {
+      const info = PHOTO_INFO[media[2]] ?? 204;
+      if (typeof info === "number") return response.writeHead(info, HEADERS).end();
+      return response.writeHead(200, { ...HEADERS, "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(info));
+    }
     return sendFile(request, response, join(devDir, "fixtures", MEDIA_FILE[media[1]] ?? "placeholder.svg"));
   }
   if (path.startsWith("/api/")) return deny(response, 404, "not found");

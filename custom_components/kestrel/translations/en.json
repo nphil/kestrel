@@ -22,19 +22,22 @@
     "step": {
       "init": {
         "title": "Kestrel settings",
-        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting. To get loud, clean bird-call previews, add the Kestrel audio service address and key; leave both empty to play BirdNET-Go's original recordings. Past calls from the last few days are sent to the service gradually; set the backfill to 0 to send only new calls.",
+        "description": "Choose how long Home Assistant waits for new plugin events before reconnecting. To get loud, clean bird-call previews, add the Kestrel audio service address and key; leave both empty to play BirdNET-Go's original recordings. Past calls from the last few days are sent to the service gradually; set the backfill to 0 to send only new calls. \"Play reference\" plays iNaturalist recordings; to use Xeno-canto's quality-rated songs and calls first, add your free Xeno-canto API key (on your account page at xeno-canto.org).",
         "data": {
           "poll_timeout": "Event wait (seconds)",
           "audio_url": "Audio service address",
           "audio_key": "Audio service key",
-          "audio_backfill_days": "Backfill past calls (days)"
+          "audio_backfill_days": "Backfill past calls (days)",
+          "xeno_canto_key": "Xeno-canto API key (optional)"
         }
       }
     },
     "error": {
       "audio_incomplete": "Enter both the audio service address (starting with http:// or https://) and its key, or leave both empty.",
       "audio_cannot_connect": "Could not reach the Kestrel audio service. Check the address and that the service is running.",
-      "audio_invalid_auth": "The audio service key was not accepted."
+      "audio_invalid_auth": "The audio service key was not accepted.",
+      "xeno_canto_invalid_key": "Xeno-canto did not accept this API key. Copy it again from your account page at xeno-canto.org.",
+      "xeno_canto_cannot_connect": "Could not reach xeno-canto.org to check the key. Try again in a moment, or leave the field empty."
     }
   },
   "entity": {

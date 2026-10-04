@@ -7,13 +7,10 @@ provider; a low-confidence detection's clip can simply never get written
 (checked live: 28 of 664 heard visits). Signing a media URL from knowledge
 alone means the browser 404s on a normal Wildlife page load.
 
-This checks real availability once per item and caches the verdict --
-positive and negative, with independently tunable TTLs per kind.
-
-Images stay optimistic: image_available_now() never blocks, and an image
-with no cached verdict yet (cold start, an expired verdict, BirdNET-Go
-unreachable) is treated as available while a check runs in the background;
-only a confirmed 404 hides the link.
+This checks real availability once per recording and caches the verdict --
+positive and negative, with independently tunable TTLs. (Species reference
+photos are decided in reference_photos.py, which asks image_status() below
+and falls back to other sources.)
 
 Recordings are the opposite: a link is signed ONLY for a recording that is
 known to exist, because a visit with a dead recording link shows a player
@@ -55,14 +52,10 @@ from homeassistant.util import dt as dt_util
 from .const import (
     BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES,
     BIRDNET_GO_INTERNAL_URL,
-    BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS,
-    BIRDNET_IMAGE_POSITIVE_CACHE_DAYS,
     DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
-_IMAGE_POSITIVE_TTL = timedelta(days=BIRDNET_IMAGE_POSITIVE_CACHE_DAYS)
-_IMAGE_NEGATIVE_TTL = timedelta(days=BIRDNET_IMAGE_NEGATIVE_CACHE_DAYS)
 _AUDIO_NEGATIVE_TTL = timedelta(minutes=BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES)
 _AUDIO_CACHE = "birdnet_audio_availability"
 _AUDIO_PENDING = "birdnet_audio_pending"
@@ -173,20 +166,6 @@ async def async_confirm_audio(hass: HomeAssistant, payload: object) -> None:
         _LOGGER.debug("Kestrel BirdNET-Go recording checks still running after %ss", _AUDIO_CHECK_WAIT_S)
 
 
-def image_available_now(hass: HomeAssistant, scientific_name: str) -> bool | None:
-    """Cached species reference-image verdict; schedules a check if unknown."""
-    return _available_now(
-        hass,
-        cache_key="birdnet_image_availability",
-        pending_key="birdnet_image_pending",
-        item_key=scientific_name,
-        positive_ttl=_IMAGE_POSITIVE_TTL,
-        negative_ttl=_IMAGE_NEGATIVE_TTL,
-        checker=lambda: _check_image(hass, scientific_name),
-        task_name=f"kestrel birdnet image check {scientific_name}",
-    )
-
-
 def audio_available_now(hass: HomeAssistant, media_id: str) -> bool | None:
     """Cached heard-visit audio-clip verdict (`media_id`: see the module docstring); schedules a check if unknown.
 
@@ -270,21 +249,15 @@ async def _probe(
         return None
 
 
-async def _check_image(hass: HomeAssistant, scientific_name: str) -> bool | None:
-    """200 = image resolved (also confirms attribution for referenceImageInfoUrl).
-    404 = BirdNET-Go's own negative cache: genuinely no image found. Anything
-    else (503 = still resolving; a network failure) is not a verdict yet.
-    """
-    status = await _probe(
+async def image_status(hass: HomeAssistant, scientific_name: str) -> int | None:
+    """BirdNET-Go's HTTP status for a species' reference image, asked about without fetching it: 200 = it has one,
+    404 = its own negative cache says no provider has one, 202/503 = still resolving, None = it could not be asked.
+    Deciding what that means (and what to do instead) is reference_photos.py's business."""
+    return await _probe(
         hass,
         f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/species-image/info",
         params={"name": scientific_name},
     )
-    if status == 200:
-        return True
-    if status == 404:
-        return False
-    return None
 
 
 def recording_url(media_id: str) -> str | None:
