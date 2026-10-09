@@ -20,6 +20,7 @@ const clockFormat = once({ hour: "numeric", minute: "2-digit" });
 const dateTimeFormat = once({ dateStyle: "medium", timeStyle: "short" });
 const weekdayFormat = once({ weekday: "short" });
 const monthDayFormat = once({ month: "short", day: "numeric" });
+const monthYearFormat = once({ month: "short", year: "numeric" });
 
 export function clockTime(value: string | number | null | undefined): string {
   const ms = timestamp(value);
@@ -68,6 +69,20 @@ export function sentence(text: string): string {
 export function formatMiB(value: number): string {
   if (!Number.isFinite(value)) return "—";
   return value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${Math.round(value)} MB`;
+}
+
+/** A size in bytes for people: "1.4 GB", "210 MB", "640 KB". */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
+  return `${Math.max(bytes > 0 ? 1 : 0, Math.round(bytes / 1e3))} KB`;
+}
+
+/** "Mar 2026". */
+export function monthYear(value: string | number | null | undefined): string {
+  const ms = timestamp(value);
+  return ms === null ? "" : monthYearFormat().format(ms);
 }
 
 export function clamp(value: number, min: number, max: number): number {

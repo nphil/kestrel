@@ -360,6 +360,72 @@ async def ws_settings_set(
     await _async_api_call(hass, connection, msg, "PUT", "settings", body=msg["settings"])
 
 
+_CLIP_REASONS = ("notAnimal",)
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "kestrel/clips/storage", vol.Optional("older_than"): vol.Any(int, float)}
+)
+@websocket_api.async_response
+async def ws_clips_storage(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """How many camera clips Kestrel keeps and how much space they use. Anyone signed in may look; the page is told whether this user may delete.
+    With `older_than` (millisecond timestamp) the numbers cover only clips from visits before it: what "delete older than..." would remove."""
+    can_delete = bool(connection.user.is_admin)
+    older_than = msg.get("older_than")
+    if older_than is not None and (isinstance(older_than, bool) or older_than <= 0):
+        connection.send_error(msg["id"], "invalid_format", "older_than must be a millisecond timestamp")
+        return
+    await _async_api_call(
+        hass,
+        connection,
+        msg,
+        "GET",
+        "clips/storage",
+        params={"olderThan": older_than} if older_than is not None else None,
+        postprocess=lambda result: {**result, "canDelete": can_delete} if isinstance(result, dict) else result,
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "kestrel/clips/delete",
+        vol.Optional("visit_ids"): [str],
+        vol.Optional("older_than"): vol.Any(int, float),
+        vol.Optional("reason"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_clips_delete(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Delete saved camera clips (the photos and visits stay). Administrators only. Exactly one way of choosing which clips:
+    `visit_ids` (these visits), `older_than` (millisecond timestamp: clips from visits before it) or `reason` (`notAnimal`: visits marked Not an animal or Can't tell)."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Only a Home Assistant administrator can delete clips")
+        return
+    chosen = [key for key in ("visit_ids", "older_than", "reason") if key in msg]
+    if len(chosen) != 1:
+        connection.send_error(msg["id"], "invalid_format", "Choose exactly one of visit_ids, older_than or reason")
+        return
+    (key,) = chosen
+    if key == "visit_ids":
+        ids = msg["visit_ids"]
+        if not ids or any(not item.strip() for item in ids):
+            connection.send_error(msg["id"], "invalid_format", "visit_ids needs at least one visit id")
+            return
+        body: dict[str, Any] = {"visitIds": ids}
+    elif key == "older_than":
+        older_than = msg["older_than"]
+        if isinstance(older_than, bool) or older_than <= 0:
+            connection.send_error(msg["id"], "invalid_format", "older_than must be a millisecond timestamp")
+            return
+        body = {"olderThan": older_than}
+    else:
+        if msg["reason"] not in _CLIP_REASONS:
+            connection.send_error(msg["id"], "invalid_format", f"reason must be one of {', '.join(_CLIP_REASONS)}")
+            return
+        body = {"reason": msg["reason"]}
+    await _async_api_call(hass, connection, msg, "POST", "clips/delete", body=body)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "kestrel/range_filter/get"})
 @websocket_api.async_response
 async def ws_range_filter_get(
@@ -453,6 +519,8 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         ws_health,
         ws_settings_get,
         ws_settings_set,
+        ws_clips_storage,
+        ws_clips_delete,
         ws_range_filter_get,
         ws_range_filter_set,
         ws_subscribe,

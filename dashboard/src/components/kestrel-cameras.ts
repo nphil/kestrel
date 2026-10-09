@@ -13,12 +13,14 @@ import type { AudioInfo, Camera, CameraDetection, Health, HomeAssistant, Kestrel
 import { heardHero } from "../ui/heard-hero.ts";
 import { photoCaption } from "../ui/photo-credit.ts";
 import { forgetStableUrls, keptLink, sameMedia } from "../urls.ts";
+import { clipFailure } from "../clips.ts";
 import { GROUP_LABEL, KIND, asKind, couldAlsoBe, evidenceCount, evidenceWord, percentSure, recordingNotes, tierWhyLine, tierWord, visitConfidence } from "../vocab.ts";
 import { filterCounts, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberedFilter, type SpeciesFilter } from "../wildlife.ts";
 import "../ui/live-picture.ts";
 import "./kestrel-alternatives.ts";
 import "./kestrel-live-player.ts";
 import "./kestrel-settings-sheet.ts";
+import "./kestrel-clip-confirm.ts";
 import { forgetSheetCache, forgetVisit } from "./kestrel-species-sheet.ts";
 import { forgetReferenceCache } from "./kestrel-reference-sound.ts";
 import type { KestrelLivePlayer } from "./kestrel-live-player.ts";
@@ -87,6 +89,9 @@ export class KestrelCameras extends LitElement {
     _helpMounted: { state: true },
     _settingsOpen: { state: true },
     _settingsMounted: { state: true },
+    _clipAsk: { state: true },
+    _clipDeleting: { state: true },
+    _clipError: { state: true },
     _visitGone: { state: true },
     _callVisit: { state: true },
     _livePaused: { state: true },
@@ -130,6 +135,10 @@ export class KestrelCameras extends LitElement {
   declare _helpMounted: boolean;
   declare _settingsOpen: boolean;
   declare _settingsMounted: boolean;
+  /** The visit page is asking "delete this clip?" (admin only); `_clipDeleting` while it is being deleted, `_clipError` if that failed. */
+  declare _clipAsk: boolean;
+  declare _clipDeleting: boolean;
+  declare _clipError: string;
   /** The id of a visit the server no longer has (merged into another or removed), and the camera it was from. */
   declare _visitGone: { id: string; camera: { id: string; name: string } | null } | null;
   /** Live is out of sight and its streams have been stopped (after a short grace, so flipping tabs doesn't restart them). */
@@ -210,6 +219,9 @@ export class KestrelCameras extends LitElement {
     this._helpMounted = false;
     this._settingsOpen = false;
     this._settingsMounted = false;
+    this._clipAsk = false;
+    this._clipDeleting = false;
+    this._clipError = "";
     this._visitGone = null;
     this._livePaused = false;
     this._callVisit = null;
@@ -509,6 +521,9 @@ export class KestrelCameras extends LitElement {
       this._heardConfirmed = false;
       this._callVisit = null;
       this._visitGone = null;
+      this._clipAsk = false;
+      this._clipDeleting = false;
+      this._clipError = "";
       this._visitReferencePhoto = null;
       this._visitReferencePhotoFailed = false;
     }
@@ -938,6 +953,27 @@ export class KestrelCameras extends LitElement {
     } finally { this._saving = false; }
   }
 
+  /** Delete this visit's saved clip (administrators). The photo, species and visit stay. */
+  private async _deleteClip(): Promise<void> {
+    const hass = this._hass;
+    const visit = this._visit;
+    if (!hass || !visit || this._clipDeleting) return;
+    this._clipDeleting = true;
+    this._clipError = "";
+    try {
+      const done = await api.deleteClips(hass, { visit_ids: [visit.id] });
+      this._visitSeeds.delete(visit.id);
+      if (this._visitId === visit.id) {
+        this._clipAsk = false;
+        if (this._visit?.id === visit.id) this._visit = { ...this._visit, clip: { state: "deleted", deletedBy: "user" } };
+        void this._loadVisit(visit.id);
+      }
+      this._say({ message: done.deleted > 0 ? "Clip deleted" : "That clip was already gone", kind: done.deleted > 0 ? "success" : "info", durationMs: 4000 });
+    } catch (error) {
+      this._clipError = clipFailure(error);
+    } finally { this._clipDeleting = false; }
+  }
+
   private async _toggleMute(species: Species): Promise<void> {
     if (!this._hass || !this._settings) return;
     const before = this._settings;
@@ -1283,7 +1319,12 @@ export class KestrelCameras extends LitElement {
         </div>
         ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">${this._clipOverdue() ? "Taking longer than usual. Kestrel waits up to 5 minutes for the camera's recording." : "The recording is still being finalized. This view updates when it's ready."}</p></div>` : nothing}
         ${visit.clip?.state === "none" && visit.kind !== "heard" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
-        ${visit.clip?.state === "deleted" ? html`<p class="media-note">This clip is no longer available.</p>` : nothing}
+        ${visit.clip?.state === "deleted" ? html`<p class="media-note">${visit.clip.deletedBy === "user" ? "This clip was deleted." : "This clip is no longer available."}</p>` : nothing}
+        ${visit.clip?.state === "ready" && this._hass?.user?.is_admin
+          ? this._clipAsk
+            ? html`<div class="clip-delete"><kestrel-clip-confirm .count=${1} .bytes=${null} ?busy=${this._clipDeleting} .error=${this._clipError} @confirm=${() => this._deleteClip()} @cancel=${() => { if (!this._clipDeleting) { this._clipAsk = false; this._clipError = ""; } }}></kestrel-clip-confirm></div>`
+            : html`<div class="clip-delete"><kestrel-lu-button kind="quiet" icon="mdi:delete-outline" label="Delete clip" @click=${() => { this._clipAsk = true; }}></kestrel-lu-button></div>`
+          : nothing}
         ${visit.clip?.state === "ready" && !clip ? html`<p class="media-note">The clip is ready, but its signed link isn't available yet.</p>` : nothing}
       </section>
       <div class="visit-summary">

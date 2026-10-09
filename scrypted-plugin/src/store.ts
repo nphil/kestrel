@@ -6,6 +6,8 @@ export type VisitKind = 'seen' | 'heard';
 export type VisitGroup = 'bird' | 'mammal' | 'other' | 'unknown';
 export type VisitStatus = 'auto' | 'learned' | 'corrected' | 'confirmed' | 'not_animal' | 'unknown';
 export type ClipState = 'pending' | 'ready' | 'none' | 'deleted';
+// Where a ready clip came from: the Events Recorder plugin's own clip, or a clip Kestrel cut from the NVR's continuous recording.
+export type ClipSource = 'events' | 'nvr';
 
 // How sure Kestrel is about a heard call (heard.ts): Likely may be announced and counts toward the species list,
 // Possible is kept quietly (stored and listed, not counted), Check goes to the review queue.
@@ -26,7 +28,9 @@ export interface Visit {
     score: number | null;
     snapshot: string | null;
     crop: string | null;
-    clip: { state: ClipState; expectedReadyAt: number | null; url?: string };
+    // `source` is present on a ready clip (older rows have no source recorded and are all Events Recorder clips); `deletedBy: 'user'` marks a
+    // clip a person deleted through clips/delete, as opposed to one that went missing or was pruned.
+    clip: { state: ClipState; expectedReadyAt: number | null; url?: string; source?: ClipSource; deletedBy?: 'user' };
     heard: { visitId: string; species: string; hasAudio: boolean; birdnetDetectionId: number | null; birdnetClip: string | null } | null;
     audio: { birdnetDetectionId: number | null; birdnetClip: string | null } | null;
     suggestions: { species: string; why: 'model' | 'heard' | 'usual' }[];
@@ -53,6 +57,11 @@ export interface VisitMeta {
     snapshotFile?: string | null;
     cropFile?: string | null;
     clipFile?: string | null;
+    clipSource?: ClipSource | null;
+    // Whether the clip file is Kestrel's own copy (in the clip store) rather than another plugin's file, and its size.
+    clipKept?: boolean;
+    clipBytes?: number | null;
+    clipDeletedBy?: 'user' | null;
     audioFile?: string | null;
     birdnetDetectionId?: number | null;
     birdnetClip?: string | null;
@@ -146,6 +155,10 @@ interface RawVisit {
     snapshot_file: string | null;
     crop_file: string | null;
     clip_file: string | null;
+    clip_source: ClipSource | null;
+    clip_kept: number;
+    clip_bytes: number | null;
+    clip_deleted_by: 'user' | null;
     audio_file: string | null;
     birdnet_detection_id: number | null;
     birdnet_clip: string | null;
@@ -389,6 +402,12 @@ export class KestrelStore {
         // means "not rated" -- every older visit and every camera visit -- and counts exactly as before.
         if (!visitColumns.has('tier')) this.db.exec('ALTER TABLE visits ADD COLUMN tier TEXT');
         this.db.exec('CREATE INDEX IF NOT EXISTS visits_tier ON visits(tier, started_at DESC)');
+        // One-time migration: where a ready clip came from (NULL = recorded before this existed = Events Recorder), whether the file is
+        // Kestrel's own copy in the clip store (`clip_kept`, with its size) and who deleted a deleted clip ('user' for clips/delete).
+        if (!visitColumns.has('clip_source')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_source TEXT');
+        if (!visitColumns.has('clip_kept')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_kept INTEGER NOT NULL DEFAULT 0');
+        if (!visitColumns.has('clip_bytes')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_bytes INTEGER');
+        if (!visitColumns.has('clip_deleted_by')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_deleted_by TEXT');
         this.recordDetectorCheckStatement = this.db.prepare(`INSERT INTO camera_daily_stats(day,camera_id,checks,empty_checks) VALUES(?,?,1,?)
             ON CONFLICT(day,camera_id) DO UPDATE SET checks=checks+1,empty_checks=empty_checks+excluded.empty_checks`);
         this.recordBirdnetIgnoredStatement = this.db.prepare(`INSERT INTO birdnet_daily_stats(day,ignored) VALUES(?,1)
@@ -435,7 +454,9 @@ export class KestrelStore {
         visit.clip = {
             state: row.clip_state,
             expectedReadyAt: row.clip_expected_ready_at,
-            ...(row.clip_state === 'ready' ? { url: `media/clip/${row.id}.mp4` } : {}),
+            // A ready clip always says where it came from; a row from before the source was recorded is an Events Recorder clip.
+            ...(row.clip_state === 'ready' ? { url: `media/clip/${row.id}.mp4`, source: row.clip_source ?? 'events' } : {}),
+            ...(row.clip_state === 'deleted' && row.clip_deleted_by ? { deletedBy: row.clip_deleted_by } : {}),
         };
         visit.review = !!row.review_flag;
         visit.firstEver = !!row.first_ever;
@@ -453,6 +474,10 @@ export class KestrelStore {
         const snapshotFile = value('snapshotFile', prior?.snapshot_file) as string | null;
         const cropFile = value('cropFile', prior?.crop_file) as string | null;
         const clipFile = value('clipFile', prior?.clip_file) as string | null;
+        const clipSource = value('clipSource', prior?.clip_source) as ClipSource | null;
+        const clipKept = has('clipKept') ? Number(!!meta.clipKept) : Number(prior?.clip_kept ?? 0);
+        const clipBytes = value('clipBytes', prior?.clip_bytes) as number | null;
+        const clipDeletedBy = value('clipDeletedBy', prior?.clip_deleted_by) as 'user' | null;
         const audioFile = value('audioFile', prior?.audio_file) as string | null;
         const birdnetDetectionId = value('birdnetDetectionId', prior?.birdnet_detection_id) as number | null;
         const birdnetClip = value('birdnetClip', prior?.birdnet_clip) as string | null;
@@ -461,14 +486,15 @@ export class KestrelStore {
         const updatedAt = Date.now();
         this.db.prepare(`INSERT INTO visits (
             id,camera_id,camera_name,kind,started_at,species,grp,status,score,detection_label,
-            snapshot_file,crop_file,clip_file,audio_file,birdnet_detection_id,birdnet_clip,clip_state,clip_expected_ready_at,
+            snapshot_file,crop_file,clip_file,clip_source,clip_kept,clip_bytes,clip_deleted_by,audio_file,birdnet_detection_id,birdnet_clip,clip_state,clip_expected_ready_at,
             review_flag,first_ever,muted,data,last_change_at,undo_data,last_correction_id,tier,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             camera_id=excluded.camera_id,camera_name=excluded.camera_name,kind=excluded.kind,
             started_at=excluded.started_at,species=excluded.species,grp=excluded.grp,status=excluded.status,
             score=excluded.score,detection_label=excluded.detection_label,snapshot_file=excluded.snapshot_file,
             crop_file=excluded.crop_file,clip_file=excluded.clip_file,audio_file=excluded.audio_file,
+            clip_source=excluded.clip_source,clip_kept=excluded.clip_kept,clip_bytes=excluded.clip_bytes,clip_deleted_by=excluded.clip_deleted_by,
             birdnet_detection_id=excluded.birdnet_detection_id,birdnet_clip=excluded.birdnet_clip,
             clip_state=excluded.clip_state,clip_expected_ready_at=excluded.clip_expected_ready_at,
             review_flag=excluded.review_flag,first_ever=excluded.first_ever,muted=excluded.muted,data=excluded.data,
@@ -476,7 +502,7 @@ export class KestrelStore {
             last_correction_id=excluded.last_correction_id,tier=excluded.tier,updated_at=excluded.updated_at`).run(
             visit.id, visit.camera.id, visit.camera.name, visit.kind, visit.startedAt, visit.species, visit.grp,
             visit.status, visit.score, has('detectionLabel') ? meta.detectionLabel ?? null : prior?.detection_label ?? null,
-            snapshotFile, cropFile, clipFile, audioFile, birdnetDetectionId, birdnetClip, visit.clip.state, visit.clip.expectedReadyAt,
+            snapshotFile, cropFile, clipFile, clipSource, clipKept, clipBytes, clipDeletedBy, audioFile, birdnetDetectionId, birdnetClip, visit.clip.state, visit.clip.expectedReadyAt,
             Number(review), Number(visit.firstEver), Number(visit.muted), data,
             has('lastChangeAt') ? meta.lastChangeAt ?? null : prior?.last_change_at ?? null,
             has('undoData') ? meta.undoData ?? null : prior?.undo_data ?? null,
@@ -676,13 +702,15 @@ export class KestrelStore {
         const keep = this.decodeVisit(keepRaw);
         const drop = this.decodeVisit(dropRaw);
         let clipFile = keepRaw.clip_file;
+        let clipDetails: { clipSource?: ClipSource | null; clipKept?: boolean; clipBytes?: number | null } = {};
         if (keep.clip.state !== 'ready' && drop.clip.state === 'ready' && dropRaw.clip_file) {
             keep.clip.state = 'ready';
             clipFile = dropRaw.clip_file;
+            clipDetails = { clipSource: dropRaw.clip_source, clipKept: !!dropRaw.clip_kept, clipBytes: dropRaw.clip_bytes };
         }
         if (drop.species !== keep.species && drop.species !== 'Unidentified animal')
             keep.suggestions = [{ species: drop.species, why: 'model' }, ...keep.suggestions.filter(item => item.species !== drop.species)];
-        this.saveVisit(keep, { clipFile });
+        this.saveVisit(keep, { clipFile, ...clipDetails });
         const files = [dropRaw.snapshot_file, dropRaw.crop_file].filter((file): file is string => !!file);
         this.deleteVisitRow(dropId);
         this.recomputeFirstEverForSpecies(drop.species);
@@ -848,12 +876,84 @@ export class KestrelStore {
         return this.db.prepare("SELECT * FROM visits WHERE kind='seen' AND clip_state='pending' AND started_at<=? ORDER BY started_at LIMIT ?").all(before, limit) as unknown as RawVisit[];
     }
 
-    setClip(id: string, state: ClipState, file: string | null): void {
+    // Sets what a visit's clip is. A ready clip says where it came from (`source`) and whether the file is Kestrel's own copy
+    // (`kept`, with its size); every other state clears all of that. `deletedBy` records a deletion a person asked for.
+    setClip(id: string, state: ClipState, file: string | null, details: { source?: ClipSource; kept?: boolean; bytes?: number | null; deletedBy?: 'user' } = {}): void {
         const row = this.getRawVisit(id);
         if (!row) return;
         const visit = this.decodeVisit(row);
         visit.clip.state = state;
-        this.saveVisit(visit, { clipFile: file });
+        const ready = state === 'ready';
+        this.saveVisit(visit, {
+            clipFile: file,
+            clipSource: ready ? details.source ?? null : null,
+            clipKept: ready && !!details.kept,
+            clipBytes: ready && details.kept ? details.bytes ?? null : null,
+            clipDeletedBy: state === 'deleted' ? details.deletedBy ?? null : null,
+        });
+    }
+
+    // A ready clip whose file was another plugin's now has Kestrel's own copy: serve that one from now on.
+    markClipKept(id: string, file: string, bytes: number): void {
+        this.db.prepare("UPDATE visits SET clip_file=?,clip_kept=1,clip_bytes=?,updated_at=? WHERE id=? AND clip_state='ready'").run(file, bytes, Date.now(), id);
+    }
+
+    // Seen visits that ended with no clip but still have footage in the NVR (started at or after `since`), oldest first because the
+    // oldest footage is the first to go. Only state 'none' qualifies: a clip a person deleted ('deleted') is final, heard visits never
+    // have a clip, and a visit marked "not an animal" is not worth one.
+    listBackfillCandidates(since: number, limit = 200): RawVisit[] {
+        return this.db.prepare("SELECT * FROM visits WHERE kind='seen' AND clip_state='none' AND status<>'not_animal' AND started_at>=? ORDER BY started_at LIMIT ?")
+            .all(since, limit) as unknown as RawVisit[];
+    }
+
+    // How many visits like those above are older than `since`, so their footage is gone from the NVR.
+    countBackfillBeyond(since: number): number {
+        const row = this.db.prepare("SELECT COUNT(*) AS n FROM visits WHERE kind='seen' AND clip_state='none' AND status<>'not_animal' AND started_at<?").get(since) as { n: number };
+        return Number(row.n);
+    }
+
+    // Ready clips that are still another plugin's file (not yet copied into Kestrel's clip store), newest first.
+    listUnkeptReadyClips(limit = 20): RawVisit[] {
+        return this.db.prepare("SELECT * FROM visits WHERE clip_state='ready' AND clip_kept=0 ORDER BY started_at DESC LIMIT ?").all(limit) as unknown as RawVisit[];
+    }
+
+    // Every ready clip's file, `limit` at a time in id order after `afterId`: the check for files that went missing walks all of them.
+    listReadyClipFiles(afterId: string, limit: number): { id: string; clip_file: string | null }[] {
+        return this.db.prepare("SELECT id,clip_file FROM visits WHERE clip_state='ready' AND id>? ORDER BY id LIMIT ?").all(afterId, limit) as { id: string; clip_file: string | null }[];
+    }
+
+    // What Kestrel's own clip store holds (ready clips with Kestrel's own copy), optionally only visits started before `olderThan`.
+    // `notAnimal` is visits marked "not an animal" or "can't tell"; `unconfirmed` is visits still carrying the model's own guess.
+    clipStorage(olderThan?: number): { count: number; bytes: number; oldestAt: number | null; byReason: { notAnimal: { count: number; bytes: number }; unconfirmed: { count: number; bytes: number } } } {
+        const row = this.db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(clip_bytes),0) AS bytes, MIN(started_at) AS oldest,
+            COALESCE(SUM(CASE WHEN status IN ('not_animal','unknown') THEN 1 ELSE 0 END),0) AS na_n,
+            COALESCE(SUM(CASE WHEN status IN ('not_animal','unknown') THEN clip_bytes ELSE 0 END),0) AS na_bytes,
+            COALESCE(SUM(CASE WHEN status IN ('auto','learned') THEN 1 ELSE 0 END),0) AS uc_n,
+            COALESCE(SUM(CASE WHEN status IN ('auto','learned') THEN clip_bytes ELSE 0 END),0) AS uc_bytes
+            FROM visits WHERE clip_state='ready' AND clip_kept=1${olderThan === undefined ? '' : ' AND started_at<?'}`)
+            .get(...(olderThan === undefined ? [] : [olderThan])) as { n: number; bytes: number; oldest: number | null; na_n: number; na_bytes: number; uc_n: number; uc_bytes: number };
+        return {
+            count: Number(row.n), bytes: Number(row.bytes), oldestAt: row.oldest === null ? null : Number(row.oldest),
+            byReason: { notAnimal: { count: Number(row.na_n), bytes: Number(row.na_bytes) }, unconfirmed: { count: Number(row.uc_n), bytes: Number(row.uc_bytes) } },
+        };
+    }
+
+    // The ready clips a delete request names. Ids that are not visits, or whose clip is not ready, simply do not match.
+    clipsByIds(ids: readonly string[]): RawVisit[] {
+        const rows: RawVisit[] = [];
+        for (let index = 0; index < ids.length; index += 400) {
+            const chunk = ids.slice(index, index + 400);
+            rows.push(...this.db.prepare(`SELECT * FROM visits WHERE clip_state='ready' AND id IN (${chunk.map(() => '?').join(',')})`).all(...chunk) as unknown as RawVisit[]);
+        }
+        return rows;
+    }
+
+    clipsStartedBefore(olderThan: number): RawVisit[] {
+        return this.db.prepare("SELECT * FROM visits WHERE clip_state='ready' AND started_at<? ORDER BY started_at").all(olderThan) as unknown as RawVisit[];
+    }
+
+    clipsMarkedNotAnimal(): RawVisit[] {
+        return this.db.prepare("SELECT * FROM visits WHERE clip_state='ready' AND status IN ('not_animal','unknown') ORDER BY started_at").all() as unknown as RawVisit[];
     }
 
     latestVisitForCamera(cameraId: string): RawVisit | undefined {
@@ -1101,6 +1201,8 @@ export class KestrelStore {
                 const path = directory + '/' + entry.name;
                 if (entry.isDirectory()) await walk(path);
                 else if (entry.isFile()) {
+                    // Kestrel's own kept clips are exempt from the budget: not counted, and never deleted here (only clips/delete removes them).
+                    if (this.db.prepare('SELECT 1 FROM visits WHERE clip_kept=1 AND clip_file=? LIMIT 1').get(path)) continue;
                     const info = await fs.stat(path).catch(() => undefined);
                     if (!info) continue;
                     const protectedPath = !!this.db.prepare('SELECT 1 FROM species_best WHERE snapshot_file=? OR crop_file=? LIMIT 1').get(path, path)

@@ -82,6 +82,7 @@ export const PANEL_CSS = [BASE_CSS, SURFACE_CSS, HEARD_HERO_CSS, css`
   .progress-track, .meter { height: 6px; overflow: hidden; border-radius: var(--lu-radius-pill); background: var(--lu-track-off); }
   .progress-track span, .meter span { display: block; height: 100%; border-radius: inherit; background: var(--lu-accent); transition: width var(--lu-motion-label) var(--lu-ease); }
   .media-note { padding: var(--lu-space-3); color: var(--lu-ink-2); font-size: var(--lu-type-label); }
+  .clip-delete { padding: var(--lu-space-2) var(--lu-space-2) var(--lu-space-1); }
   .visit-summary { display: grid; gap: var(--lu-space-4); min-width: 0; }
   .visit-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--lu-space-4); }
   .visit-title-row h2 { max-width: 18ch; overflow-wrap: anywhere; }

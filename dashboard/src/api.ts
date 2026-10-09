@@ -1,5 +1,5 @@
 import { pathOf, stableUrl } from "./urls.ts";
-import type { Camera, Health, HomeAssistant, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
+import type { Camera, ClipChoice, ClipDeleteResult, ClipStorage, ClipTotals, Health, HomeAssistant, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
 
 export function callWS<T>(hass: HomeAssistant, type: string, fields: Record<string, unknown> = {}): Promise<T> {
   return hass.callWS<T>({ type, ...fields });
@@ -24,11 +24,33 @@ export const api = {
   setSettings: (hass: HomeAssistant, settings: Settings) => callWS<Settings>(hass, "kestrel/settings/set", { settings }),
   rangeFilter: (hass: HomeAssistant) => callWS<RangeFilter>(hass, "kestrel/range_filter/get"),
   setRangeFilter: (hass: HomeAssistant, threshold: number) => callWS<RangeFilter>(hass, "kestrel/range_filter/set", { threshold }),
+  /** Camera clips kept, and their size. With `olderThan` (milliseconds) only those from before it: what "delete older than..." would remove. */
+  clipStorage: async (hass: HomeAssistant, olderThan?: number): Promise<ClipStorage> => clipStorage(await callWS<unknown>(hass, "kestrel/clips/storage", olderThan === undefined ? {} : { older_than: olderThan })),
+  /** Administrators only. Photos and visits stay; only the video goes. */
+  deleteClips: async (hass: HomeAssistant, choice: ClipChoice): Promise<ClipDeleteResult> => {
+    const raw = await callWS<unknown>(hass, "kestrel/clips/delete", choice as unknown as Record<string, unknown>);
+    const answer = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    return { deleted: count(answer.deleted), freedBytes: count(answer.freedBytes) };
+  },
 };
 
 /** True when the server says the thing asked for isn't there (a merged or removed visit). */
 export function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "not_found";
+}
+
+const count = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+const clipTotals = (value: unknown): ClipTotals => {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return { count: count(raw.count), bytes: count(raw.bytes) };
+};
+
+/** What `kestrel/clips/storage` said, whatever it sent: numbers that are missing are zero, never a crash. */
+export function clipStorage(value: unknown): ClipStorage {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const reasons = raw.byReason && typeof raw.byReason === "object" ? raw.byReason as Record<string, unknown> : {};
+  const oldest = typeof raw.oldestAt === "number" && Number.isFinite(raw.oldestAt) && raw.oldestAt > 0 ? raw.oldestAt : null;
+  return { ...clipTotals(raw), oldestAt: oldest, byReason: { notAnimal: clipTotals(reasons.notAnimal), unconfirmed: clipTotals(reasons.unconfirmed) }, canDelete: raw.canDelete === true };
 }
 
 export function asArray<T>(value: unknown, key = "items"): T[] {

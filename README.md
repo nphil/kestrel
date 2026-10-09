@@ -23,6 +23,11 @@ for those.
 - **Visit** — where a notification lands: the snapshot immediately, a
   "Saving clip…" progress bar while the recorder finishes, then the clip plays.
   Tap an old notification later and it just plays.
+  An administrator can delete a visit's clip from its page ("Delete clip"), or prune many
+  at once under the gear button (Settings, **Saved clips**): all clips older than 1 month,
+  3 months, 6 months or a year, or those from visits marked *Not an animal* / *Can't tell*.
+  Every delete first says how many clips go and how much space that frees, and that photos
+  and visits are kept; only the video is removed.
 - **Wildlife** — your life list: every species seen or heard, best photo (or a
   labelled reference photo with its photographer and licence), first/last seen,
   which cameras, what time of day, new-this-year badges, and the recorded call for
@@ -154,11 +159,17 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    created; later changes to that visit (its clip finishing, a correction, a merge)
    never fire it again, not even after Home Assistant restarts.
 
-**Camera clips stopped (every visit says "No clip was saved").** Kestrel takes its clips from the
-Events Recorder plugin. Its published 0.0.52 (2026-10-05) does not load in Scrypted, and when it
-does run it saves a snapshot for every detection update. `python3 tools/patch_events_recorder.py`
-downloads that release, fixes both and redeploys it; re-run it if Scrypted reinstalls 0.0.52, and
-retire it once upstream ships a release that loads.
+**Camera clips stopped (visits say "No clip was saved").** Kestrel looks for a visit's clip at the
+Events Recorder plugin first; if that has none 90 seconds after the visit started, Kestrel cuts the
+clip itself from Scrypted NVR's continuous recording (5 s before the visit to 10 s after it, at most
+60 s, H.264). Visits that already ended with no clip are given the same second chance at start-up and
+once a day, as long as the NVR still has the footage (its "Video Retention (Days)", 3 by default), so
+an outage of the Events Recorder is recovered rather than lost. Every clip is also copied into
+Kestrel's own store on the NVR disk (`/NVR/kestrel/clips/<camera>/<visit>.mp4`), which neither the
+Events Recorder's pruning nor the NVR's retention touches. The Events Recorder's published 0.0.52
+(2026-10-05) does not load in Scrypted, and when it does run it saves a snapshot for every detection
+update. `python3 tools/patch_events_recorder.py` downloads that release, fixes both and redeploys it;
+re-run it if Scrypted reinstalls 0.0.52, and retire it once upstream ships a release that loads.
 
 ## Privacy and footprint
 

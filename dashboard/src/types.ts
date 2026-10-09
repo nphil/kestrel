@@ -83,7 +83,7 @@ export interface Visit {
   score: number;
   snapshot?: string | null;
   crop?: string | null;
-  clip: { state: ClipState; expectedReadyAt?: string | number | null; url?: string | null; media?: string | null };
+  clip: { state: ClipState; expectedReadyAt?: string | number | null; url?: string | null; media?: string | null; /** `"user"` when somebody deleted it from Kestrel (as opposed to the file having gone missing). */ deletedBy?: string | null };
   heard?: { visitId: string; species: string; hasAudio: boolean; audio_url?: string | null; audio?: string | null; audioOriginal?: string | null; audioInfo?: AudioInfo | null } | null;
   suggestions: VisitSuggestion[];
   firstEver: boolean;
@@ -165,6 +165,21 @@ export interface RangeFilter {
   /** Only a Home Assistant administrator can change it. */
   canChange: boolean;
 }
+
+/** How many camera clips Kestrel keeps for some set of visits, and the space they take. */
+export interface ClipTotals { count: number; bytes: number }
+/** `kestrel/clips/storage`. With an age limit, `count` / `bytes` are only the clips from before it (what deleting them would remove). */
+export interface ClipStorage extends ClipTotals {
+  /** When the oldest kept clip's visit started, in milliseconds. */
+  oldestAt: number | null;
+  /** `notAnimal` also holds the visits marked "Can't tell". */
+  byReason: { notAnimal: ClipTotals; unconfirmed: ClipTotals };
+  /** Only a Home Assistant administrator can delete clips. */
+  canDelete: boolean;
+}
+export interface ClipDeleteResult { deleted: number; freedBytes: number }
+/** Which clips to delete: exactly one of these. */
+export type ClipChoice = { visit_ids: string[] } | { older_than: number } | { reason: "notAnimal" };
 
 export interface VisitPage { items: Visit[]; next?: string | null; }
 export interface SpeciesDetail {

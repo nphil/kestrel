@@ -3,10 +3,12 @@ import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
-import type { HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, SettingValue, VideoClip, VideoClips } from '@scrypted/sdk';
-import { ScryptedDeviceBase, ScryptedInterface } from '@scrypted/sdk';
+import type { FFmpegInput, HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, SettingValue, VideoClip, VideoClips, VideoRecorder } from '@scrypted/sdk';
+import { ScryptedDeviceBase, ScryptedInterface, ScryptedMimeTypes } from '@scrypted/sdk';
 import mqtt, { type MqttClient } from 'mqtt';
 import { ChangeGate } from './changes';
+import { CLIP_STORE_DIR, ClipKeeper, cutClip, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts } from './clipfiles';
+import { ClipResolver, backfillClips, backfillSince, nvrClipWindow, pollPendingClips, type ClipVisit, type NvrCut } from './clips';
 import { HeardIngest, modelOf, occurrenceOf } from './heard';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
@@ -16,7 +18,7 @@ import { captureDetection, captureLivePicture, classifyCrop, embedCrop, ensureMe
 import { commonnessFor } from './seasonal';
 import { SEASONAL_PRIOR } from './seasonal-prior';
 import { KeyedQueue, SameMomentTracker, UNIDENTIFIED_ANIMAL, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
-import { KestrelStore, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
+import { KestrelStore, type ClipSource, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
 import { GENUS_CLASS, SPECIES_CLASS } from './taxonomy';
@@ -28,7 +30,13 @@ const DEFAULT_TOPIC = 'birdnet';
 const DEFAULT_COOLDOWN_MINUTES = 10;
 const UNIDENTIFIED_GRACE_MS = 30_000;
 const CLIP_EXPECTED_DELAY_MS = 45_000;
-const CLIP_GIVE_UP_MS = 5 * 60_000;
+const BACKFILL_STARTUP_DELAY_MS = 30_000;
+// A backfill that left visits behind because a cut failed (a loaded host, a hiccup in the NVR) runs again after this long, at most
+// this many times in a row; the footage is only kept for the NVR's retention, so waiting for the next day is not an option.
+const BACKFILL_RETRY_MS = 15 * 60_000;
+const BACKFILL_MAX_RETRIES = 3;
+// The NVR answers a recording request in a few seconds; one that takes longer than this has hung.
+const NVR_REQUEST_TIMEOUT_MS = 60_000;
 const CLIP_POLL_MS = 5_000;
 const MEDIA_BUDGET_BYTES = 300 * 1024 * 1024;
 const MAX_LONG_POLLS = 100;
@@ -230,6 +238,20 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     // animal commit one after the other instead of both creating a visit.
     private sameMoment = new SameMomentTracker();
     private cameraQueue = new KeyedQueue();
+    // Clips cut from the NVR's recording are made one at a time: each one is a second or two of NVR work and several seconds of
+    // encoding, next to the NVR and the detectors.
+    private cutQueue = new KeyedQueue();
+    // The order clips are looked for in: the Events Recorder first, then (once a visit is overdue) the NVR's recording.
+    private clipResolver = new ClipResolver({
+        events: visit => this.findEventsClip(visit.cameraId, visit.startedAt),
+        nvrRecords: cameraId => !!systemDeviceValue<string[]>(cameraId, 'interfaces')?.includes(ScryptedInterface.VideoRecorder),
+        cutNvr: visit => this.cutQueue.run('nvr', () => this.cutNvrClip(visit)),
+    }, { onError: (visit, error) => this.console.warn(`Cutting a clip from the NVR failed for visit ${visit.id}: ${String(error)}`) });
+    private clipPolling = false;
+    private recoveringClips = false;
+    private backfillRetries = 0;
+    // Kestrel's own copies of clips (see clipfiles.ts); created once the store is open.
+    private clips?: ClipKeeper;
     // The camera list as it was when it was last published: the 30 s refresh only publishes a `camera`
     // event when the list now differs (online, health, drops, latest sighting, names).
     private cameraGate = new ChangeGate();
@@ -246,6 +268,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private clipTimer?: NodeJS.Timeout;
     private healthTimer?: NodeJS.Timeout;
     private maintenanceTimer?: NodeJS.Timeout;
+    private backfillTimer?: NodeJS.Timeout;
     private heardTimer?: NodeJS.Timeout;
     private brokerGeneration = 0;
     private released = false;
@@ -262,8 +285,17 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.databasePath = join(this.baseDir, 'kestrel.sqlite');
         await mkdir(this.baseDir, { recursive: true });
         this.mediaDirs = await ensureMediaDirectories(this.baseDir);
+        // Kestrel's own clips live on the NVR's big disk, outside the plugin volume and outside the media budget.
+        await mkdir(CLIP_STORE_DIR, { recursive: true }).catch(error => this.console.warn(`Kestrel's clip store ${CLIP_STORE_DIR} cannot be created, so no clip can be kept: ${String(error)}`));
+        await removeStalePartials(CLIP_STORE_DIR, Date.now());
         this.store = new KestrelStore(this.databasePath);
         this.store.onVisitsDeleted = ids => this.announceDeletedVisits(ids);
+        this.clips = new ClipKeeper({
+            store: this.store,
+            root: CLIP_STORE_DIR,
+            announce: visit => this.publishEvent('visit_updated', visit),
+            warn: message => this.console.warn(message),
+        });
         this.heard = new HeardIngest({
             store: this.store,
             cooldownMs: () => this.cooldownMs(),
@@ -327,6 +359,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private get db(): KestrelStore {
         if (!this.store) throw new Error('Kestrel storage has not initialized');
         return this.store;
+    }
+
+    private get keeper(): ClipKeeper {
+        if (!this.clips) throw new Error('Kestrel storage has not initialized');
+        return this.clips;
     }
 
     async getSettings(): Promise<Setting[]> {
@@ -795,7 +832,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         return [...this.cameras.values()].find(camera => camera.id === source || camera.name.toLowerCase() === source.toLowerCase() || slugify(camera.name) === normalized)?.id;
     }
 
-    private async findClip(cameraId: string, startedAt: number): Promise<string | undefined> {
+    // The Events Recorder's clip for a visit (its own folder, `/NVR/clips/<camera>/videoclips`), or undefined when it has none yet.
+    private async findEventsClip(cameraId: string, startedAt: number): Promise<string | undefined> {
         const camera = sdk.systemManager.getDeviceById(cameraId) as unknown as VideoClips;
         let clips: VideoClip[] = [];
         if (typeof camera.getVideoClips === 'function') {
@@ -840,28 +878,114 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     }
 
     private async pollClips(): Promise<void> {
-        const now = Date.now();
-        const pending = this.db.listPendingClips(now, 100);
-        for (const row of pending) {
-            const file = await this.findClip(row.camera_id, row.started_at);
-            if (file) {
-                this.db.setClip(row.id, 'ready', file);
-                const visit = this.db.getVisit(row.id);
-                if (visit) this.publishEvent('visit_updated', visit);
-            } else if (now - row.started_at >= CLIP_GIVE_UP_MS) {
-                this.db.setClip(row.id, 'none', null);
-                const visit = this.db.getVisit(row.id);
-                if (visit) this.publishEvent('visit_updated', visit);
-            }
+        // A poll that cuts a clip from the NVR outlasts the poll interval: never two at once.
+        if (this.clipPolling) return;
+        this.clipPolling = true;
+        try {
+            const pendingIds = await pollPendingClips({
+                pending: () => this.db.listPendingClips(Date.now(), 100),
+                endedAt: row => this.sameMoment.lastSeen(row.camera_id, row.id),
+                resolve: visit => this.clipResolver.resolvePending(visit),
+                ready: (row, file, source) => this.keeper.ready(row.id, row.camera_id, file, source),
+                none: (row, reason) => {
+                    this.console.log(`Visit ${row.id} ended with no clip: the Events Recorder has none and the NVR could not provide one (${reason}).`);
+                    this.db.setClip(row.id, 'none', null);
+                    const visit = this.db.getVisit(row.id);
+                    if (visit) this.publishEvent('visit_updated', visit);
+                },
+                failed: (row, error) => this.console.warn(`Looking for the clip of visit ${row.id} failed: ${String(error)}`),
+                stopped: () => this.released,
+            });
+            this.clipResolver.retainOnly(new Set(pendingIds));
+            this.keeper.checkVanished();
+            await this.keeper.keepUnkept();
+        } finally {
+            this.clipPolling = false;
         }
-        const ready = this.db.listVisits({ limit: 50 }).items.filter(visit => visit.clip.state === 'ready');
-        for (const visit of ready) {
-            const file = this.db.getRawVisit(visit.id)?.clip_file;
-            if (file && !existsSync(file)) {
-                this.db.setClip(visit.id, 'deleted', null);
-                const updated = this.db.getVisit(visit.id);
-                if (updated) this.publishEvent('visit_updated', updated);
+    }
+
+    // Cuts a visit's clip out of the NVR's continuous recording (the camera's VideoRecorder interface is the NVR plugin's) into
+    // Kestrel's clip store. The NVR answers "recording_unavailable" for a time it has no footage for.
+    private async cutNvrClip(visit: ClipVisit): Promise<NvrCut> {
+        const camera = sdk.systemManager.getDeviceById(visit.cameraId) as unknown as VideoRecorder | undefined;
+        if (!camera || typeof camera.getRecordingStream !== 'function') return { ok: false, reason: 'failed' };
+        const window = nvrClipWindow(visit.startedAt, visit.endedAt);
+        const fetchInput = async (): Promise<FFmpegInput> => {
+            const recording = await camera.getRecordingStream({ startTime: window.start, duration: window.duration });
+            return JSON.parse((await sdk.mediaManager.convertMediaObjectToBuffer(recording, ScryptedMimeTypes.FFmpegInput)).toString()) as FFmpegInput;
+        };
+        const { promise: noAnswer, reject } = Promise.withResolvers<never>();
+        const timer = setTimeout(() => reject(new Error('The NVR did not answer in time')), NVR_REQUEST_TIMEOUT_MS);
+        let input: FFmpegInput;
+        try {
+            input = await Promise.race([fetchInput(), noAnswer]);
+        } catch (error) {
+            if (String(error).includes('recording_unavailable')) return { ok: false, reason: 'unavailable' };
+            this.console.warn(`The NVR would not give the recording for visit ${visit.id} on camera ${visit.cameraId}: ${String(error)}`);
+            return { ok: false, reason: 'failed' };
+        } finally {
+            clearTimeout(timer);
+        }
+        if (!input.inputArguments?.length) {
+            this.console.warn(`The NVR's recording for visit ${visit.id} came without FFmpeg input arguments.`);
+            return { ok: false, reason: 'failed' };
+        }
+        const destination = keptClipFile(CLIP_STORE_DIR, visit.cameraId, visit.id);
+        const outcome = await cutClip({ ffmpegPath: input.ffmpegPath || await sdk.mediaManager.getFFmpegPath(), inputArguments: input.inputArguments, durationMs: window.duration, destination });
+        if (!outcome.ok) {
+            this.console.warn(`Cutting the clip of visit ${visit.id} from the NVR failed: ${outcome.reason}`);
+            return { ok: false, reason: 'failed' };
+        }
+        this.console.log(`Cut a ${(outcome.durationMs / 1000).toFixed(1)} s clip of visit ${visit.id} from the NVR's recording (${outcome.bytes} bytes${outcome.audio ? ', with sound' : ''}).`);
+        return { ok: true, file: destination };
+    }
+
+    // The NVR's "Video Retention (Days)" when it deletes footage by age; undefined when it does not, or cannot be read.
+    private async nvrRetentionDays(): Promise<number | undefined> {
+        try {
+            const nvr = sdk.systemManager.getDeviceById('130') as unknown as DeviceWithSettings;
+            const settings = await nvr.getSettings?.();
+            const days = Number(settings?.find(setting => setting.key === 'videoRetentionDays')?.value);
+            const byPeriod = /period/i.test(String(settings?.find(setting => setting.key === 'retentionMode')?.value ?? ''));
+            return byPeriod && Number.isFinite(days) && days > 0 ? days : undefined;
+        } catch (error) {
+            this.console.warn(`Could not read the NVR's retention setting: ${String(error)}`);
+            return undefined;
+        }
+    }
+
+    // Gives the seen visits that ended with no clip another chance while the NVR still has their footage (Events Recorder first, then
+    // the NVR's recording): at start-up and once a day. A clip a person deleted is never touched.
+    private async recoverMissingClips(trigger: 'startup' | 'daily' | 'retry'): Promise<void> {
+        if (this.recoveringClips || this.released) return;
+        this.recoveringClips = true;
+        try {
+            const retentionDays = await this.nvrRetentionDays();
+            const since = backfillSince(Date.now(), retentionDays);
+            const report = await backfillClips({
+                candidates: () => this.db.listBackfillCandidates(since),
+                beyondRetention: () => this.db.countBackfillBeyond(since),
+                resolve: visit => this.clipResolver.resolveMissing({ ...visit, endedAt: this.sameMoment.lastSeen(visit.cameraId, visit.id) }),
+                recovered: (row, file, source) => this.keeper.ready(row.id, row.camera_id, file, source),
+                stopped: () => this.released,
+            });
+            const bySource = (source: ClipSource) => report.recovered.filter(item => item.source === source).length;
+            this.console.log(`Kestrel clip backfill (${trigger}): ${report.candidates} visit(s) with no clip inside the NVR's ${retentionDays ?? 'unknown'}-day window; recovered ${report.recovered.length} (${bySource('nvr')} from the NVR, ${bySource('events')} from the Events Recorder); `
+                + `footage already gone from the NVR for ${report.footageGone.length}; failed ${report.failed.length}; no NVR recording ${report.noNvr.length}; ${report.beyondRetention} older visit(s) are beyond the NVR's retention.`);
+            this.db.setSetting('clipBackfillLast', JSON.stringify({
+                at: Date.now(), trigger, retentionDays: retentionDays ?? null, candidates: report.candidates, recovered: report.recovered.length,
+                fromNvr: bySource('nvr'), fromEvents: bySource('events'), footageGone: report.footageGone.length, failed: report.failed.length,
+                noNvr: report.noNvr.length, beyondRetention: report.beyondRetention,
+            }));
+            if (!report.failed.length) this.backfillRetries = 0;
+            else if (this.backfillRetries < BACKFILL_MAX_RETRIES && !this.released) {
+                this.backfillRetries++;
+                this.backfillTimer = setTimeout(() => { void this.recoverMissingClips('retry'); }, BACKFILL_RETRY_MS);
             }
+        } catch (error) {
+            this.console.warn(`Kestrel clip backfill (${trigger}) failed: ${String(error)}`);
+        } finally {
+            this.recoveringClips = false;
         }
     }
 
@@ -984,6 +1108,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             gpu,
             cameras: counterItems,
             storage: { dbMB: Number(dbMB.toFixed(2)), mediaMB: Number(mediaMB.toFixed(2)), budgetMB: 300 },
+            clips: { stored: this.db.clipStorage(), lastBackfill: this.db.getJsonSetting<Record<string, unknown> | null>('clipBackfillLast', null) },
             birdnet: lastHeardAt === null ? null : { online: now - lastHeardAt <= 30 * 60_000, lastHeardAt, ignoredToday: this.db.birdnetIgnoredToday(now) },
             corrections: { total: stats.total, sinceRetrain: stats.sinceRetrain },
         };
@@ -1129,7 +1254,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             contentType = 'image/jpeg';
         }
         if (!file || !existsSync(file)) {
-            if (kind === 'clip' && row?.clip_state === 'ready') {
+            if (kind === 'clip' && row?.clip_state === 'ready' && this.keeper.isGone(file ?? null)) {
                 this.db.setClip(mediaId, 'deleted', null);
                 const visit = this.db.getVisit(mediaId);
                 if (visit) this.publishEvent('visit_updated', visit);
@@ -1215,6 +1340,15 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             }
             if (method === 'GET' && route === 'labels') { jsonReply(response, 200, { labels: await this.labels() }); return; }
             if (method === 'GET' && route === 'health') { jsonReply(response, 200, await this.health()); return; }
+            if (method === 'GET' && route === 'clips/storage') {
+                const olderThan = url.searchParams.get('olderThan');
+                jsonReply(response, 200, this.db.clipStorage(olderThan === null ? undefined : parseOlderThan(olderThan, Date.now()))); return;
+            }
+            if (method === 'POST' && route === 'clips/delete') {
+                const result = await this.keeper.remove(parseClipDelete(parseJsonBody(request.body), Date.now()));
+                this.console.log(`Kestrel deleted ${result.deleted} clip(s) on request, freeing ${result.freedBytes} bytes.`);
+                jsonReply(response, 200, result); return;
+            }
             if (route === 'settings' && method === 'GET') { jsonReply(response, 200, await this.settingsGet()); return; }
             if (route === 'settings' && method === 'PUT') { jsonReply(response, 200, await this.settingsPut(parseJsonBody(request.body))); return; }
             if (method === 'GET' && route === 'corrections/export') { jsonReply(response, 200, await this.correctionsExport()); return; }
@@ -1266,6 +1400,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.healthTimer = setInterval(() => { void this.refreshCameraStatus().catch(error => this.console.warn(`Camera status refresh failed: ${String(error)}`)); }, 30_000);
         this.heardTimer = setInterval(() => this.heard?.flush(Date.now()), 1_000);
         this.scheduleMaintenance();
+        this.backfillTimer = setTimeout(() => { void this.recoverMissingClips('startup'); }, BACKFILL_STARTUP_DELAY_MS);
     }
 
     private scheduleMaintenance(): void {
@@ -1278,12 +1413,15 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             } catch (error) {
                 this.console.error(`Kestrel nightly storage maintenance failed: ${String(error)}`);
             }
+            await removeStalePartials(CLIP_STORE_DIR, Date.now()).catch(error => this.console.warn(`Could not clean the clip store: ${String(error)}`));
+            await this.recoverMissingClips('daily');
             if (!this.released) this.scheduleMaintenance();
         }, next.getTime() - Date.now());
     }
 
     async release(): Promise<void> {
         this.released = true;
+        stopRunningCuts();
         ++this.brokerGeneration;
         for (const listener of this.cameraListeners.values()) listener.removeListener();
         this.cameraListeners.clear();
@@ -1298,6 +1436,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (this.healthTimer) clearInterval(this.healthTimer);
         clearInterval(this.heardTimer);
         if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
+        clearTimeout(this.backfillTimer);
         for (const wake of this.eventWaiters) wake();
         this.eventWaiters.clear();
         this.livePictures.clear();

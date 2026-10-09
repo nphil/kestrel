@@ -31,6 +31,11 @@ let visit = createVisit();
 let previousVisit: Visit | null = null;
 let settings: Settings = { mutedSpecies: [], heardNotify: "new_only" };
 let rangeFilter: RangeFilter = { threshold: 0.03, speciesCount: 150, latitude: 44.5, longitude: -76.5, updatedAt: "2026-10-03T06:00:00Z", rebuilding: false, canChange: true };
+// Saved camera clips (`kestrel/clips/storage` and `kestrel/clips/delete`): 312 clips over about seven months, 1 in 17 from a visit marked "Not an animal" or "Can't tell".
+// Harness settings: `admin=0` is a signed-in non-administrator, `clipfail=1` makes every clip request fail, `clipdelay=ms` slows a delete so its progress can be seen.
+interface FakeClip { startedAt: number; bytes: number; notAnimal: boolean; unconfirmed: boolean }
+let clips: FakeClip[] = Array.from({ length: 312 }, (_, index) => ({ startedAt: now - (index + 1) * 0.67 * 86_400_000, bytes: 3_000_000 + ((index * 37) % 31) * 100_000, notAnimal: index % 17 === 3, unconfirmed: index % 11 === 5 }));
+const sumClips = (list: FakeClip[]): { count: number; bytes: number } => ({ count: list.length, bytes: list.reduce((total, clip) => total + clip.bytes, 0) });
 const hours = Array.from({ length: 24 }, (_, hour) => hour >= 7 && hour <= 11 ? 3 : hour >= 17 && hour <= 20 ? 2 : 0);
 const iso = (ms: number): string => new Date(ms).toISOString();
 const species: Species[] = [
@@ -123,7 +128,7 @@ function referenceAnswer(name: string): ReferenceSounds {
 // in sessionStorage for this tab, and are removed from the address, so the panel's own addresses stay exactly /kestrel/<view>[?s=|?v=] and a
 // reload keeps the theme and the signing epoch (the server did not restart because the page did).
 const SETTINGS_KEY = "kestrel-harness";
-const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency"];
+const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip"];
 const settings0: Record<string, string> = (() => {
   try { return JSON.parse(window.sessionStorage.getItem(SETTINGS_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
 })();
@@ -138,6 +143,8 @@ const rest = incoming.toString();
 history.replaceState(history.state, "", `${location.pathname}${rest ? `?${rest}` : ""}${location.hash}`);
 const setting = (name: string): string | null => settings0[name] ?? null;
 const remember = (name: string, value: string): void => { settings0[name] = value; window.sessionStorage.setItem(SETTINGS_KEY, JSON.stringify(settings0)); };
+// `clip=ready`: the fixture visit already has its clip (otherwise it is still being saved until the toolbar's "Processing visit" runs).
+if (setting("clip") === "ready") visit = { ...visit, clip: { state: "ready", url: media("clip", visit.id) } };
 
 const MEDIA_PREFIX = "/api/kestrel/media/";
 const LATENCY_MS = Number(setting("latency") ?? 40);
@@ -200,11 +207,31 @@ function answer(message: Record<string, unknown>): unknown {
       rangeFilter = { ...rangeFilter, threshold, speciesCount: Math.round(4.5 / threshold), updatedAt: new Date().toISOString() };
       result = rangeFilter;
     }
+    else if (type === "kestrel/clips/storage" || type === "kestrel/clips/delete") {
+      if (setting("clipfail") === "1") throw new Error("Kestrel's camera recorder isn't answering");
+      const admin = setting("admin") !== "0";
+      if (type === "kestrel/clips/storage") {
+        const covered = message.older_than === undefined ? clips : clips.filter((clip) => clip.startedAt < Number(message.older_than));
+        result = { ...sumClips(covered), oldestAt: covered.length ? Math.min(...covered.map((clip) => clip.startedAt)) : null, byReason: { notAnimal: sumClips(covered.filter((clip) => clip.notAnimal)), unconfirmed: sumClips(covered.filter((clip) => clip.unconfirmed)) }, canDelete: admin };
+      } else {
+        if (!admin) throw Object.assign(new Error("Only a Home Assistant administrator can delete clips"), { code: "unauthorized" });
+        const gone = Array.isArray(message.visit_ids) ? [] : message.older_than !== undefined ? clips.filter((clip) => clip.startedAt < Number(message.older_than)) : clips.filter((clip) => clip.notAnimal);
+        clips = clips.filter((clip) => !gone.includes(clip));
+        let deleted = gone.length;
+        let freedBytes = sumClips(gone).bytes;
+        if (Array.isArray(message.visit_ids) && message.visit_ids.includes(visit.id) && visit.clip.state === "ready") {
+          visit = { ...visit, clip: { state: "deleted", deletedBy: "user" } };
+          deleted = 1;
+          freedBytes = 4_200_000;
+        }
+        result = { deleted, freedBytes };
+      }
+    }
     else throw new Error(`Unexpected fixture command: ${type}`);
   return result;
 }
 
-const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set"];
+const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/clips/storage", "kestrel/clips/delete"];
 let ha: MiniHa;
 let readyTimer: number | undefined;
 
@@ -305,7 +332,8 @@ window.__emit = pushEvent;
 if (location.pathname === "/" || location.pathname === "/dev/" || location.pathname === "/dev/index.html") history.replaceState(history.state, "", `${PANEL_PREFIX}/live${location.search}${location.hash}`);
 
 const calls: Array<{ type: string; at: number; epoch: number; answeredAt: number | null }> = [];
-ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement("kestrel-panel") });
+ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0)); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement("kestrel-panel") });
+if (setting("admin") === "0") ha.mock.update({ user: { is_admin: false, name: "Guest" } });
 
 let restartTimer: number | undefined;
 window.__ha = {

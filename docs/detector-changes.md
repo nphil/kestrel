@@ -24,3 +24,7 @@ A Scrypted plugin update replaces `zip/unzipped/` (patch lost); the plugin then 
 | 2026-10-02T01:19:08.420Z | Backyard Camera (88) | `objectdetectionplugin:135:zoneinfo-type-Yard` | `"Intersect"` | `"Intersect"` | Yard motion zone type |
 | 2026-10-02T01:19:09.931Z | Backyard Camera (88) | `objectdetectionplugin:135:zoneinfo-filterMode-Yard` | `"Default"` | `"include"` | Yard motion zone filter mode |
 | 2026-10-02T01:19:11.444Z | Backyard Camera (88) | `objectdetectionplugin:134:zoneinfo-classes-Grass` | `["person","animal"]` | `["animal"]` | Backyard: Grass object zone animal only. Revert: ["person","animal"] |
+| 2026-10-09T02:37:42.262Z | Plant Room Cat Feeder (240) | `eventsRecorder:maxLength` | `900` | `60` | Nitin 2026-10-08: align cat feeder event clips with other cameras; keep 80 GB long-term store |
+| 2026-10-09T02:37:43.085Z | Plant Room Cat Feeder (240) | `eventsRecorder:minDelayBetweenClips` | `1` | `10` | Nitin 2026-10-08: align cat feeder event clips with other cameras; keep 80 GB long-term store |
+| 2026-10-09T02:37:43.897Z | Plant Room Cat Feeder (240) | `eventsRecorder:postEventSeconds` | `15` | `10` | Nitin 2026-10-08: align cat feeder event clips with other cameras; keep 80 GB long-term store |
+| 2026-10-09T02:39:08.583Z | Plant Room Cat Feeder (240) | `eventsRecorder:maxSpaceInGb` | `80` | `20` | Nitin 2026-10-08: match other cameras (20 GB) |

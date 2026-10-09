@@ -168,6 +168,13 @@ export class SameMomentTracker {
         return current && this.covers(current, at) ? current.visitId : undefined;
     }
 
+    // The last animal detection folded into `visitId`, while it is still this camera's current visit (undefined once another visit
+    // took the camera over, and after a restart): the closest thing there is to "when the visit ended".
+    lastSeen(cameraId: string, visitId: string): number | undefined {
+        const current = this.active.get(cameraId);
+        return current && current.visitId === visitId ? current.lastAt : undefined;
+    }
+
     private covers(entry: { firstAt: number; lastAt: number }, at: number): boolean {
         return at >= entry.firstAt - this.windowMs && at <= entry.lastAt + this.windowMs;
     }

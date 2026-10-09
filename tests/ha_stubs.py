@@ -416,10 +416,12 @@ class FakeClient:
         self.script = list(script)
         self.calls: list[dict] = []
         self.requests: list[tuple[str, str]] = []
+        self.bodies: list[object] = []
 
     async def async_request(self, method: str, path: str, params: dict | None = None, **kwargs: object) -> object:
         self.calls.append(dict(params or {}))
         self.requests.append((method, path))
+        self.bodies.append(kwargs.get("json"))
         if not self.script:
             raise asyncio.CancelledError  # ends the endless poll loop
         item = self.script.pop(0)
