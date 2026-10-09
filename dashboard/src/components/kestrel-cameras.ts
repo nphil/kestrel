@@ -50,6 +50,10 @@ const USER_KEY = "kestrel.user";
 const EXPIRED_REFRESH_MS = 60_000;
 /** A picture that fails to load is checked against the server at most this often. */
 const MEDIA_CHECK_MS = 30_000;
+/** The plugin expects a camera clip about 45 s after a visit starts and stops waiting for it after 5 minutes (CLIP_EXPECTED_DELAY_MS
+ * and CLIP_GIVE_UP_MS in scrypted-plugin/src/main.ts). */
+const CLIP_EXPECTED_MS = 45_000;
+const CLIP_GIVE_UP_MS = 5 * 60_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms));
 
@@ -974,7 +978,14 @@ export class KestrelCameras extends LitElement {
   private _syncClipTimer(): void {
     this._clearClipTimer();
     if (this._view !== "visit" || this._visit?.clip.state !== "pending") return;
-    this._clipTimer = window.setInterval(() => { this._progress = this._clipProgress(); }, 1000);
+    let ticks = 0;
+    this._clipTimer = window.setInterval(() => {
+      this._progress = this._clipProgress();
+      // The "clip saved" push can be missed (a phone pausing the page, a dropped connection), so once the clip is
+      // overdue the page asks for the visit itself every 10 s instead of waiting on a push that may never come.
+      ticks += 1;
+      if (ticks % 10 === 0 && this._clipOverdue() && this._visitId) void this._loadVisit(this._visitId);
+    }, 1000);
     this._progress = this._clipProgress();
   }
 
@@ -983,13 +994,28 @@ export class KestrelCameras extends LitElement {
     this._clipTimer = undefined;
   }
 
-  private _clipProgress(): number {
+  private _clipTimes(): { start: number; readyAt: number } | null {
     const visit = this._visit;
-    if (!visit) return 0;
-    const start = timestamp(visit.startedAt) ?? Date.now() - 45_000;
-    const readyAt = timestamp(visit.clip.expectedReadyAt) ?? start + 45_000;
-    const span = Math.max(1, readyAt - start);
-    return clamp(((Date.now() - start) / span) * 95, 0, 95);
+    if (!visit) return null;
+    const start = timestamp(visit.startedAt) ?? Date.now() - CLIP_EXPECTED_MS;
+    return { start, readyAt: timestamp(visit.clip.expectedReadyAt) ?? start + CLIP_EXPECTED_MS };
+  }
+
+  private _clipOverdue(): boolean {
+    const times = this._clipTimes();
+    return times !== null && Date.now() >= times.readyAt;
+  }
+
+  /** 0–80% up to the usual ready time, then creeping to 95% over the rest of the plugin's 5-minute wait, so a slow
+   * clip never sits motionless at the end of the bar. */
+  private _clipProgress(): number {
+    const times = this._clipTimes();
+    if (!times) return 0;
+    const now = Date.now();
+    const usual = Math.max(1, times.readyAt - times.start);
+    if (now < times.readyAt) return clamp(((now - times.start) / usual) * 80, 0, 80);
+    const late = Math.max(1, times.start + CLIP_GIVE_UP_MS - times.readyAt);
+    return clamp(80 + ((now - times.readyAt) / late) * 15, 80, 95);
   }
 
   /** How wide the panel is, 0 before it has been measured. */
@@ -1255,7 +1281,7 @@ export class KestrelCameras extends LitElement {
                 : html`<kestrel-lu-image ratio="16/10" .src=${""} alt=${visit.species || "Unidentified animal"}></kestrel-lu-image>`}
           ${visit.kind === "heard" && !photo && this._visitReferencePhoto && !this._visitReferencePhotoFailed ? html`<kestrel-lu-chip class="snapshot-chip" overlay label="Reference photo"></kestrel-lu-chip>${photoCaption(this._visitCredit)}` : nothing}
         </div>
-        ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">The recording is still being finalized. This view updates when it's ready.</p></div>` : nothing}
+        ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">${this._clipOverdue() ? "Taking longer than usual. Kestrel waits up to 5 minutes for the camera's recording." : "The recording is still being finalized. This view updates when it's ready."}</p></div>` : nothing}
         ${visit.clip?.state === "none" && visit.kind !== "heard" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
         ${visit.clip?.state === "deleted" ? html`<p class="media-note">This clip is no longer available.</p>` : nothing}
         ${visit.clip?.state === "ready" && !clip ? html`<p class="media-note">The clip is ready, but its signed link isn't available yet.</p>` : nothing}
