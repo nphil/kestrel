@@ -154,6 +154,12 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    created; later changes to that visit (its clip finishing, a correction, a merge)
    never fire it again, not even after Home Assistant restarts.
 
+**Camera clips stopped (every visit says "No clip was saved").** Kestrel takes its clips from the
+Events Recorder plugin. Its published 0.0.52 (2026-10-05) does not load in Scrypted, and when it
+does run it saves a snapshot for every detection update. `python3 tools/patch_events_recorder.py`
+downloads that release, fixes both and redeploys it; re-run it if Scrypted reinstalls 0.0.52, and
+retire it once upstream ships a release that loads.
+
 ## Privacy and footprint
 
 - Everything runs locally, with one exception: *Play reference* and the reference photos
