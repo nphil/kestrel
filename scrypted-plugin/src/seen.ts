@@ -1,7 +1,8 @@
-// Same-moment grouping for "seen" (camera) visits, plus the clip-start tolerance that lets a
-// merged visit still find its Events Recorder clip. It has no runtime dependencies on purpose
-// (the store imports below are types only, which are erased): main.ts imports it, and the unit
-// tests import it directly without the Scrypted SDK, driving these same functions against a store.
+// Same-moment grouping for "seen" (camera) visits, plus the clip-start tolerance that lets a merged
+// visit still find its Events Recorder clip, and that lookup itself. It depends on no Scrypted code
+// on purpose (Node's own path helper aside, the imports below are types only, which are erased):
+// main.ts imports it, and the unit tests import it directly without the Scrypted SDK, driving these
+// same functions against a store.
 //
 // Why this exists: one animal can be reported at the same instant as two detections with different
 // tracker ids and different labels (a raccoon scored "Common Raccoon" 0.84 and, 0.75 s later,
@@ -10,6 +11,8 @@
 // to only one of them. Detections of one animal at one moment are one visit, whatever they are
 // labelled; the loser's label is kept as a suggestion.
 
+import { join } from 'node:path';
+import type { FoundClip } from './clips';
 import type { SeenMergeUpdate, Visit, VisitGroup } from './store';
 
 export const SAME_MOMENT_WINDOW_MS = 5_000;
@@ -184,6 +187,73 @@ export class SameMomentTracker {
 // CLIP_START_TOLERANCE_MS after the visit's start and still be its clip.
 export function clipCoversVisitStart(clipStart: number, clipEnd: number, visitStartedAt: number): boolean {
     return clipStart <= visitStartedAt + CLIP_START_TOLERANCE_MS && clipEnd >= visitStartedAt;
+}
+
+// --- Finding the Events Recorder's clip --------------------------------------------------------
+// The Events Recorder lists its clips through the camera (`getVideoClips`) and keeps them in
+// `/NVR/clips/<camera>/videoclips/<startMs>_<endMs>_<flags>.mp4`: the name's numbers are when its ffmpeg was started and when it was
+// stopped. main.ts runs the lookup below over the real camera and folder; the unit tests run it over fakes of both.
+
+// A time as milliseconds: some sources give epoch seconds.
+export function normalizedTime(value: number): number {
+    return value > 0 && value < 100_000_000_000 ? value * 1000 : value;
+}
+
+// What the lookup reads of a clip the camera lists (Scrypted's VideoClip, as far as it matters here): `duration` is in ms, like the
+// times.
+export interface ListedClip { startTime: number; duration?: number; resources?: { video?: { file?: string } } }
+
+// A clip listed without a duration is taken to last this long, the longest an event is recorded for.
+const LISTED_CLIP_MS = 60_000;
+
+// When a listed clip's recording began and stopped, as wall-clock ms (a camera that gives times in epoch seconds gives the duration in
+// seconds too, which the sum below turns into ms along with the start).
+function listedRecording(clip: ListedClip): { startAt: number; endAt: number } {
+    return { startAt: normalizedTime(clip.startTime), endAt: normalizedTime(clip.startTime + (clip.duration ?? LISTED_CLIP_MS)) };
+}
+
+export interface EventsLookupPorts {
+    // The clips the camera lists in the range ([] when it cannot list any).
+    videoClips(range: { startTime: number; endTime: number; count: number }): Promise<ListedClip[]>;
+    exists(file: string): boolean;
+    // The file names in a folder ([] when it cannot be read).
+    files(directory: string): Promise<string[]>;
+}
+
+// The Events Recorder's clip for a visit that started at `startedAt` on `cameraId`, with the moment its recording stopped and how long
+// it says it lasted, or undefined when it has none yet. In this order: a clip the camera lists whose file exists, the clip in the
+// folder that starts closest to the visit (the end is the second number of its file name), and a listed clip whose file is named
+// without its folder. Where the clip's first frame is follows from the end and the video in the file (see eventsClipStart in clips.ts).
+export async function findEventsRecorderClip(ports: EventsLookupPorts, cameraId: string, startedAt: number): Promise<FoundClip | undefined> {
+    const clips = await ports.videoClips({ startTime: startedAt - 90_000, endTime: startedAt + 90_000, count: 50 });
+    const overlapping = clips.map(clip => ({ clip, ...listedRecording(clip) }))
+        .filter(({ startAt, endAt }) => clipCoversVisitStart(startAt, endAt, startedAt))
+        .sort((a, b) => Math.abs(a.clip.startTime - startedAt) - Math.abs(b.clip.startTime - startedAt));
+    for (const { clip, startAt, endAt } of overlapping) {
+        const resource = clip.resources?.video?.file;
+        if (resource && ports.exists(resource)) return { file: resource, endAt, spanMs: endAt - startAt };
+    }
+    const directory = `/NVR/clips/${cameraId}/videoclips`;
+    let best: (FoundClip & { gap: number }) | undefined;
+    for (const file of await ports.files(directory)) {
+        const match = file.match(/^(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)(?:_[^/]*)?\.mp4$/i);
+        if (!match) continue;
+        const start = normalizedTime(Number(match[1]));
+        const end = normalizedTime(Number(match[2]));
+        if (clipCoversVisitStart(start, end, startedAt)) {
+            const gap = Math.abs(start - startedAt);
+            if (!best || gap < best.gap) best = { file: join(directory, file), endAt: end, spanMs: end - start, gap };
+        }
+    }
+    if (best && ports.exists(best.file)) return { file: best.file, endAt: best.endAt, spanMs: best.spanMs };
+    for (const { clip, startAt, endAt } of overlapping) {
+        const file = clip.resources?.video?.file;
+        if (file) {
+            const candidate = file.startsWith('/') ? file : join(directory, file);
+            if (ports.exists(candidate)) return { file: candidate, endAt, spanMs: endAt - startAt };
+        }
+    }
+    return undefined;
 }
 
 // --- Committing a detection -------------------------------------------------------------------

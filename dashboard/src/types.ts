@@ -105,7 +105,21 @@ export interface Visit {
   models?: ModelCall[];
   /** Seen visits: the wildlife classifier's confidence (0..1) in the label, for the saved crop. Null or absent = unknown. */
   labelScore?: number | null;
+  /** Seen visits, only on the answer for one visit and only while its clip is ready: what the detector drew around the animal while the clip was recorded. */
+  detections?: VisitDetections;
 }
+
+/** One box the detector drew, as a share (0..1, top-left origin) of the frame the clip shows. `score` is how sure the detector is that something is there,
+ * not how sure it is of the species; `id` is its own name for the animal, the same on every frame for as long as it follows it; `label` is the wildlife
+ * classifier's species, only on a frame where it had one, and `labelScore` its confidence, which is almost never passed on. */
+export interface DetectionBox { x: number; y: number; w: number; h: number; className: string; score: number; id?: string; label?: string; labelScore?: number }
+
+/** Everything the detector saw at one moment: `t` is that detection event's own time (wall-clock ms) and every box is an animal in the same picture. */
+export interface DetectionFrame { t: number; boxes: DetectionBox[] }
+
+/** The detector's track for a visit's clip, oldest frame first. A frame's moment in the video is `t + offsetMs - clipStartAt` ms from the clip's first frame
+ * (`clipStartAt`, wall-clock ms): a positive `offsetMs` means the video runs behind the detector. */
+export interface VisitDetections { clipStartAt: number; offsetMs: number; frames: DetectionFrame[] }
 
 export interface Species {
   species: string;
@@ -162,6 +176,15 @@ export interface RangeFilter {
   updatedAt: string | null;
   /** BirdNET-Go is still rebuilding its species list; `speciesCount` may be the old one. */
   rebuilding: boolean;
+  /** Only a Home Assistant administrator can change it. */
+  canChange: boolean;
+}
+
+/** Whether a heard recording is exempt from BirdNET-Go's age clean-up (`kestrel/recording/keep/get` and `/set`). */
+export interface KeptRecording {
+  /** BirdNET-Go has a saved recording for it that can be locked. False hides the control: nothing can be kept. */
+  keepable: boolean;
+  kept: boolean;
   /** Only a Home Assistant administrator can change it. */
   canChange: boolean;
 }

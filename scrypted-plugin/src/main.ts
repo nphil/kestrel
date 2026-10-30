@@ -3,12 +3,13 @@ import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
-import type { FFmpegInput, HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, SettingValue, VideoClip, VideoClips, VideoRecorder } from '@scrypted/sdk';
+import type { FFmpegInput, HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, SettingValue, VideoClips, VideoRecorder } from '@scrypted/sdk';
 import { ScryptedDeviceBase, ScryptedInterface, ScryptedMimeTypes } from '@scrypted/sdk';
 import mqtt, { type MqttClient } from 'mqtt';
+import { isConfidentAlignment, isPlausibleOffset, measureAlignment } from './align';
 import { ChangeGate } from './changes';
-import { CLIP_STORE_DIR, ClipKeeper, cutClip, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts } from './clipfiles';
-import { ClipResolver, backfillClips, backfillSince, nvrClipWindow, pollPendingClips, type ClipVisit, type NvrCut } from './clips';
+import { CLIP_STORE_DIR, ClipKeeper, cutClip, decodeGrayFrames, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts, videoDurationMs } from './clipfiles';
+import { ClipResolver, backfillClips, backfillSince, nvrClipStart, nvrClipWindow, pollPendingClips, type ClipVisit, type FoundClip, type NvrCut } from './clips';
 import { HeardIngest, modelOf, occurrenceOf } from './heard';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
@@ -17,11 +18,12 @@ import { parseLongPollTimeoutMs } from './longpoll';
 import { captureDetection, captureLivePicture, classifyCrop, embedCrop, ensureMediaDirectories, saveCapture } from './media';
 import { commonnessFor } from './seasonal';
 import { SEASONAL_PRIOR } from './seasonal-prior';
-import { KeyedQueue, SameMomentTracker, UNIDENTIFIED_ANIMAL, clipCoversVisitStart, decideSeenCommit, mergeSeenDetection } from './seen';
-import { KestrelStore, type ClipSource, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
+import { KeyedQueue, SameMomentTracker, UNIDENTIFIED_ANIMAL, decideSeenCommit, findEventsRecorderClip, mergeSeenDetection, normalizedTime } from './seen';
+import { ALIGN_MIN_SAMPLES, KestrelStore, type ClipSource, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
 import { GENUS_CLASS, SPECIES_CLASS } from './taxonomy';
+import { TrackRecorder, detectionOffsetMs, normalizeBoxes, visitPayload } from './track';
 
 const CAMERA_SETTING = 'cameras';
 const DEFAULT_CAMERAS = ['88', '103', '104', '106'];
@@ -35,6 +37,12 @@ const BACKFILL_STARTUP_DELAY_MS = 30_000;
 // this many times in a row; the footage is only kept for the NVR's retention, so waiting for the next day is not an option.
 const BACKFILL_RETRY_MS = 15 * 60_000;
 const BACKFILL_MAX_RETRIES = 3;
+// Once a clip is ready its detection boxes are lined up with its video (align.ts). The clips that were missed (the plugin was restarted before
+// it could, or the visit had too few detection events yet) are picked up again this long after start-up and after every night's maintenance:
+// the newest first, a few at a time, none older than this.
+const ALIGN_STARTUP_DELAY_MS = 60_000;
+const ALIGN_SWEEP_WINDOW_MS = 14 * 24 * 60 * 60_000;
+const ALIGN_SWEEP_LIMIT = 20;
 // The NVR answers a recording request in a few seconds; one that takes longer than this has hung.
 const NVR_REQUEST_TIMEOUT_MS = 60_000;
 const CLIP_POLL_MS = 5_000;
@@ -57,7 +65,7 @@ const SETTINGS: Setting[] = [
 ];
 
 type Detection = { className?: string; label?: string | null; score?: number | null; labelScore?: number | null; id?: string; boundingBox?: number[] };
-type DetectionEvent = { detections?: Detection[]; detectionId?: string; timestamp?: number; durationMs?: number; processingMs?: number };
+type DetectionEvent = { detections?: Detection[]; detectionId?: string; inputDimensions?: [number, number]; timestamp?: number; durationMs?: number; processingMs?: number };
 // health/drops1h describe the camera device's own Online state (Scrypted's aggregate online
 // flag, tracked in real time -- see setupOnlineListeners/handleOnlineChange below), NOT the
 // health of any individual RTSP/rebroadcast stream under it. A stream (e.g. the NVR recording
@@ -136,10 +144,6 @@ function parseBirdnetTimestamp(message: BrokerMessage): number | undefined {
     const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime;
     const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
     return parsedTime !== undefined && Number.isFinite(parsedTime) ? normalizedTime(parsedTime) : undefined;
-}
-
-function normalizedTime(value: number): number {
-    return value > 0 && value < 100_000_000_000 ? value * 1000 : value;
 }
 
 function groupForSpecies(species: string, kind: VisitKind): VisitGroup {
@@ -238,15 +242,33 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     // animal commit one after the other instead of both creating a visit.
     private sameMoment = new SameMomentTracker();
     private cameraQueue = new KeyedQueue();
-    // Clips cut from the NVR's recording are made one at a time: each one is a second or two of NVR work and several seconds of
-    // encoding, next to the NVR and the detectors.
-    private cutQueue = new KeyedQueue();
-    // The order clips are looked for in: the Events Recorder first, then (once a visit is overdue) the NVR's recording.
+    // The boxes the detector drew around each animal, kept for the clip of the visit the animal becomes (see track.ts). A problem
+    // with them never gets in the way of the visit itself.
+    private recorder = new TrackRecorder({
+        appendTrackFrames: (visitId, samples) => {
+            try {
+                this.db.appendTrackFrames(visitId, samples);
+            } catch (error) {
+                this.console.warn(`Could not keep the detection boxes of visit ${visitId}: ${String(error)}`);
+            }
+        },
+    });
+    // Everything that runs ffmpeg over a clip is done one at a time, next to the NVR and the detectors: cutting a clip from the NVR's recording
+    // (a second or two of NVR work and several seconds of encoding) and looking at a clip to line up its boxes (a few seconds of decoding).
+    private clipWork = new KeyedQueue();
+    // The lining up of a clip's detection boxes that is queued or running, per visit.
+    private alignments = new Map<string, Promise<void>>();
+    // The order clips are looked for in: the Events Recorder first, then (once a visit is overdue) the NVR's recording. An Events Recorder
+    // clip is measured once when it is found: where its first frame is follows from how much video it holds.
     private clipResolver = new ClipResolver({
         events: visit => this.findEventsClip(visit.cameraId, visit.startedAt),
+        videoDurationMs: async file => videoDurationMs(await sdk.mediaManager.getFFmpegPath(), file),
         nvrRecords: cameraId => !!systemDeviceValue<string[]>(cameraId, 'interfaces')?.includes(ScryptedInterface.VideoRecorder),
-        cutNvr: visit => this.cutQueue.run('nvr', () => this.cutNvrClip(visit)),
-    }, { onError: (visit, error) => this.console.warn(`Cutting a clip from the NVR failed for visit ${visit.id}: ${String(error)}`) });
+        cutNvr: visit => this.clipWork.run('ffmpeg', () => this.cutNvrClip(visit)),
+    }, {
+        onError: (visit, error) => this.console.warn(`Cutting a clip from the NVR failed for visit ${visit.id}: ${String(error)}`),
+        onNoStart: (visit, clip, videoMs) => this.console.warn(`Could not tell where the Events Recorder's clip of visit ${visit.id} starts (it holds ${videoMs} ms of video, its name says ${clip.spanMs} ms): the clip plays without detection boxes.`),
+    });
     private clipPolling = false;
     private recoveringClips = false;
     private backfillRetries = 0;
@@ -269,6 +291,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private healthTimer?: NodeJS.Timeout;
     private maintenanceTimer?: NodeJS.Timeout;
     private backfillTimer?: NodeJS.Timeout;
+    private alignTimer?: NodeJS.Timeout;
     private heardTimer?: NodeJS.Timeout;
     private brokerGeneration = 0;
     private released = false;
@@ -427,6 +450,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 this.console.warn(`Unable to watch Scrypted camera ${id}: ${String(error)}`);
             }
         }
+        for (const id of this.cameras.keys()) if (!cameras.has(id)) this.recorder.forget(id);
         this.cameras = cameras;
         await this.refreshCameraStatus();
     }
@@ -493,6 +517,9 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         }
         const animals = event.detections.filter(detection => detection.className === 'animal');
         if (!animals.length) return;
+        // The boxes are kept for the visit this animal is (or becomes). The open visit is looked up first: `touch` below widens its window.
+        const boxes = normalizeBoxes(animals, event.inputDimensions);
+        if (boxes.length) this.recorder.observe(cameraId, { t: startedAt, boxes }, this.sameMoment.find(cameraId, startedAt));
         runtime.lastDetectionAt = startedAt;
         // Any animal detection near an open visit keeps that visit "current" -- including unlabelled
         // ones -- so a label that flips mid-stay joins it rather than starting a second visit.
@@ -624,6 +651,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.db.saveVisit(visit, { detectionLabel, snapshotFile, cropFile });
         this.db.considerSpeciesBest(visit, snapshotFile, cropFile);
         this.sameMoment.remember(camera.id, id, pending.startedAt);
+        // Boxes that were waiting for this visit are now its own. No await between this and `remember`, so no event can fall in between.
+        this.recorder.attach(camera.id, id, pending.startedAt);
         await this.linkRelatedVisit(visit);
         const saved = this.db.getVisit(id) ?? visit;
         this.publishEvent('visit_new', saved);
@@ -642,6 +671,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             usualSuggestions: (cameraId, species) => this.usualSuggestions(cameraId, species),
             isMuted: species => this.mutedSpecies().includes(species),
         }, target, { species: finalSpecies, score: pending.score, labelScore, startedAt: pending.startedAt, status: visitStatus, detectionLabel });
+        // The merge has just taught the tracker this visit: boxes waiting for this moment are its own, and later ones go straight in.
+        this.recorder.attach(target.camera.id, target.id, Math.min(target.startedAt, pending.startedAt));
         if (!merged.changed) return merged.visit;
         // The database change is complete before the photo is rewritten; the photo's file name is
         // the visit's id, so the stored paths do not change.
@@ -832,49 +863,22 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         return [...this.cameras.values()].find(camera => camera.id === source || camera.name.toLowerCase() === source.toLowerCase() || slugify(camera.name) === normalized)?.id;
     }
 
-    // The Events Recorder's clip for a visit (its own folder, `/NVR/clips/<camera>/videoclips`), or undefined when it has none yet.
-    private async findEventsClip(cameraId: string, startedAt: number): Promise<string | undefined> {
+    // The Events Recorder's clip for a visit (its own folder, `/NVR/clips/<camera>/videoclips`) and when its recording stopped, or undefined when it has none yet.
+    private async findEventsClip(cameraId: string, startedAt: number): Promise<FoundClip | undefined> {
         const camera = sdk.systemManager.getDeviceById(cameraId) as unknown as VideoClips;
-        let clips: VideoClip[] = [];
-        if (typeof camera.getVideoClips === 'function') {
-            try {
-                clips = await camera.getVideoClips({ startTime: startedAt - 90_000, endTime: startedAt + 90_000, count: 50 });
-            } catch (error) {
-                this.console.warn(`Events Recorder clip lookup failed for camera ${cameraId}: ${String(error)}`);
-            }
-        }
-        const overlapping = clips.filter(clip => {
-            const start = normalizedTime(clip.startTime);
-            const duration = normalizedTime(clip.duration ?? 60_000);
-            return clipCoversVisitStart(start, start + duration, startedAt);
-        }).sort((a, b) => Math.abs(a.startTime - startedAt) - Math.abs(b.startTime - startedAt));
-        for (const clip of overlapping) {
-            const resource = clip.resources?.video?.file;
-            if (resource && existsSync(resource)) return resource;
-        }
-        const directory = `/NVR/clips/${cameraId}/videoclips`;
-        const files = await readdir(directory).catch(() => [] as string[]);
-        let best: { path: string; gap: number } | undefined;
-        for (const file of files) {
-            const match = file.match(/^(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)(?:_[^/]*)?\.mp4$/i);
-            if (!match) continue;
-            const start = normalizedTime(Number(match[1]));
-            const end = normalizedTime(Number(match[2]));
-            if (clipCoversVisitStart(start, end, startedAt)) {
-                const candidate = join(directory, file);
-                const gap = Math.abs(start - startedAt);
-                if (!best || gap < best.gap) best = { path: candidate, gap };
-            }
-        }
-        if (best && existsSync(best.path)) return best.path;
-        for (const clip of overlapping) {
-            const file = clip.resources?.video?.file;
-            if (file) {
-                const candidate = file.startsWith('/') ? file : join('/NVR/clips', cameraId, 'videoclips', file);
-                if (existsSync(candidate)) return candidate;
-            }
-        }
-        return undefined;
+        return findEventsRecorderClip({
+            videoClips: async range => {
+                if (typeof camera.getVideoClips !== 'function') return [];
+                try {
+                    return await camera.getVideoClips(range);
+                } catch (error) {
+                    this.console.warn(`Events Recorder clip lookup failed for camera ${cameraId}: ${String(error)}`);
+                    return [];
+                }
+            },
+            exists: existsSync,
+            files: directory => readdir(directory).catch(() => [] as string[]),
+        }, cameraId, startedAt);
     }
 
     private async pollClips(): Promise<void> {
@@ -886,7 +890,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 pending: () => this.db.listPendingClips(Date.now(), 100),
                 endedAt: row => this.sameMoment.lastSeen(row.camera_id, row.id),
                 resolve: visit => this.clipResolver.resolvePending(visit),
-                ready: (row, file, source) => this.keeper.ready(row.id, row.camera_id, file, source),
+                ready: (row, file, source, startAt) => this.clipReady(row, file, source, startAt),
                 none: (row, reason) => {
                     this.console.log(`Visit ${row.id} ended with no clip: the Events Recorder has none and the NVR could not provide one (${reason}).`);
                     this.db.setClip(row.id, 'none', null);
@@ -904,8 +908,8 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         }
     }
 
-    // Cuts a visit's clip out of the NVR's continuous recording (the camera's VideoRecorder interface is the NVR plugin's) into
-    // Kestrel's clip store. The NVR answers "recording_unavailable" for a time it has no footage for.
+    // Cuts a visit's clip out of the NVR's continuous recording (the camera's VideoRecorder interface is the NVR plugin's) into Kestrel's
+    // clip store, and says when its first frame was recorded. The NVR answers "recording_unavailable" for a time it has no footage for.
     private async cutNvrClip(visit: ClipVisit): Promise<NvrCut> {
         const camera = sdk.systemManager.getDeviceById(visit.cameraId) as unknown as VideoRecorder | undefined;
         if (!camera || typeof camera.getRecordingStream !== 'function') return { ok: false, reason: 'failed' };
@@ -937,7 +941,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             return { ok: false, reason: 'failed' };
         }
         this.console.log(`Cut a ${(outcome.durationMs / 1000).toFixed(1)} s clip of visit ${visit.id} from the NVR's recording (${outcome.bytes} bytes${outcome.audio ? ', with sound' : ''}).`);
-        return { ok: true, file: destination };
+        return { ok: true, file: destination, startAt: nvrClipStart(window, outcome.spanMs) };
     }
 
     // The NVR's "Video Retention (Days)" when it deletes footage by age; undefined when it does not, or cannot be read.
@@ -966,7 +970,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 candidates: () => this.db.listBackfillCandidates(since),
                 beyondRetention: () => this.db.countBackfillBeyond(since),
                 resolve: visit => this.clipResolver.resolveMissing({ ...visit, endedAt: this.sameMoment.lastSeen(visit.cameraId, visit.id) }),
-                recovered: (row, file, source) => this.keeper.ready(row.id, row.camera_id, file, source),
+                recovered: (row, file, source, startAt) => this.clipReady(row, file, source, startAt),
                 stopped: () => this.released,
             });
             const bySource = (source: ClipSource) => report.recovered.filter(item => item.source === source).length;
@@ -986,6 +990,65 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             this.console.warn(`Kestrel clip backfill (${trigger}) failed: ${String(error)}`);
         } finally {
             this.recoveringClips = false;
+        }
+    }
+
+    // A clip became ready (found by the poll, or recovered by the backfill): keep it, and line its detection boxes up with its video in the
+    // background, without making the caller wait for it.
+    private async clipReady(row: { id: string; camera_id: string }, file: string, source: ClipSource, startAt: number | null): Promise<void> {
+        await this.keeper.ready(row.id, row.camera_id, file, source, startAt);
+        void this.alignment(row.id);
+    }
+
+    // The lining up of one visit's clip (alignClip), queued behind the other ffmpeg work. Asking again while it is queued or running gets that same
+    // job. It never rejects: whatever goes wrong is logged and goes no further, so nothing that asks for it can be broken by it.
+    private alignment(visitId: string): Promise<void> {
+        let job = this.alignments.get(visitId);
+        if (!job) {
+            job = this.clipWork.run('ffmpeg', () => this.alignClip(visitId))
+                .catch(error => this.console.warn(`Could not line up the detection boxes of visit ${visitId} with its clip: ${String(error)}`))
+                .finally(() => this.alignments.delete(visitId));
+            this.alignments.set(visitId, job);
+        }
+        return job;
+    }
+
+    // Where the detection boxes of a ready clip really lie in its video differs from clip to clip (align.ts), so each clip is looked at once:
+    // decoded, measured, and the answer kept with the clip (an offset, or none when the footage showed nothing clear: the default for the clip's
+    // source is used then). A visit with too few detection events so far, and a clip that cannot be read, are left for the next sweep.
+    private async alignClip(visitId: string): Promise<void> {
+        const raw = this.released ? undefined : this.db.getRawVisit(visitId);
+        if (!raw || raw.kind !== 'seen' || raw.clip_state !== 'ready' || raw.clip_start_at === null || raw.clip_aligned_at !== null || !raw.clip_file) return;
+        const track = this.db.getTrack(visitId);
+        if (track.frames.length < ALIGN_MIN_SAMPLES) return;
+        const video = await decodeGrayFrames(await sdk.mediaManager.getFFmpegPath(), raw.clip_file);
+        if (this.released) return;
+        if (!video) {
+            this.console.warn(`Could not read the clip of visit ${visitId} to line up its detection boxes; it is tried again later.`);
+            return;
+        }
+        const source = raw.clip_source ?? 'events';
+        const fallback = detectionOffsetMs(raw.camera_id, source);
+        const measured = measureAlignment(video, track.frames, raw.clip_start_at);
+        const offsetMs = measured && isConfidentAlignment(measured) && isPlausibleOffset(measured.offsetMs, fallback) ? measured.offsetMs : null;
+        // A clip that was replaced or deleted while it was being looked at is not the one that was measured.
+        const now = this.db.getRawVisit(visitId);
+        if (!now || now.clip_state !== 'ready' || now.clip_start_at !== raw.clip_start_at || now.clip_aligned_at !== null) return;
+        this.db.setClipAlignment(visitId, offsetMs, Date.now());
+        const evidence = measured ? ` (best ${measured.offsetMs} ms, score ${measured.score.toFixed(2)}, contrast ${measured.contrast.toFixed(2)}, plateau ${measured.plateauMs} ms, ${measured.pairs} boxes over ${(measured.spanMs / 1000).toFixed(1)} s)` : '';
+        this.console.log(`Lined up the detection boxes of visit ${visitId} (${source} clip, camera ${raw.camera_id}): ${offsetMs === null ? 'no confident match' : `the video lags the detections by ${offsetMs} ms`}${evidence}; the default is ${fallback} ms.`);
+    }
+
+    // The ready clips whose boxes were not lined up yet (the plugin was restarted before it could, or the visit had too few detection events
+    // then), the newest first, one at a time.
+    private async alignUnaligned(): Promise<void> {
+        try {
+            for (const row of this.db.listUnaligned(Date.now() - ALIGN_SWEEP_WINDOW_MS, ALIGN_SWEEP_LIMIT)) {
+                if (this.released) return;
+                await this.alignment(row.id);
+            }
+        } catch (error) {
+            this.console.warn(`Looking for clips whose detection boxes are not lined up yet failed: ${String(error)}`);
         }
     }
 
@@ -1362,20 +1425,20 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             if (method === 'POST' && route === 'visits/purge') { jsonReply(response, 200, this.purgeVisits(parseJsonBody(request.body))); return; }
             if (parts[0] === 'visits' && parts[1] && parts.length === 2 && method === 'GET') {
                 const visit = this.db.getVisit(parts[1]);
-                jsonReply(response, visit ? 200 : 404, visit ?? { error: 'Visit not found' }); return;
+                jsonReply(response, visit ? 200 : 404, visit ? visitPayload(visit, this.db) : { error: 'Visit not found' }); return;
             }
             if (parts[0] === 'visits' && parts[1] && parts.length === 3 && method === 'POST') {
                 const id = parts[1];
                 if (parts[2] === 'correct') {
                     const body = parseJsonBody(request.body);
                     if (typeof body.species !== 'string') throw Object.assign(new Error('species is required'), { status: 400 });
-                    jsonReply(response, 200, await this.correctVisit(id, body.species)); return;
+                    jsonReply(response, 200, visitPayload(await this.correctVisit(id, body.species), this.db)); return;
                 }
                 if (parts[2] === 'confirm') {
                     const body = parseJsonBody(request.body);
-                    jsonReply(response, 200, await this.confirmVisit(id, body.also_heard === true)); return;
+                    jsonReply(response, 200, visitPayload(await this.confirmVisit(id, body.also_heard === true), this.db)); return;
                 }
-                if (parts[2] === 'undo') { jsonReply(response, 200, this.undoVisit(id)); return; }
+                if (parts[2] === 'undo') { jsonReply(response, 200, visitPayload(this.undoVisit(id), this.db)); return; }
             }
             jsonReply(response, 404, { error: 'Not found' });
         } catch (error) {
@@ -1401,6 +1464,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         this.heardTimer = setInterval(() => this.heard?.flush(Date.now()), 1_000);
         this.scheduleMaintenance();
         this.backfillTimer = setTimeout(() => { void this.recoverMissingClips('startup'); }, BACKFILL_STARTUP_DELAY_MS);
+        this.alignTimer = setTimeout(() => { void this.alignUnaligned(); }, ALIGN_STARTUP_DELAY_MS);
     }
 
     private scheduleMaintenance(): void {
@@ -1415,6 +1479,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             }
             await removeStalePartials(CLIP_STORE_DIR, Date.now()).catch(error => this.console.warn(`Could not clean the clip store: ${String(error)}`));
             await this.recoverMissingClips('daily');
+            await this.alignUnaligned();
             if (!this.released) this.scheduleMaintenance();
         }, next.getTime() - Date.now());
     }
@@ -1437,9 +1502,12 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         clearInterval(this.heardTimer);
         if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
         clearTimeout(this.backfillTimer);
+        clearTimeout(this.alignTimer);
+        this.alignments.clear();
         for (const wake of this.eventWaiters) wake();
         this.eventWaiters.clear();
         this.livePictures.clear();
+        this.recorder.clear();
         this.store?.close();
     }
 }

@@ -15,7 +15,7 @@ from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from . import birdnet_availability, range_filter
+from . import birdnet_availability, range_filter, recording_keep
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS, SIGNAL_EVENTS
 from .coordinator import KestrelCoordinator
@@ -470,6 +470,80 @@ async def ws_range_filter_set(
     connection.send_result(msg["id"], {**state, "canChange": True})
 
 
+async def _async_keep_target(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> int | None | bool:
+    """The BirdNET-Go detection behind a visit's recording: its number, None when the visit has no lockable
+    recording, or False after an error was sent (the caller stops)."""
+    try:
+        visit = await _coordinator(hass).client.async_request("GET", f"visits/{quote(msg['visit_id'], safe='')}")
+    except KestrelApiError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return False
+    except Exception:
+        _LOGGER.exception("Kestrel could not look up a visit's recording")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return False
+    return recording_keep.detection_id_for_visit(visit)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "kestrel/recording/keep/get", vol.Required("visit_id"): str})
+@websocket_api.async_response
+async def ws_recording_keep_get(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Whether a visit's recording is kept (exempt from BirdNET-Go's age clean-up) and can be. Anyone signed in may look."""
+    can_change = bool(connection.user.is_admin)
+    detection_id = await _async_keep_target(hass, connection, msg)
+    if detection_id is False:
+        return
+    if detection_id is None:
+        connection.send_result(msg["id"], {"keepable": False, "kept": False, "canChange": can_change})
+        return
+    try:
+        state = await recording_keep.async_read(hass, detection_id)
+    except KestrelApiError as err:
+        if err.status == 404:  # BirdNET-Go no longer has this detection
+            connection.send_result(msg["id"], {"keepable": False, "kept": False, "canChange": can_change})
+        else:
+            connection.send_error(msg["id"], err.code, str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Kestrel could not read whether a recording is kept")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], {**state, "canChange": can_change})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "kestrel/recording/keep/set", vol.Required("visit_id"): str, vol.Required("keep"): bool}
+)
+@websocket_api.async_response
+async def ws_recording_keep_set(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Keep a visit's recording, or release it to the normal clean-up. Administrators only: it decides what BirdNET-Go deletes."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Only a Home Assistant administrator can change this")
+        return
+    detection_id = await _async_keep_target(hass, connection, msg)
+    if detection_id is False:
+        return
+    if detection_id is None:
+        connection.send_error(msg["id"], "not_found", "BirdNET-Go has no recording to keep for this one")
+        return
+    try:
+        state = await recording_keep.async_set(hass, detection_id, msg["keep"])
+    except KestrelApiError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Kestrel could not change whether a recording is kept")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], {**state, "canChange": True})
+
+
 @websocket_api.websocket_command({vol.Required("type"): "kestrel/subscribe"})
 @websocket_api.async_response
 async def ws_subscribe(
@@ -523,6 +597,8 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         ws_clips_delete,
         ws_range_filter_get,
         ws_range_filter_set,
+        ws_recording_keep_get,
+        ws_recording_keep_set,
         ws_subscribe,
     ):
         websocket_api.async_register_command(hass, handler)

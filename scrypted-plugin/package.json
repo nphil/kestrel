@@ -14,6 +14,8 @@
     "test:purge": "node --experimental-strip-types --test test/purge.test.mjs",
     "test:store": "node --experimental-strip-types --test test/store.test.mjs",
     "test:clips": "node --experimental-strip-types --test test/clips.test.mjs",
+    "test:track": "node --experimental-strip-types --test test/track.test.mjs",
+    "test:align": "node --experimental-strip-types --test test/align.test.mjs",
     "test:heard": "node --experimental-strip-types --test test/heard.test.mjs",
     "test:seasonal": "node --experimental-strip-types --test test/seasonal.test.mjs",
     "prepublishOnly": "NODE_ENV=production scrypted-webpack",

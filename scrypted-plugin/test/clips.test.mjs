@@ -4,16 +4,26 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ClipKeeper, cutClip, encodeArguments, isInsideStore, keptClipFile, measuredFps, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts } from '../src/clipfiles.ts';
+import { ClipKeeper, cutClip, cutGeometry, encodeArguments, isInsideStore, keptClipFile, measuredFps, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts, videoDurationMs } from '../src/clipfiles.ts';
 import {
-    CLIP_GIVE_UP_MS, CLIP_NVR_AFTER_MS, CLIP_NVR_RETRY_MS, NVR_ASSUMED_VISIT_MS, NVR_LEAD_MS, NVR_MAX_CLIP_MS, NVR_RETENTION_MARGIN_MS, NVR_TAIL_MS,
-    NVR_UNKNOWN_RETENTION_DAYS, ClipResolver, backfillClips, backfillSince, nvrClipWindow, pollPendingClips,
+    CLIP_GIVE_UP_MS, CLIP_NVR_AFTER_MS, CLIP_NVR_RETRY_MS, EVENTS_VIDEO_MAX_EXTRA_MS, NVR_ASSUMED_VISIT_MS, NVR_LEAD_MS, NVR_MAX_CLIP_MS, NVR_RETENTION_MARGIN_MS, NVR_TAIL_MS,
+    NVR_UNKNOWN_RETENTION_DAYS, ClipResolver, backfillClips, backfillSince, eventsClipStart, nvrClipStart, nvrClipWindow, pollPendingClips,
 } from '../src/clips.ts';
-import { SameMomentTracker } from '../src/seen.ts';
+import { SameMomentTracker, findEventsRecorderClip, normalizedTime } from '../src/seen.ts';
 import { KestrelStore } from '../src/store.ts';
+import { visitPayload } from '../src/track.ts';
 
 const DAY = 86_400_000;
 const T0 = 1_791_507_668_972;           // the opossum on the Backyard camera, 2026-10-08 21:01:08 EDT
+// The Events Recorder's clip of the opossum. Its name says the recording began 555 ms after the visit (the raccoon incident) and lasted
+// 19 s. But its ffmpeg starts on the camera's prebuffered stream, so the file holds 20 s of video, and the first frame is where the
+// recording stopped minus that: 445 ms BEFORE the visit.
+const EVENTS_LAG_MS = 555;
+const EVENTS_NAMED_MS = 19_000;
+const EVENTS_VIDEO_MS = 20_000;
+const NAMED_START = T0 + EVENTS_LAG_MS;
+const NAMED_END = NAMED_START + EVENTS_NAMED_MS;
+const eventsStartAt = startedAt => startedAt + EVENTS_LAG_MS + EVENTS_NAMED_MS - EVENTS_VIDEO_MS;
 
 function visit(id, startedAt, { camera = '88', kind = 'seen', status = 'auto', clip = { state: 'none', expectedReadyAt: null } } = {}) {
     return {
@@ -48,6 +58,18 @@ test('a clip starts 5 s before the visit and ends 10 s after it; an unknown end 
     assert.deepEqual(nvrClipWindow(T0, null), unknown);
 });
 
+test('where a cut starts: at the start of its window when the lead-in was skipped, later when the NVR had less footage, earlier when there was too much lead-in to skip', () => {
+    const window = nvrClipWindow(T0, T0 + 8_000);           // 5 s before the visit to 10 s after its last detection: 23 s
+    assert.deepEqual(window, { start: T0 - 5_000, duration: 23_000 });
+    // The stream ends where the window does, so the clip's first frame is `spanMs` before that end.
+    const cut = videoMs => { const geometry = cutGeometry(videoMs, window.duration); return { ...geometry, startAt: nvrClipStart(window, geometry.spanMs) }; };
+    assert.deepEqual(cut(28_500), { leadMs: 5_500, keepMs: 23_000, spanMs: 23_000, startAt: window.start }, '5.5 s of lead-in, skipped: the clip starts where its window does');
+    assert.deepEqual(cut(23_000), { leadMs: 0, keepMs: 23_000, spanMs: 23_000, startAt: window.start }, 'no lead-in at all');
+    assert.deepEqual(cut(9_000), { leadMs: 0, keepMs: 9_000, spanMs: 9_000, startAt: window.start + 14_000 }, 'the NVR only had the last 9 s of the window: the clip begins 14 s into it');
+    assert.deepEqual(cut(53_000), { leadMs: 30_000, keepMs: 23_000, spanMs: 23_000, startAt: window.start }, 'exactly as much lead-in as can be skipped');
+    assert.deepEqual(cut(60_000), { leadMs: 30_000, keepMs: 23_000, spanMs: 30_000, startAt: window.start - 7_000 }, '37 s of lead-in came and only 30 s are skipped: the clip begins 7 s before its window');
+});
+
 test('the backfill window follows the NVR retention (plus a margin), or a long look-back when the retention is not a fixed period', () => {
     const now = T0;
     assert.equal(backfillSince(now, 3), now - 3 * DAY - NVR_RETENTION_MARGIN_MS);
@@ -70,13 +92,118 @@ test('the tracker says when the animal was last seen, for the visit it is still 
     assert.equal(tracker.lastSeen('88', 'visit-1'), undefined, 'once another visit took the camera over, the end is no longer known');
 });
 
+// --- Finding the Events Recorder's clip, and when it starts ---------------------------------------------------------------------------
+
+// The camera and the folder, faked: `listed` is what the camera lists, `folder` the file names in the folder, `present` the files that exist.
+function eventsWorld({ listed = [], folder = [], present = [] } = {}) {
+    const asked = [];
+    const ports = {
+        async videoClips(range) { asked.push(range); return listed; },
+        exists: file => present.includes(file),
+        async files(directory) { asked.push(directory); return folder; },
+    };
+    return { asked, ports };
+}
+
+const EVENTS_DIR = '/NVR/clips/88/videoclips';
+const clipName = (start, end) => `${start}_${end}_1101101000.mp4`;
+
+test('every way the Events Recorder\'s clip is found reports when its recording stopped and how long it says it lasted: a listed clip says it itself', async () => {
+    const file = `${EVENTS_DIR}/${clipName(NAMED_START, NAMED_END)}`;
+    const { asked, ports } = eventsWorld({ listed: [{ startTime: NAMED_START, duration: EVENTS_NAMED_MS, resources: { video: { file } } }], present: [file] });
+    assert.deepEqual(await findEventsRecorderClip(ports, '88', T0), { file, endAt: NAMED_END, spanMs: EVENTS_NAMED_MS });
+    assert.deepEqual(asked, [{ startTime: T0 - 90_000, endTime: T0 + 90_000, count: 50 }], 'the camera was asked about the 90 s either side of the visit; the folder was not needed');
+    // A camera that gives its times in epoch seconds gives the duration in seconds too: everything is still reported in milliseconds.
+    const seconds = Math.floor(NAMED_START / 1000);
+    const inSeconds = eventsWorld({ listed: [{ startTime: seconds, duration: 19, resources: { video: { file } } }], present: [file] });
+    assert.deepEqual(await findEventsRecorderClip(inSeconds.ports, '88', T0), { file, endAt: (seconds + 19) * 1000, spanMs: 19_000 });
+    assert.equal(normalizedTime(1_791_507_669), 1_791_507_669_000);
+    assert.equal(normalizedTime(NAMED_START), NAMED_START);
+    // A listing without a duration is taken to last a minute, the longest an event is recorded for.
+    const open = eventsWorld({ listed: [{ startTime: T0 - 30_000, resources: { video: { file } } }], present: [file] });
+    assert.deepEqual(await findEventsRecorderClip(open.ports, '88', T0), { file, endAt: T0 + 30_000, spanMs: 60_000 });
+});
+
+test('without a listing the clip comes from the folder: the one that starts closest to the visit, ending at the second number of its name', async () => {
+    const wide = clipName(T0 - 30_000, T0 + 10_000);
+    const close = clipName(NAMED_START, NAMED_END);
+    const folder = [wide, close, clipName(T0 - 600_000, T0 - 580_000), clipName(T0 + 60_000, T0 + 80_000), 'notes.txt', `${NAMED_START}_${NAMED_START + 1}.mp4.part`];
+    const { asked, ports } = eventsWorld({ folder, present: [`${EVENTS_DIR}/${wide}`, `${EVENTS_DIR}/${close}`] });
+    assert.deepEqual(await findEventsRecorderClip(ports, '88', T0), { file: `${EVENTS_DIR}/${close}`, endAt: NAMED_END, spanMs: EVENTS_NAMED_MS }, 'two clips cover the visit; the one that begins nearest it wins');
+    assert.ok(asked.includes(EVENTS_DIR), 'the camera\'s own folder was read');
+    const notYet = eventsWorld({ folder, present: [`${EVENTS_DIR}/${wide}`] });
+    assert.equal(await findEventsRecorderClip(notYet.ports, '88', T0), undefined, 'the nearest clip is not on disk yet: nothing is linked to a farther one');
+    const older = eventsWorld({ folder: [wide], present: [`${EVENTS_DIR}/${wide}`] });
+    assert.deepEqual(await findEventsRecorderClip(older.ports, '88', T0), { file: `${EVENTS_DIR}/${wide}`, endAt: T0 + 10_000, spanMs: 40_000 }, 'a clip that began before the visit says when it stopped');
+});
+
+test('a listed clip whose file is not there yet gives way to the folder\'s, and a listed clip named without its folder is looked for in it last', async () => {
+    const inFolder = clipName(NAMED_START + 40, NAMED_END + 40);
+    const listed = [{ startTime: NAMED_START, duration: EVENTS_NAMED_MS, resources: { video: { file: `${EVENTS_DIR}/${clipName(NAMED_START, NAMED_END)}` } } }];
+    const world = eventsWorld({ listed, folder: [inFolder], present: [`${EVENTS_DIR}/${inFolder}`] });
+    assert.deepEqual(await findEventsRecorderClip(world.ports, '88', T0), { file: `${EVENTS_DIR}/${inFolder}`, endAt: NAMED_END + 40, spanMs: EVENTS_NAMED_MS }, 'the end is the folder file\'s own');
+    const bare = eventsWorld({ listed: [{ startTime: NAMED_START, duration: EVENTS_NAMED_MS, resources: { video: { file: 'late.mp4' } } }], present: [`${EVENTS_DIR}/late.mp4`] });
+    assert.deepEqual(await findEventsRecorderClip(bare.ports, '88', T0), { file: `${EVENTS_DIR}/late.mp4`, endAt: NAMED_END, spanMs: EVENTS_NAMED_MS });
+    const absolute = eventsWorld({ listed: [{ startTime: NAMED_START, duration: EVENTS_NAMED_MS, resources: { video: { file: '/elsewhere/late.mp4' } } }], present: ['/elsewhere/late.mp4'] });
+    assert.deepEqual(await findEventsRecorderClip(absolute.ports, '88', T0), { file: '/elsewhere/late.mp4', endAt: NAMED_END, spanMs: EVENTS_NAMED_MS });
+});
+
+test('no clip yet: nothing listed, nothing in the folder that covers the visit, a listed clip that stopped before it, or the file is not there', async () => {
+    assert.equal(await findEventsRecorderClip(eventsWorld().ports, '88', T0), undefined);
+    const lateName = clipName(T0 + 6_000, T0 + 26_000);
+    const late = { startTime: T0 + 6_000, duration: 20_000, resources: { video: { file: `${EVENTS_DIR}/${lateName}` } } };
+    const world = eventsWorld({ listed: [late], folder: [lateName], present: [`${EVENTS_DIR}/${lateName}`] });
+    assert.equal(await findEventsRecorderClip(world.ports, '88', T0), undefined, 'a clip that begins more than 5 s after the visit is another event');
+    // A duration is in milliseconds: this clip stopped 41 s before the visit began (read as seconds, it would have covered it for hours).
+    const stoppedName = clipName(T0 - 60_000, T0 - 41_000);
+    const stopped = { startTime: T0 - 60_000, duration: 19_000, resources: { video: { file: `${EVENTS_DIR}/${stoppedName}` } } };
+    assert.equal(await findEventsRecorderClip(eventsWorld({ listed: [stopped], present: [`${EVENTS_DIR}/${stoppedName}`] }).ports, '88', T0), undefined, 'a listed clip that stopped before the visit began does not cover it');
+    const gone = { startTime: NAMED_START, duration: EVENTS_NAMED_MS, resources: { video: { file: `${EVENTS_DIR}/${clipName(NAMED_START, NAMED_END)}` } } };
+    assert.equal(await findEventsRecorderClip(eventsWorld({ listed: [gone] }).ports, '88', T0), undefined, 'listed, but not on disk');
+});
+
+test('the first frame of an Events Recorder clip is where its recording stopped minus the video in the file; the start in its name is off by seconds (measured on real clips)', async () => {
+    const startOf = async (name, visitStartedAt, videoMs) => eventsClipStart(await findEventsRecorderClip(eventsWorld({ folder: [name], present: [`${EVENTS_DIR}/${name}`] }).ports, '88', visitStartedAt), videoMs);
+    // 18.996 s between the numbers of the name and 19.6 s of video: the first frame is 604 ms before the start the name says.
+    assert.equal(await startOf(clipName(1_793_327_225_041, 1_793_327_244_037), 1_793_327_225_100, 19_600), 1_793_327_224_437);
+    assert.equal(1_793_327_225_041 - 1_793_327_224_437, 604);
+    // 19.398 s between the numbers and 21.6 s of video: the first frame is 2.2 s before the start the name says.
+    assert.equal(await startOf(clipName(1_793_327_300_000, 1_793_327_319_398), 1_793_327_300_500, 21_600), 1_793_327_297_798);
+    assert.equal(1_793_327_300_000 - 1_793_327_297_798, 2_202);
+});
+
+test('a video that cannot be measured, or does not fit its name, gives no start; one that fits gives a whole number of milliseconds', () => {
+    const clip = { file: '/f.mp4', endAt: T0 + 20_000, spanMs: 20_000 };
+    assert.equal(EVENTS_VIDEO_MAX_EXTRA_MS, 30_000);
+    assert.equal(eventsClipStart(clip, 20_000), T0, 'as long as its name says');
+    assert.equal(eventsClipStart(clip, 50_000), T0 - 30_000, 'exactly 30 s more than its name says is still believed');
+    assert.equal(eventsClipStart(clip, 50_001), null, 'more than that is not');
+    assert.equal(eventsClipStart(clip, 10_000), T0 + 10_000, 'exactly half of what its name says is still believed');
+    assert.equal(eventsClipStart(clip, 9_999), null, 'less than that is not');
+    for (const bad of [0, -1, -20_000, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(eventsClipStart(clip, bad), null, `${bad} ms of video`);
+    assert.equal(eventsClipStart({ ...clip, endAt: T0 + 20_000.4 }, 20_000), T0, 'a name in epoch seconds with a fraction does not leave a fraction of a millisecond');
+});
+
 // --- The order clips are looked for in -----------------------------------------------------------------------------------------------
 
-// Fake sources that write down every question they are asked, in order.
-function fakes({ events = {}, records = true, nvr = () => ({ ok: true, file: '/NVR/kestrel/clips/88/cut.mp4' }) } = {}) {
+// Fake sources that write down every question they are asked, in order (`calls`), and every clip file they are asked to measure
+// (`probed`). The Events Recorder's clip is named as in the raccoon incident (the recording began 555 ms after the visit and lasted 19 s)
+// and holds `videoMs[file]` of video (20 s unless said otherwise: more than its name says, as real clips do). A cut from the NVR begins
+// 5 s before the visit (the lead the plugin asks for).
+function fakes({ events = {}, videoMs = {}, records = true, nvr = v => ({ ok: true, file: '/NVR/kestrel/clips/88/cut.mp4', startAt: v.startedAt - NVR_LEAD_MS }) } = {}) {
     const calls = [];
+    const probed = [];
     const sources = {
-        async events(v) { calls.push(`events:${v.id}`); return events[v.id]; },
+        async events(v) {
+            calls.push(`events:${v.id}`);
+            return events[v.id] === undefined ? undefined : { file: events[v.id], endAt: v.startedAt + EVENTS_LAG_MS + EVENTS_NAMED_MS, spanMs: EVENTS_NAMED_MS };
+        },
+        async videoDurationMs(file) {
+            probed.push(file);
+            const ms = videoMs[file] ?? EVENTS_VIDEO_MS;
+            if (ms instanceof Error) throw ms;
+            return ms;
+        },
         nvrRecords(cameraId) { calls.push(`records:${cameraId}`); return records; },
         async cutNvr(v) {
             calls.push(`nvr:${v.id}`);
@@ -85,22 +212,60 @@ function fakes({ events = {}, records = true, nvr = () => ({ ok: true, file: '/N
             return result;
         },
     };
-    return { calls, sources };
+    return { calls, probed, sources };
 }
 
 const pending = (id = 'v1', age = 0, extra = {}) => ({ id, cameraId: '88', startedAt: T0 - age, ...extra });
 const resolverAt = (sources, clock, options = {}) => new ClipResolver(sources, { now: () => clock.now, ...options });
 
 test('the Events Recorder is asked first and, when it has the clip, the NVR is never touched', async () => {
-    const { calls, sources } = fakes({ events: { v1: '/NVR/clips/88/videoclips/1_2.mp4' } });
+    const { calls, probed, sources } = fakes({ events: { v1: '/NVR/clips/88/videoclips/1_2.mp4' } });
     const clock = { now: T0 + CLIP_GIVE_UP_MS + 60_000 };      // even a visit long past its give-up time keeps the Events Recorder's clip
-    const verdict = await resolverAt(sources, clock).resolvePending(pending('v1', CLIP_GIVE_UP_MS + 60_000));
-    assert.deepEqual(verdict, { verdict: 'ready', file: '/NVR/clips/88/videoclips/1_2.mp4', source: 'events' });
+    const overdue = pending('v1', CLIP_GIVE_UP_MS + 60_000);
+    const verdict = await resolverAt(sources, clock).resolvePending(overdue);
+    assert.deepEqual(verdict, { verdict: 'ready', file: '/NVR/clips/88/videoclips/1_2.mp4', source: 'events', startAt: eventsStartAt(overdue.startedAt) });
     assert.deepEqual(calls, ['events:v1']);
+    assert.deepEqual(probed, ['/NVR/clips/88/videoclips/1_2.mp4']);
+});
+
+test('an Events Recorder clip is measured once, when it is found, never at the polls of a visit that has no clip yet; a cut from the NVR is not measured at all', async () => {
+    const events = {};
+    const { probed, sources } = fakes({ events });
+    const clock = { now: T0 + 1_000 };
+    const resolver = resolverAt(sources, clock);
+    for (let poll = 0; poll < 3; poll++) assert.deepEqual(await resolver.resolvePending(pending()), { verdict: 'wait' });
+    assert.deepEqual(probed, [], 'no clip, nothing to measure');
+    events.v1 = '/NVR/clips/88/videoclips/found.mp4';
+    assert.deepEqual(await resolver.resolvePending(pending()), { verdict: 'ready', file: events.v1, source: 'events', startAt: eventsStartAt(T0) });
+    assert.deepEqual(probed, [events.v1]);
+    assert.ok(eventsStartAt(T0) < T0, 'the first frame is before the visit, although the name says the recording began after it');
+
+    const cut = fakes();
+    clock.now = T0 + CLIP_NVR_AFTER_MS;
+    assert.deepEqual(await resolverAt(cut.sources, clock).resolvePending(pending()), { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr', startAt: T0 - NVR_LEAD_MS });
+    assert.deepEqual(cut.probed, [], 'the start of a cut follows from the window it was cut for');
+});
+
+test('an Events Recorder clip whose video cannot be measured or does not fit its name is still ready, with no start and one warning that names the visit; the start in its name is never used instead', async () => {
+    const file = '/NVR/clips/88/videoclips/odd.mp4';
+    const tooLong = EVENTS_NAMED_MS + EVENTS_VIDEO_MAX_EXTRA_MS + 1;
+    const tooShort = EVENTS_NAMED_MS / 2 - 1;
+    const cases = [['reads as nothing', 0, 0], ['cannot be measured at all', new Error('no ffmpeg'), 0], ['reads as less than nothing', -3, -3],
+        ['holds more than 30 s more than its name says', tooLong, tooLong], ['holds less than half of what its name says', tooShort, tooShort]];
+    for (const [why, videoMs, measured] of cases) {
+        for (const [path, ask] of [['poll', resolver => resolver.resolvePending(pending())], ['backfill', resolver => resolver.resolveMissing(pending())]]) {
+            const warnings = [];
+            const { probed, sources } = fakes({ events: { v1: file }, videoMs: { [file]: videoMs } });
+            const resolver = resolverAt(sources, { now: T0 + 60_000 }, { onNoStart: (v, clip, ms) => warnings.push([v.id, clip.file, clip.spanMs, ms]) });
+            assert.deepEqual(await ask(resolver), { verdict: 'ready', file, source: 'events', startAt: null }, `${why} (${path})`);
+            assert.deepEqual(probed, [file], `${why} (${path}): measured once`);
+            assert.deepEqual(warnings, [['v1', file, EVENTS_NAMED_MS, measured]], `${why} (${path}): one warning`);
+        }
+    }
 });
 
 test('the NVR is only asked once the visit is overdue, and always after the Events Recorder was asked again', async () => {
-    const { calls, sources } = fakes();
+    const { calls, probed, sources } = fakes();
     const clock = { now: T0 };
     const resolver = resolverAt(sources, clock);
     clock.now = T0 + 1_000;
@@ -111,20 +276,21 @@ test('the NVR is only asked once the visit is overdue, and always after the Even
     calls.length = 0;
     clock.now = T0 + CLIP_NVR_AFTER_MS;
     const verdict = await resolver.resolvePending(pending());
-    assert.deepEqual(verdict, { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr' });
+    assert.deepEqual(verdict, { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr', startAt: T0 - NVR_LEAD_MS });
     assert.deepEqual(calls, ['events:v1', 'records:88', 'nvr:v1'], 'Events Recorder first, then the NVR');
+    assert.deepEqual(probed, [], 'a cut from the NVR is not measured');
 });
 
 test('a clip the Events Recorder finishes while the NVR is failing still wins', async () => {
     let failing = true;
     const events = {};
-    const { calls, sources } = fakes({ events, nvr: () => failing ? { ok: false, reason: 'failed' } : { ok: true, file: '/x' } });
+    const { calls, sources } = fakes({ events, nvr: v => failing ? { ok: false, reason: 'failed' } : { ok: true, file: '/x', startAt: v.startedAt } });
     const clock = { now: T0 + 100_000 };
     const resolver = resolverAt(sources, clock);
     assert.deepEqual(await resolver.resolvePending(pending()), { verdict: 'wait' });
     events.v1 = '/NVR/clips/88/videoclips/late.mp4';
     clock.now += CLIP_NVR_RETRY_MS + 1;
-    assert.deepEqual(await resolver.resolvePending(pending()), { verdict: 'ready', file: '/NVR/clips/88/videoclips/late.mp4', source: 'events' });
+    assert.deepEqual(await resolver.resolvePending(pending()), { verdict: 'ready', file: '/NVR/clips/88/videoclips/late.mp4', source: 'events', startAt: eventsStartAt(T0) });
     assert.equal(calls.filter(call => call === 'nvr:v1').length, 1, 'the NVR was only tried once');
     failing = false;
 });
@@ -166,7 +332,7 @@ test('a visit is given up on only after the NVR also failed, and the NVR gets on
 test('a visit the NVR can cut at the give-up time is ready, not none', async () => {
     const { sources } = fakes();
     const clock = { now: T0 + CLIP_GIVE_UP_MS };
-    assert.deepEqual(await resolverAt(sources, clock).resolvePending(pending()), { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr' });
+    assert.deepEqual(await resolverAt(sources, clock).resolvePending(pending()), { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr', startAt: T0 - NVR_LEAD_MS });
 });
 
 test('"the NVR has no footage" and "no NVR on this camera" end the visit with the reason', async () => {
@@ -204,14 +370,16 @@ test('retry bookkeeping is dropped for visits that are not pending any more', as
     assert.equal(calls.filter(call => call === 'nvr:v1').length, 2, 'forgotten, so the very next poll asks the NVR again');
 });
 
-test('the backfill takes the same two sources in the same order, with no waiting', async () => {
-    const { calls, sources } = fakes({ events: { found: '/NVR/clips/88/videoclips/found.mp4' } });
+test('the backfill takes the same two sources in the same order, with no waiting, and measures the Events Recorder\'s clip it finds just as the poll does', async () => {
+    const { calls, probed, sources } = fakes({ events: { found: '/NVR/clips/88/videoclips/found.mp4' } });
     const resolver = new ClipResolver(sources);
-    assert.deepEqual(await resolver.resolveMissing(pending('found', 2 * DAY)), { verdict: 'ready', file: '/NVR/clips/88/videoclips/found.mp4', source: 'events' });
+    assert.deepEqual(await resolver.resolveMissing(pending('found', 2 * DAY)), { verdict: 'ready', file: '/NVR/clips/88/videoclips/found.mp4', source: 'events', startAt: eventsStartAt(T0 - 2 * DAY) });
     assert.deepEqual(calls, ['events:found']);
+    assert.deepEqual(probed, ['/NVR/clips/88/videoclips/found.mp4']);
     calls.length = 0;
-    assert.deepEqual(await resolver.resolveMissing(pending('cut', 2 * DAY)), { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr' });
+    assert.deepEqual(await resolver.resolveMissing(pending('cut', 2 * DAY)), { verdict: 'ready', file: '/NVR/kestrel/clips/88/cut.mp4', source: 'nvr', startAt: T0 - 2 * DAY - NVR_LEAD_MS });
     assert.deepEqual(calls, ['events:cut', 'records:88', 'nvr:cut']);
+    assert.equal(probed.length, 1, 'a cut from the NVR is not measured');
     const failing = fakes({ nvr: () => ({ ok: false, reason: 'unavailable' }) });
     assert.deepEqual(await new ClipResolver(failing.sources).resolveMissing(pending('gone', 2 * DAY)), { verdict: 'none', reason: 'unavailable' });
 });
@@ -255,8 +423,8 @@ test('the backfill walks the candidates oldest first, reports what happened, and
         { id: 'd', camera_id: '106', started_at: 4 }, { id: 'e', camera_id: '88', started_at: 5 }, { id: 'f', camera_id: '88', started_at: 6 },
     ];
     const verdicts = {
-        a: { verdict: 'ready', file: '/s/a.mp4', source: 'nvr' }, b: { verdict: 'none', reason: 'unavailable' }, c: { verdict: 'ready', file: '/e/c.mp4', source: 'events' },
-        d: { verdict: 'none', reason: 'no_nvr' }, e: { verdict: 'none', reason: 'failed' }, f: { verdict: 'ready', file: '/s/f.mp4', source: 'nvr' },
+        a: { verdict: 'ready', file: '/s/a.mp4', source: 'nvr', startAt: 10 }, b: { verdict: 'none', reason: 'unavailable' }, c: { verdict: 'ready', file: '/e/c.mp4', source: 'events', startAt: null },
+        d: { verdict: 'none', reason: 'no_nvr' }, e: { verdict: 'none', reason: 'failed' }, f: { verdict: 'ready', file: '/s/f.mp4', source: 'nvr', startAt: 60 },
     };
     const asked = [];
     const stored = [];
@@ -264,11 +432,11 @@ test('the backfill walks the candidates oldest first, reports what happened, and
         candidates: () => rows,
         beyondRetention: () => 7,
         resolve: async v => { asked.push(v.id); if (v.id === 'f') throw new Error('disk full'); return verdicts[v.id]; },
-        recovered: async (row, file, source) => { stored.push([row.id, file, source]); },
+        recovered: async (row, file, source, startAt) => { stored.push([row.id, file, source, startAt]); },
         stopped: () => false,
     });
     assert.deepEqual(asked, ['a', 'b', 'c', 'd', 'e', 'f'], 'in the order given');
-    assert.deepEqual(stored, [['a', '/s/a.mp4', 'nvr'], ['c', '/e/c.mp4', 'events']]);
+    assert.deepEqual(stored, [['a', '/s/a.mp4', 'nvr', 10], ['c', '/e/c.mp4', 'events', null]], 'a clip whose start is unknown is recovered all the same');
     assert.deepEqual(report, {
         candidates: 6, recovered: [{ id: 'a', source: 'nvr' }, { id: 'c', source: 'events' }], footageGone: ['b'], failed: ['e', 'f'], noNvr: ['d'], beyondRetention: 7,
     });
@@ -363,13 +531,14 @@ test('copy-on-ready: an Events Recorder clip is copied into Kestrel\'s store, th
     await withKeeper(async ({ store, keeper, root, announced, eventsClip }) => {
         store.saveVisit(visit('v1', T0, { clip: { state: 'pending', expectedReadyAt: T0 + 45_000 } }));
         const original = await eventsClip('a', 4321);
-        await keeper.ready('v1', '88', original, 'events');
+        await keeper.ready('v1', '88', original, 'events', eventsStartAt(T0));
         const row = store.getRawVisit('v1');
         assert.equal(row.clip_state, 'ready');
         assert.equal(row.clip_file, join(root, '88', 'v1.mp4'));
         assert.equal(row.clip_kept, 1);
         assert.equal(row.clip_bytes, 4321);
         assert.equal(row.clip_source, 'events');
+        assert.equal(row.clip_start_at, eventsStartAt(T0), 'the clip says when it starts');
         assert.deepEqual(await readFile(row.clip_file), await readFile(original), 'a byte-for-byte copy');
         assert.equal((await stat(original)).size, 4321, 'the Events Recorder\'s own file is untouched');
         assert.deepEqual((await readdir(join(root, '88'))), ['v1.mp4'], 'no .part file is left behind');
@@ -391,7 +560,7 @@ test('copy-on-ready: a clip another plugin is still writing is copied only after
             }
         })();
         const started = Date.now();
-        await keeper.ready('v1', '88', original, 'events');
+        await keeper.ready('v1', '88', original, 'events', eventsStartAt(T0));
         await writer;
         const row = store.getRawVisit('v1');
         assert.equal(row.clip_bytes, 400, 'the copy has everything the writer wrote');
@@ -407,12 +576,13 @@ test('copy-on-ready: a clip the plugin cut itself is already in the store and is
         const cut = keptClipFile(root, '88', 'v1');
         await mkdir(join(root, '88'), { recursive: true });
         await writeFile(cut, Buffer.alloc(777, 1));
-        await keeper.ready('v1', '88', cut, 'nvr');
+        await keeper.ready('v1', '88', cut, 'nvr', T0 - NVR_LEAD_MS);
         const row = store.getRawVisit('v1');
         assert.equal(row.clip_file, cut);
         assert.equal(row.clip_kept, 1);
         assert.equal(row.clip_bytes, 777);
         assert.equal(row.clip_source, 'nvr');
+        assert.equal(row.clip_start_at, T0 - NVR_LEAD_MS);
         assert.equal(announced[0].clip.source, 'nvr');
     });
 });
@@ -423,7 +593,7 @@ test('copy-on-ready: when the copy fails the other plugin\'s file stays linked, 
         const original = await eventsClip('a', 500);
         // A file where the camera folder should be: the copy cannot be made.
         await writeFile(join(root, '88'), 'in the way');
-        await keeper.ready('v1', '88', original, 'events');
+        await keeper.ready('v1', '88', original, 'events', eventsStartAt(T0));
         let row = store.getRawVisit('v1');
         assert.equal(row.clip_state, 'ready', 'the visit still gets its clip');
         assert.equal(row.clip_file, original);
@@ -436,6 +606,7 @@ test('copy-on-ready: when the copy fails the other plugin\'s file stays linked, 
         assert.equal(row.clip_file, join(root, '88', 'v1.mp4'));
         assert.equal(row.clip_kept, 1);
         assert.equal(row.clip_bytes, 500);
+        assert.equal(row.clip_start_at, eventsStartAt(T0), 'copying the clip later does not disturb when it starts');
     });
 });
 
@@ -565,8 +736,8 @@ test('a disk that is not mounted is not a clean-out: kept clips missing together
 
 // pollPendingClips is main.ts's own loop; here it runs over a real store, the real keeper and the real resolver, with only the two
 // outside sources (the Events Recorder's folder and the NVR) faked.
-function pollerFor({ store, keeper, clock, sources }) {
-    const resolver = resolverAt(sources, clock);
+function pollerFor({ store, keeper, clock, sources, options = {} }) {
+    const resolver = resolverAt(sources, clock, options);
     const nones = [];
     return {
         nones,
@@ -574,7 +745,7 @@ function pollerFor({ store, keeper, clock, sources }) {
             pending: () => store.listPendingClips(clock.now, 100),
             endedAt: () => undefined,
             resolve: v => resolver.resolvePending(v),
-            ready: (row, file, source) => keeper.ready(row.id, row.camera_id, file, source),
+            ready: (row, file, source, startAt) => keeper.ready(row.id, row.camera_id, file, source, startAt),
             none: (row, reason) => { nones.push([row.id, reason]); store.setClip(row.id, 'none', null); },
             failed: (row, error) => { throw error; },
             stopped: () => false,
@@ -585,12 +756,15 @@ function pollerFor({ store, keeper, clock, sources }) {
 test('a new visit gets the Events Recorder\'s clip when it appears: kept in Kestrel\'s store, source "events", the NVR never asked', async () => {
     await withKeeper(async ({ store, keeper, root, eventsClip, announced }) => {
         store.saveVisit(visit('v1', T0, { clip: { state: 'pending', expectedReadyAt: T0 + 45_000 } }));
+        store.appendTrackFrames('v1', [{ t: T0 + 100, boxes: [{ x: 0.45, y: 0.77, w: 0.06, h: 0.13, className: 'animal', score: 0.82 }] }]);
         const events = {};
-        const { calls, sources } = fakes({ events });
+        const { calls, probed, sources } = fakes({ events });
         const clock = { now: T0 + 1_000 };
         const { poll } = pollerFor({ store, keeper, clock, sources });
         await poll();
         assert.equal(store.getVisit('v1').clip.state, 'pending', 'nothing yet one second in');
+        assert.deepEqual(probed, [], 'nothing is measured while there is no clip');
+        assert.equal('detections' in visitPayload(store.getVisit('v1'), store), false, 'and no boxes are offered for a clip that is not there');
         events.v1 = await eventsClip('v1', 5000);                  // the Events Recorder finishes its clip
         clock.now = T0 + 20_000;
         await poll();
@@ -599,11 +773,14 @@ test('a new visit gets the Events Recorder\'s clip when it appears: kept in Kest
         const row = store.getRawVisit('v1');
         assert.equal(row.clip_file, join(root, '88', 'v1.mp4'), 'Kestrel\'s own copy is what the visit serves');
         assert.equal(row.clip_kept, 1);
+        assert.equal(row.clip_start_at, eventsStartAt(T0), 'the start worked out from the Events Recorder\'s clip is kept with it');
+        assert.equal(visitPayload(store.getVisit('v1'), store).detections.clipStartAt, eventsStartAt(T0), 'and it is what the boxes are drawn from');
         assert.deepEqual(await readFile(row.clip_file), await readFile(events.v1));
         assert.ok(!calls.some(call => call.startsWith('nvr:') || call.startsWith('records:')), 'the NVR was never asked');
         assert.deepEqual(announced.map(v => v.id), ['v1']);
         await poll();
         assert.deepEqual(announced.map(v => v.id), ['v1'], 'and nothing more happens at the next poll');
+        assert.deepEqual(probed, [events.v1], 'the clip was measured once, when it was found');
     });
 });
 
@@ -614,7 +791,7 @@ test('a new visit the Events Recorder never clips gets an NVR clip once overdue,
             const file = keptClipFile(root, '88', v.id);
             await mkdir(join(root, '88'), { recursive: true });
             await writeFile(file, Buffer.alloc(2048, 3));
-            return { ok: true, file };
+            return { ok: true, file, startAt: v.startedAt - NVR_LEAD_MS };
         };
         const { calls, sources } = fakes({ nvr: cut });
         const clock = { now: T0 + 60_000 };
@@ -629,6 +806,7 @@ test('a new visit the Events Recorder never clips gets an NVR clip once overdue,
         assert.equal(row.clip_source, 'nvr');
         assert.equal(row.clip_kept, 1);
         assert.equal(row.clip_bytes, 2048);
+        assert.equal(row.clip_start_at, T0 - NVR_LEAD_MS, 'the start of the cut is kept with the clip');
         assert.equal(store.getVisit('v2').clip.source, 'nvr');
         assert.deepEqual(calls.slice(-3), ['events:v2', 'records:88', 'nvr:v2'], 'the Events Recorder was asked right before the NVR');
         assert.equal(announced.length, 1);
@@ -656,13 +834,61 @@ test('a new visit nobody can give a clip ends with none only after five minutes 
     });
 });
 
+test('a new visit whose Events Recorder clip cannot be placed still gets the clip: ready and announced, no start stored, one warning, and no detection boxes in its payload though it has some', async () => {
+    await withKeeper(async ({ store, keeper, root, eventsClip, announced }) => {
+        store.saveVisit(visit('v1', T0, { clip: { state: 'pending', expectedReadyAt: T0 + 45_000 } }));
+        store.appendTrackFrames('v1', [{ t: T0 + 100, boxes: [{ x: 0.45, y: 0.77, w: 0.06, h: 0.13, className: 'animal', score: 0.82 }] }]);
+        const events = { v1: await eventsClip('v1', 3000) };
+        const { probed, sources } = fakes({ events, videoMs: { [events.v1]: 0 } });
+        const noStart = [];
+        const { poll } = pollerFor({ store, keeper, clock: { now: T0 + 20_000 }, sources, options: { onNoStart: (v, clip, ms) => noStart.push([v.id, clip.spanMs, ms]) } });
+        await poll();
+        const row = store.getRawVisit('v1');
+        assert.equal(row.clip_state, 'ready');
+        assert.equal(row.clip_file, join(root, '88', 'v1.mp4'), 'the clip is kept like any other');
+        assert.equal(row.clip_start_at, null);
+        assert.equal(store.getVisit('v1').clip.source, 'events');
+        assert.deepEqual(announced.map(v => v.id), ['v1']);
+        assert.deepEqual(noStart, [['v1', EVENTS_NAMED_MS, 0]]);
+        assert.equal(store.getTrack('v1').frames.length, 1, 'the boxes are kept');
+        assert.equal('detections' in visitPayload(store.getVisit('v1'), store), false, 'but without a start there is nothing to draw them from');
+        await poll();
+        assert.deepEqual(probed, [events.v1], 'measured once, not at every poll');
+        assert.equal(noStart.length, 1, 'and warned about once');
+    });
+});
+
+test('the backfill gives a recovered Events Recorder clip its start just as the poll does: worked out when the video fits its name, none when it does not', async () => {
+    await withKeeper(async ({ store, keeper, eventsClip }) => {
+        store.saveVisit(visit('good', T0));
+        store.saveVisit(visit('odd', T0 + 1_000));
+        const events = { good: await eventsClip('good', 1200), odd: await eventsClip('odd', 800) };
+        const { probed, sources } = fakes({ events, videoMs: { [events.odd]: 0 } });
+        const unplaced = [];
+        const resolver = new ClipResolver(sources, { onNoStart: v => unplaced.push(v.id) });
+        const report = await backfillClips({
+            candidates: () => store.listBackfillCandidates(0),
+            beyondRetention: () => 0,
+            resolve: v => resolver.resolveMissing(v),
+            recovered: (row, file, source, startAt) => keeper.ready(row.id, row.camera_id, file, source, startAt),
+            stopped: () => false,
+        });
+        assert.deepEqual(report.recovered, [{ id: 'good', source: 'events' }, { id: 'odd', source: 'events' }]);
+        assert.equal(store.getRawVisit('good').clip_start_at, eventsStartAt(T0));
+        assert.equal(store.getRawVisit('odd').clip_start_at, null);
+        assert.equal(store.getVisit('odd').clip.state, 'ready', 'the clip plays all the same');
+        assert.deepEqual(unplaced, ['odd']);
+        assert.deepEqual(probed, [events.good, events.odd], 'each clip was measured once');
+    });
+});
+
 // --- Deleting clips on request ---------------------------------------------------------------------------------------------------------
 
 async function seedKept({ store, keeper, eventsClip }, specs) {
     for (const spec of specs) {
         store.saveVisit(visit(spec.id, spec.at, { status: spec.status ?? 'auto' }), { snapshotFile: `/media/snap/${spec.id}.jpg`, cropFile: `/media/crop/${spec.id}.jpg` });
         store.setClip(spec.id, 'pending', null);
-        await keeper.ready(spec.id, '88', await eventsClip(spec.id, spec.size ?? 1000), spec.source ?? 'events');
+        await keeper.ready(spec.id, '88', await eventsClip(spec.id, spec.size ?? 1000), spec.source ?? 'events', spec.at);
     }
 }
 
@@ -864,6 +1090,9 @@ test('cutting: the lead-in the NVR adds before the requested start is trimmed, t
         const outcome = await cutClip({ ffmpegPath: 'ffmpeg', inputArguments: ['-i', recording], durationMs: 14_000, destination });
         assert.equal(outcome.ok, true, JSON.stringify(outcome));
         assert.ok(Math.abs(outcome.leadMs - 6_000) < 150, `lead ${outcome.leadMs}`);
+        assert.ok(Math.abs(outcome.spanMs - 14_000) < 150, `span ${outcome.spanMs}`);
+        const window = { start: T0 - 5_000, duration: 14_000 };
+        assert.ok(Math.abs(nvrClipStart(window, outcome.spanMs) - window.start) < 150, 'the clip starts where the window it was cut for starts');
         assert.equal(outcome.audio, true, 'the tone\'s timestamps span the video, so the sound is kept');
         const info = probe(destination);
         assert.ok(Math.abs(Number(info.format.duration) - 14) < 0.3, `duration ${info.format.duration}`);
@@ -878,6 +1107,39 @@ test('cutting: the lead-in the NVR adds before the requested start is trimmed, t
         assert.ok(bytes.indexOf('moov') > 0 && bytes.indexOf('moov') < bytes.indexOf('mdat'), 'faststart: the moov index comes before the media data');
         assert.equal(outcome.bytes, bytes.length);
         assert.deepEqual(await readdir(join(directory, 'store', '88')), ['visit.mp4'], 'no scratch or .part file is left');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('cutting: when the NVR had less footage than the window asked for, the clip is as long as the footage and starts later than the window', { skip: !ffmpegAvailable }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-cut-test-'));
+    try {
+        const recording = join(directory, 'recording.mp4');
+        makeRecording(recording, { audio: false });
+        // 20 s came back for a 30 s window: no lead-in at all, and the clip begins 10 s into the window.
+        const destination = join(directory, 'store', '88', 'short.mp4');
+        const outcome = await cutClip({ ffmpegPath: 'ffmpeg', inputArguments: ['-i', recording], durationMs: 30_000, destination });
+        assert.equal(outcome.ok, true, JSON.stringify(outcome));
+        assert.equal(outcome.leadMs, 0);
+        assert.ok(Math.abs(outcome.spanMs - 20_000) < 150, `span ${outcome.spanMs}`);
+        assert.ok(Math.abs(outcome.durationMs - 20_000) < 150, `kept ${outcome.durationMs}`);
+        assert.ok(Math.abs(Number(probe(destination).format.duration) - 20) < 0.3);
+        const window = { start: T0 - 5_000, duration: 30_000 };
+        assert.ok(Math.abs(nvrClipStart(window, outcome.spanMs) - (window.start + 10_000)) < 150, 'the first frame is 10 s after the start of the window');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('measuring a clip: the length of its video, and 0 for anything ffmpeg cannot read', { skip: !ffmpegAvailable }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-measure-test-'));
+    try {
+        const recording = join(directory, 'recording.mp4');
+        makeRecording(recording, { audio: true });             // 20 s of picture and a 20 s tone
+        const measured = await videoDurationMs('ffmpeg', recording);
+        assert.ok(Math.abs(measured - 20_000) < 150, `measured ${measured} ms`);
+        assert.equal(await videoDurationMs('ffmpeg', join(directory, 'missing.mp4')), 0, 'no such file');
+        const notVideo = join(directory, 'notes.mp4');
+        await writeFile(notVideo, 'this is not a video');
+        assert.equal(await videoDurationMs('ffmpeg', notVideo), 0, 'not a video');
+        assert.equal(await videoDurationMs(join(directory, 'no-ffmpeg'), recording), 0, 'no ffmpeg to ask');
     } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

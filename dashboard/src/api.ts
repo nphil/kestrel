@@ -1,5 +1,7 @@
+import { readDetections } from "./detections.ts";
 import { pathOf, stableUrl } from "./urls.ts";
-import type { Camera, ClipChoice, ClipDeleteResult, ClipStorage, ClipTotals, Health, HomeAssistant, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
+import { keptRecording } from "./keep.ts";
+import type { Camera, ClipChoice, ClipDeleteResult, ClipStorage, ClipTotals, Health, HomeAssistant, KeptRecording, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
 
 export function callWS<T>(hass: HomeAssistant, type: string, fields: Record<string, unknown> = {}): Promise<T> {
   return hass.callWS<T>({ type, ...fields });
@@ -24,6 +26,10 @@ export const api = {
   setSettings: (hass: HomeAssistant, settings: Settings) => callWS<Settings>(hass, "kestrel/settings/set", { settings }),
   rangeFilter: (hass: HomeAssistant) => callWS<RangeFilter>(hass, "kestrel/range_filter/get"),
   setRangeFilter: (hass: HomeAssistant, threshold: number) => callWS<RangeFilter>(hass, "kestrel/range_filter/set", { threshold }),
+  /** Whether the recording of a visit (a heard visit, or a sighting with a call linked) is kept: exempt from BirdNET-Go's 30-day clean-up. */
+  recordingKept: async (hass: HomeAssistant, visitId: string): Promise<KeptRecording> => keptRecording(await callWS<unknown>(hass, "kestrel/recording/keep/get", { visit_id: visitId })),
+  /** Administrators only. */
+  keepRecording: async (hass: HomeAssistant, visitId: string, keep: boolean): Promise<KeptRecording> => keptRecording(await callWS<unknown>(hass, "kestrel/recording/keep/set", { visit_id: visitId, keep })),
   /** Camera clips kept, and their size. With `olderThan` (milliseconds) only those from before it: what "delete older than..." would remove. */
   clipStorage: async (hass: HomeAssistant, olderThan?: number): Promise<ClipStorage> => clipStorage(await callWS<unknown>(hass, "kestrel/clips/storage", olderThan === undefined ? {} : { older_than: olderThan })),
   /** Administrators only. Photos and visits stay; only the video goes. */
@@ -62,13 +68,17 @@ export function asArray<T>(value: unknown, key = "items"): T[] {
   return [];
 }
 
-/** Keeps a visit's picture, clip and recording links the same from one response to the next (see urls.ts). */
+/** Keeps a visit's picture, clip and recording links the same from one response to the next (see urls.ts), and lets its detector track (`detections`) through
+ * only as far as it can be drawn (see detections.ts): a damaged track is dropped, never passed on. */
 function steadyVisit(visit: Visit): Visit {
   if (visit.snapshot) visit.snapshot = stableUrl(visit.snapshot) as string;
   if (visit.crop) visit.crop = stableUrl(visit.crop) as string;
   if (visit.audio) visit.audio = stableUrl(visit.audio) as string;
   if (visit.audioOriginal) visit.audioOriginal = stableUrl(visit.audioOriginal) as string;
   if (visit.clip?.url) visit.clip.url = stableUrl(visit.clip.url) as string;
+  const detections = readDetections(visit.detections);
+  if (detections) visit.detections = detections;
+  else delete visit.detections;
   return visit;
 }
 

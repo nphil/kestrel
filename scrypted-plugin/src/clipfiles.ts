@@ -15,6 +15,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import type { GrayFrames } from './align';
 import type { ClipSource, KestrelStore, Visit } from './store';
 
 // On the big NVR disk, not the small plugin volume. One folder per camera, one file per visit.
@@ -98,14 +99,16 @@ export function stopRunningCuts(): void {
     for (const child of running) child.kill('SIGKILL');
 }
 
-function run(ffmpegPath: string, args: string[], timeoutMs: number): Promise<Ran> {
+// Runs ffmpeg at a low priority. `onOutput` gets what it writes to stdout, in pieces, as it comes.
+function run(ffmpegPath: string, args: string[], timeoutMs: number, onOutput?: (chunk: Buffer) => void): Promise<Ran> {
     const niced = existsSync(NICE);
     const { promise, resolve } = Promise.withResolvers<Ran>();
     let stderr = '';
     let timedOut = false;
-    const child = spawn(niced ? NICE : ffmpegPath, niced ? ['-n', NICE_LEVEL, ffmpegPath, ...args] : args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(niced ? NICE : ffmpegPath, niced ? ['-n', NICE_LEVEL, ffmpegPath, ...args] : args, { stdio: ['ignore', 'pipe', 'pipe'] });
     running.add(child);
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    child.stdout.on('data', (chunk: Buffer) => onOutput?.(chunk));
     child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('latin1')).slice(-8_192); });
     child.on('error', error => { clearTimeout(timer); running.delete(child); resolve({ code: null, stderr: `${stderr}${String(error)}`, timedOut }); });
     child.on('close', code => { clearTimeout(timer); running.delete(child); resolve({ code, stderr, timedOut }); });
@@ -131,6 +134,58 @@ async function probeStream(ffmpegPath: string, file: string, map: string): Promi
     };
 }
 
+// How many ms of video `file` holds: how far the timestamps of its first video stream run. 0 when ffmpeg cannot read it (no such file, no
+// video in it, no ffmpeg). The Events Recorder's clips are measured with this once, when they are found (see eventsClipStart).
+export async function videoDurationMs(ffmpegPath: string, file: string): Promise<number> {
+    return (await probeStream(ffmpegPath, file, '0:v:0')).ms;
+}
+
+// What a clip is looked at in to find where the detector's boxes lie in it (align.ts): small grayscale pictures, the longer side this many
+// pixels, this many a second.
+const PICTURE_SIDE = 192;
+const PICTURE_FPS = 10;
+// No clip is longer than about 70 s (700 pictures): a video that gives more than this is not one of ours and is not looked at.
+const MAX_PICTURES = 1_200;
+const DECODE_TIMEOUT_MS = 60_000;
+
+// The pictures of a clip for align.ts, or undefined when ffmpeg cannot give them (no such file, no video, too long, too slow). The clips here
+// are stored the way they are shown, rotation included (the portrait camera's are 1920 x 2560), so the size ffmpeg reports is the one the
+// boxes are drawn on.
+export async function decodeGrayFrames(ffmpegPath: string, file: string): Promise<GrayFrames | undefined> {
+    try {
+        // With no output file ffmpeg stops at once, after describing the input: "Stream #0:0: Video: h264 (High), yuv420p, 1920x1080 [...]".
+        const described = await run(ffmpegPath, ['-hide_banner', '-nostdin', '-i', file], PROBE_TIMEOUT_MS);
+        const size = /Video:.*?, (\d{2,5})x(\d{2,5})/.exec(described.stderr);
+        if (!size) return undefined;
+        const scale = PICTURE_SIDE / Math.max(Number(size[1]), Number(size[2]));
+        const even = (side: number) => Math.max(2, 2 * Math.round((side * scale) / 2));
+        const width = even(Number(size[1]));
+        const height = even(Number(size[2]));
+        const bytes = width * height;
+        const frames: Uint8Array[] = [];
+        let picture = new Uint8Array(bytes);
+        let filled = 0;
+        // One more picture than allowed is asked for, so that too long a video shows.
+        const decoded = await run(ffmpegPath, ['-hide_banner', '-nostdin', '-v', 'error', '-i', file, '-map', '0:v:0', '-vf', `fps=${PICTURE_FPS},scale=${width}:${height},format=gray`,
+            '-frames:v', String(MAX_PICTURES + 1), '-f', 'rawvideo', '-'], DECODE_TIMEOUT_MS, chunk => {
+            for (let at = 0; at < chunk.length;) {
+                const take = Math.min(chunk.length - at, bytes - filled);
+                picture.set(chunk.subarray(at, at + take), filled);
+                at += take;
+                filled += take;
+                if (filled === bytes) {
+                    frames.push(picture);
+                    picture = new Uint8Array(bytes);
+                    filled = 0;
+                }
+            }
+        });
+        return decoded.code === 0 && frames.length > 0 && frames.length <= MAX_PICTURES ? { width, height, fps: PICTURE_FPS, frames } : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 // The frame rate to encode at: the recording's frames over its seconds, as a whole number inside sane bounds. It is measured because
 // the file's own guess is wrong for a recording whose timestamps jitter (ffmpeg then reads 1000 fps, and encoding at that rate repeats
 // every picture forty times: a 5 s slice came out as 10 MB and 100 s of CPU).
@@ -150,6 +205,16 @@ export function encodeArguments(job: { scratch: string; part: string; leadMs: nu
     ];
 }
 
+// Where a cut lands in the recording it was made from. The stream ends at the end of the requested window and `videoMs` of it came back,
+// so the first part of it is lead-in before the window's start: `leadMs` of that is skipped (never more than MAX_LEAD_MS; a lead-in
+// longer than that is not trusted) and the next `keepMs` are kept. The clip's first frame is then `spanMs` before the end of the window:
+// the window's whole length when the lead-in was skipped in full, less when the NVR had less footage than was asked for (the clip starts
+// later than the window), more when more lead-in came than can be skipped (it starts earlier).
+export function cutGeometry(videoMs: number, durationMs: number): { leadMs: number; keepMs: number; spanMs: number } {
+    const leadMs = Math.min(MAX_LEAD_MS, Math.max(0, videoMs - durationMs));
+    return { leadMs, keepMs: Math.min(durationMs, videoMs - leadMs), spanMs: videoMs - leadMs };
+}
+
 export interface CutRequest {
     ffmpegPath: string;
     // The NVR's FFmpeg input: every argument up to and including `-i <url>`.
@@ -162,8 +227,9 @@ export interface CutRequest {
     timeoutMs?: number;
 }
 
+// `spanMs` is how long before the end of the requested window the clip's first frame is (see cutGeometry).
 export type CutOutcome =
-    | { ok: true; bytes: number; durationMs: number; leadMs: number; audio: boolean }
+    | { ok: true; bytes: number; durationMs: number; leadMs: number; spanMs: number; audio: boolean }
     | { ok: false; reason: string };
 
 // Cuts the clip: copy the NVR's stream into a scratch file, measure how much lead-in came with it, then re-encode exactly the
@@ -186,8 +252,7 @@ export async function cutClip(request: CutRequest): Promise<CutOutcome> {
         const audioMs = (await probeStream(ffmpegPath, scratch, '0:a:0')).ms;
         const audio = audioMs >= videoMs * AUDIO_COVERAGE;
         const fps = measuredFps(video.frames, videoMs);
-        const leadMs = Math.min(MAX_LEAD_MS, Math.max(0, videoMs - durationMs));
-        const keepMs = Math.min(durationMs, videoMs - leadMs);
+        const { leadMs, keepMs, spanMs } = cutGeometry(videoMs, durationMs);
         const encoded = await run(ffmpegPath, encodeArguments({ scratch, part, leadMs, keepMs, fps, audio }), encodeTimeout);
         if (encoded.code !== 0) return { ok: false, reason: failure('Encoding the clip', encoded) };
         const info = await stat(part);
@@ -196,7 +261,7 @@ export async function cutClip(request: CutRequest): Promise<CutOutcome> {
         const writtenMs = (await probeStream(ffmpegPath, part, '0:v:0')).ms;
         if (writtenMs < keepMs * MIN_WRITTEN_SHARE) return { ok: false, reason: `The clip reads back as ${writtenMs} ms of video, expected ${Math.round(keepMs)} ms` };
         await rename(part, destination);
-        return { ok: true, bytes: info.size, durationMs: keepMs, leadMs, audio };
+        return { ok: true, bytes: info.size, durationMs: keepMs, leadMs, spanMs, audio };
     } catch (error) {
         return { ok: false, reason: String(error) };
     } finally {
@@ -287,9 +352,10 @@ export class ClipKeeper {
         this.now = options.now ?? Date.now;
     }
 
-    // A visit's clip has been found or cut: record it, give it a copy of its own in the clip store, and tell the dashboards. When the
-    // copy cannot be made the other plugin's file stays linked and keepUnkept tries again later.
-    async ready(id: string, cameraId: string, file: string, source: ClipSource): Promise<void> {
+    // A visit's clip has been found or cut: record it, give it a copy of its own in the clip store, and tell the dashboards. `startAt` is the
+    // wall-clock moment (ms) its first frame was recorded, null when that cannot be told (the clip still plays, without detection boxes).
+    // When the copy cannot be made the other plugin's file stays linked and keepUnkept tries again later.
+    async ready(id: string, cameraId: string, file: string, source: ClipSource, startAt: number | null): Promise<void> {
         const { store, root } = this.ports;
         let stored = file;
         let bytes: number | null = null;
@@ -299,7 +365,7 @@ export class ClipKeeper {
             const copy = await this.copy(id, cameraId, file);
             if (copy) { stored = copy.file; bytes = copy.bytes; }
         }
-        store.setClip(id, 'ready', stored, { source, kept: bytes !== null, bytes });
+        store.setClip(id, 'ready', stored, { source, startAt, kept: bytes !== null, bytes });
         const visit = store.getVisit(id);
         if (visit) this.ports.announce(visit);
     }

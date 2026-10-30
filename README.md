@@ -23,6 +23,12 @@ for those.
 - **Visit** — where a notification lands: the snapshot immediately, a
   "Saving clip…" progress bar while the recorder finishes, then the clip plays.
   Tap an old notification later and it just plays.
+  A round **Show detection boxes** button on the clip (top right) draws what the camera's
+  detector saw over the playback: a box around each animal with the name the wildlife
+  classifier gave it at that moment ("Coyote", or "Animal 82%" before it had decided), so
+  you can see exactly what the model made of the animal before you correct it. Tap a box to
+  open "What was it?". Your choice is remembered; visits recorded before this feature, and
+  clips with no boxes, simply have no button.
   An administrator can delete a visit's clip from its page ("Delete clip"), or prune many
   at once under the gear button (Settings, **Saved clips**): all clips older than 1 month,
   3 months, 6 months or a year, or those from visits marked *Not an animal* / *Can't tell*.
@@ -137,6 +143,13 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    how strict that is (Loose 1%, Balanced 3%, Strict 5%, Very strict 10%). Kestrel
    changes only BirdNET-Go's range-filter threshold and keeps its other settings;
    BirdNET-Go then rebuilds its species list, which takes a few seconds.
+   **Keep this recording**: BirdNET-Go deletes recordings older than its retention age
+   (30 days by default). A heard visit's page has a *Keep recording* button (a Home
+   Assistant administrator can press it; everyone else sees whether it is on). It
+   locks that detection in BirdNET-Go, and BirdNET-Go's clean-up skips locked
+   detections, so the sound stays for good; pressing it again lets the normal
+   clean-up apply. Calls announced with detection number 0 (see above) have no
+   BirdNET-Go detection of their own to lock, so they show no button.
 5. **Optional: reference sounds and photos** — nothing to set up: *Play reference* uses
    recordings from [iNaturalist](https://www.inaturalist.org). For clearer, quality-rated
    songs and calls, add a free [Xeno-canto](https://xeno-canto.org) API key (shown on

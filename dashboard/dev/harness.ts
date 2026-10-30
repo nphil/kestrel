@@ -2,7 +2,7 @@ import "../src/main.ts";
 import { mountHa, themeFromQuery, type DockedSidebar, type MiniHa } from "./ha/mount.ts";
 import { PANEL_PREFIX, haNavigate } from "./ha/panel.ts";
 import { THEME_NAMES } from "./ha/theme.ts";
-import type { Camera, Health, ModelCall, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, Visit } from "../src/types.ts";
+import type { Camera, DetectionBox, DetectionFrame, Health, ModelCall, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, Visit, VisitDetections } from "../src/types.ts";
 
 const now = Date.now();
 /** Unsigned media path, the shape of the integration's route (`/api/kestrel/media/<kind>/<id>`). The fake server signs it per response (see `signed`). */
@@ -31,6 +31,8 @@ let visit = createVisit();
 let previousVisit: Visit | null = null;
 let settings: Settings = { mutedSpecies: [], heardNotify: "new_only" };
 let rangeFilter: RangeFilter = { threshold: 0.03, speciesCount: 150, latitude: 44.5, longitude: -76.5, updatedAt: "2026-10-03T06:00:00Z", rebuilding: false, canChange: true };
+// Kept recordings (`kestrel/recording/keep/get` and `/set`), by visit id. Harness setting `keep=none` means BirdNET-Go has nothing to lock for any recording; `keep=fail` makes a change fail.
+const keptRecordings = new Set<string>();
 // Saved camera clips (`kestrel/clips/storage` and `kestrel/clips/delete`): 312 clips over about seven months, 1 in 17 from a visit marked "Not an animal" or "Can't tell".
 // Harness settings: `admin=0` is a signed-in non-administrator, `clipfail=1` makes every clip request fail, `clipdelay=ms` slows a delete so its progress can be seen.
 interface FakeClip { startedAt: number; bytes: number; notAnimal: boolean; unconfirmed: boolean }
@@ -97,6 +99,68 @@ const tieredVisits: Visit[] = [
 ];
 generatedVisits.push(...tieredVisits);
 const startedMs = (item: Visit): number => typeof item.startedAt === "number" ? item.startedAt : Date.parse(item.startedAt);
+
+// ---- what the detector saw: the `detections` of a visit whose clip is ready --------------------------------------------------------------------------
+const thousandth = (value: number): number => Math.round(value * 1000) / 1000;
+/** A made-up track for a fixture clip (3 s of video), shaped like the plugin's: a detection every 250 ms with an animal walking left to right and bobbing a little. It is just
+ * "an animal" for the first second, then the classifier names it (with a `labelScore` only when one is given: the real classifier almost never sends it). A second, smaller animal
+ * the classifier never names stands at the lower left from 1.5 s to 2.5 s, low enough to reach the strip where the video's own controls are. `ratio` is the clip's width over its
+ * height, so a box has the same shape on a 16:9, a 4:3 and a portrait picture. The video runs 120 ms behind the detector (`offsetMs`): a detection at video time v has t = start + v - 120. */
+function trackFor(item: Visit, ratio: number, labelScore?: number): VisitDetections {
+  const clipStartAt = startedMs(item);
+  const offsetMs = 120;
+  const width = thousandth((0.42 * 0.9) / ratio);
+  const frames: DetectionFrame[] = [];
+  for (let at = 0; at <= 2750; at += 250) {
+    const progress = at / 2750;
+    const walker: DetectionBox = { x: thousandth(0.04 + (0.92 - width) * progress), y: thousandth(0.34 + 0.06 * Math.sin(progress * Math.PI * 2)), w: width, h: 0.42, className: "animal", score: Math.round((0.92 - 0.1 * progress) * 100) / 100, id: "w1" };
+    if (at >= 1000) walker.label = item.species;
+    if (at >= 1000 && labelScore !== undefined) walker.labelScore = labelScore;
+    const boxes = [walker];
+    if (at >= 1500 && at <= 2500) boxes.push({ x: 0.03, y: 0.62, w: thousandth(width * 0.6), h: 0.3, className: "animal", score: 0.64, id: "w2" });
+    frames.push({ t: clipStartAt + at - offsetMs, boxes });
+  }
+  return { clipStartAt, offsetMs, frames };
+}
+const withTrack = (item: Visit): Visit => ({ ...item, detections: trackFor(item, 16 / 9) });
+/** A seen visit with a ready clip and a track on the shape of a door camera's picture: Back Door is 4:3 and Front Door is a portrait 3:4 (dev/serve.mjs gives these two ids the clips
+ * dev/fixtures/clip-4x3.mp4 and clip-3x4.mp4, which have a quarter-by-quarter grid drawn on them so a box can be checked against it). */
+const shaped = (id: string, cameraId: number, ratio: number, minutesAgo: number, labelScore?: number): Visit => {
+  const base: Visit = { ...createVisit(), id, camera: { id: cameraId, name: cameras.find((camera) => camera.id === cameraId)?.name ?? "Back Door" }, startedAt: now - minutesAgo * 60_000, species: "Coyote", grp: "mammal", heard: null, firstEver: false, suggestions: [{ species: "Coyote", why: "model" }, { species: "Red Fox", why: "usual" }], snapshot: media("snapshot", id), crop: media("crop", id), clip: { state: "ready", url: media("clip", id) } };
+  return { ...base, detections: trackFor(base, ratio, labelScore) };
+};
+generatedVisits.push(shaped("fixture-visit-4x3", 103, 4 / 3, 15, 0.88), shaped("fixture-visit-3x4", 104, 3 / 4, 20));
+
+// ---- real data: a visit of your own ------------------------------------------------------------------------------------------------------------------
+// `dev/fixtures/local/<visit id>.json` (git-ignored) is a visit exactly as the plugin serves it, `detections` included, and `<visit id>.mp4` beside it its clip (dev/serve.mjs hands both
+// out). Open /kestrel/visit?v=<visit id>. Edit the file (the offset, say) and reload the page: nothing is kept.
+/** The unsigned path the plugin puts in a visit for a picture, clip or recording (`media/clip/<id>`, whatever comes before it). */
+const PLUGIN_MEDIA = /(?:^|\/)media\/(snap|crop|clip|audio|species|camera|live|birdnet_audio)\/([^?#]+)/;
+const ownMedia = (value: unknown): unknown => {
+  if (typeof value === "string") { const found = PLUGIN_MEDIA.exec(value); return found ? media(found[1], decodeURIComponent(found[2])) : value; }
+  if (Array.isArray(value)) return value.map(ownMedia);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, ownMedia(item)]));
+  return value;
+};
+/** The visit of that name in fixtures/local, its media links turned into the harness's own (the clip is always `media/clip/<visit id>`); null when there is no such file. */
+async function ownVisit(id: string): Promise<Visit | null> {
+  if (!/^[\w-]+$/.test(id)) return null;
+  try {
+    const response = await fetch(`/dev/fixtures/local/${id}.json`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const saved = ownMedia(await response.json()) as Visit | { visit: Visit };
+    const own = "visit" in saved ? saved.visit : saved; // the panel takes a visit either bare or inside `{ visit }`
+    return { ...own, id, clip: own.clip?.state === "ready" ? { ...own.clip, url: media("clip", id) } : own.clip };
+  } catch { return null; }
+}
+const knownVisit = (id: string): boolean => id === visit.id || id === "fixture-heard-1" || generatedVisits.some((item) => item.id === id);
+/** A visit the fixtures do not know may be one of your own: when it is, it joins the generated ones before the question is answered (so correcting it works like the others). */
+async function adopt(message: Record<string, unknown>): Promise<void> {
+  const id = String(message.visit_id ?? "");
+  if (message.type !== "kestrel/visit" || !id || knownVisit(id)) return;
+  const own = await ownVisit(id);
+  if (own) generatedVisits.push(own);
+}
 const health: Health = { detector: { name: "EVA Wildlife", provider: "ONNX", avgMs: 38, checksToday: 124 }, gpu: { usedMiB: 3900, totalMiB: 23040, util: 22 }, cameras: [{ id: 88, checksToday: 80, emptyChecksToday: 11, visitsToday: 4 }, { id: 103, checksToday: 26, emptyChecksToday: 5, visitsToday: 2 }, { id: 104, checksToday: 18, emptyChecksToday: 2, visitsToday: 1 }], storage: { dbMB: 41.4, mediaMB: 98.2, budgetMB: 300 }, birdnet: { online: true, lastHeardAt: new Date(now - 11 * 60_000).toISOString() }, corrections: { total: 18, sinceRetrain: 4 } };
 
 // ---- reference recordings: what `kestrel/species/reference` answers (Xeno-canto, or iNaturalist when there is no key) ------------------------------
@@ -128,7 +192,7 @@ function referenceAnswer(name: string): ReferenceSounds {
 // in sessionStorage for this tab, and are removed from the address, so the panel's own addresses stay exactly /kestrel/<view>[?s=|?v=] and a
 // reload keeps the theme and the signing epoch (the server did not restart because the page did).
 const SETTINGS_KEY = "kestrel-harness";
-const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip"];
+const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep"];
 const settings0: Record<string, string> = (() => {
   try { return JSON.parse(window.sessionStorage.getItem(SETTINGS_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
 })();
@@ -144,7 +208,7 @@ history.replaceState(history.state, "", `${location.pathname}${rest ? `?${rest}`
 const setting = (name: string): string | null => settings0[name] ?? null;
 const remember = (name: string, value: string): void => { settings0[name] = value; window.sessionStorage.setItem(SETTINGS_KEY, JSON.stringify(settings0)); };
 // `clip=ready`: the fixture visit already has its clip (otherwise it is still being saved until the toolbar's "Processing visit" runs).
-if (setting("clip") === "ready") visit = { ...visit, clip: { state: "ready", url: media("clip", visit.id) } };
+if (setting("clip") === "ready") visit = withTrack({ ...visit, clip: { state: "ready", url: media("clip", visit.id) } });
 
 const MEDIA_PREFIX = "/api/kestrel/media/";
 const LATENCY_MS = Number(setting("latency") ?? 40);
@@ -172,8 +236,8 @@ function answer(message: Record<string, unknown>): unknown {
       result = { items, next: all.length > limit ? startedMs(items[items.length - 1]) : null };
     }
     else if (type === "kestrel/visit" && generatedVisits.some((item) => item.id === message.visit_id)) result = generatedVisits.find((item) => item.id === message.visit_id);
-    else if (type === "kestrel/visit" && message.visit_id !== visit.id && message.visit_id !== "fixture-heard-1" && !generatedVisits.some((item) => item.id === message.visit_id)) throw Object.assign(new Error("Not found"), { code: "not_found" });
-    else if (type === "kestrel/visit") result = message.visit_id === "fixture-heard-1" ? { ...visit, id: "fixture-heard-1", kind: "heard", species: "Common Raccoon", snapshot: null, crop: null, clip: { state: "none" }, audio: media("audio", "fixture-heard-1"), audioOriginal: media("audio-original", "fixture-heard-1"), audioInfo: { state: "ready", segment: { start: 3.2, end: 8.1 }, cleaned: true, method: "gate" }, heard: null } : visit;
+    else if (type === "kestrel/visit" && !knownVisit(String(message.visit_id))) throw Object.assign(new Error("Not found"), { code: "not_found" });
+    else if (type === "kestrel/visit") result = message.visit_id === "fixture-heard-1" ? { ...visit, id: "fixture-heard-1", kind: "heard", species: "Common Raccoon", snapshot: null, crop: null, clip: { state: "none" }, detections: undefined, audio: media("audio", "fixture-heard-1"), audioOriginal: media("audio-original", "fixture-heard-1"), audioInfo: { state: "ready", segment: { start: 3.2, end: 8.1 }, cleaned: true, method: "gate" }, heard: null } : visit;
     else if (type === "kestrel/visit/correct" && generatedVisits.some((item) => item.id === message.visit_id)) {
       const at = generatedVisits.findIndex((item) => item.id === message.visit_id);
       const target = String(message.species ?? "unknown");
@@ -207,6 +271,16 @@ function answer(message: Record<string, unknown>): unknown {
       rangeFilter = { ...rangeFilter, threshold, speciesCount: Math.round(4.5 / threshold), updatedAt: new Date().toISOString() };
       result = rangeFilter;
     }
+    else if (type === "kestrel/recording/keep/get" || type === "kestrel/recording/keep/set") {
+      const admin = setting("admin") !== "0";
+      const id = String(message.visit_id);
+      if (type === "kestrel/recording/keep/set") {
+        if (!admin) throw Object.assign(new Error("Only a Home Assistant administrator can change this"), { code: "unauthorized" });
+        if (setting("keep") === "fail") throw new Error("BirdNET-Go did not change this recording");
+        if (message.keep === true) keptRecordings.add(id); else keptRecordings.delete(id);
+      }
+      result = { keepable: setting("keep") !== "none", kept: keptRecordings.has(id), canChange: admin };
+    }
     else if (type === "kestrel/clips/storage" || type === "kestrel/clips/delete") {
       if (setting("clipfail") === "1") throw new Error("Kestrel's camera recorder isn't answering");
       const admin = setting("admin") !== "0";
@@ -231,7 +305,7 @@ function answer(message: Record<string, unknown>): unknown {
   return result;
 }
 
-const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/clips/storage", "kestrel/clips/delete"];
+const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/clips/storage", "kestrel/clips/delete"];
 let ha: MiniHa;
 let readyTimer: number | undefined;
 
@@ -239,7 +313,7 @@ function pushEvent(event: { type: string; data: unknown }): void {
   ha.mock.connection.push({ type: "event", event: signed(event) });
 }
 function readyClip(): void {
-  visit = { ...visit, clip: { ...visit.clip, state: "ready", url: media("clip", visit.id) } };
+  visit = withTrack({ ...visit, clip: { ...visit.clip, state: "ready", url: media("clip", visit.id) } });
   pushEvent({ type: "visit_updated", data: { id: visit.id } });
 }
 function showVisit(): void {
@@ -322,7 +396,7 @@ interface HaControl {
   readonly theme: string;
   readonly subscriptions: number;
   /** Every websocket command the panel sent (type, time, epoch, when the fake server answered), oldest first. */
-  readonly calls: ReadonlyArray<{ type: string; at: number; epoch: number; answeredAt: number | null }>;
+  readonly calls: ReadonlyArray<{ type: string; message: Record<string, unknown>; at: number; epoch: number; answeredAt: number | null }>;
   setSidebar(mode: DockedSidebar): void;
   setKiosk(enable: boolean): void;
 }
@@ -331,8 +405,8 @@ interface HaControl {
 window.__emit = pushEvent;
 if (location.pathname === "/" || location.pathname === "/dev/" || location.pathname === "/dev/index.html") history.replaceState(history.state, "", `${PANEL_PREFIX}/live${location.search}${location.hash}`);
 
-const calls: Array<{ type: string; at: number; epoch: number; answeredAt: number | null }> = [];
-ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0)); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement("kestrel-panel") });
+const calls: Array<{ type: string; message: Record<string, unknown>; at: number; epoch: number; answeredAt: number | null }> = [];
+ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, message, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0)); await adopt(message); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement("kestrel-panel") });
 if (setting("admin") === "0") ha.mock.update({ user: { is_admin: false, name: "Guest" } });
 
 let restartTimer: number | undefined;

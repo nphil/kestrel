@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { KestrelStore } from '../src/store.ts';
+import { KestrelStore, TRACK_MAX_FRAMES, TRACK_MAX_SPAN_MS } from '../src/store.ts';
 import { DatabaseSync } from 'node:sqlite';
 
 function makeVisit(id, species, score, startedAt, cameraId = '88') {
@@ -409,4 +409,402 @@ test('heard calls: a repeat delivery is kept once, repeats are counted per micro
         store.close();
         await rm(directory, { recursive: true, force: true });
     }
+});
+
+// --- The boxes the detector drew during a visit (track.ts feeds them) ----------------------------------------------------------------------------
+
+const box = (extra = {}) => ({ x: 0.453, y: 0.769, w: 0.064, h: 0.132, className: 'animal', score: 0.82, id: 'w1', ...extra });
+const event = (t, extra) => ({ t, boxes: [box(extra)] });
+const rows = (store, id) => Number(store.db.prepare('SELECT COUNT(*) AS n FROM visit_boxes WHERE visit_id=?').get(id).n);
+const times = (store, id) => store.getTrack(id).frames.map(frame => frame.t);
+
+async function withStore(run) {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-track-store-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try { await run(store, directory); }
+    finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+}
+
+test('a visit\'s detection events survive a restart, come back oldest first with every box as it was, and a visit read from the store never carries them', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-track-store-'));
+    const path = join(directory, 'kestrel.sqlite');
+    try {
+        let store = new KestrelStore(path);
+        store.saveVisit(makeVisit('v1', 'Raccoon', 0.8, 5_000));
+        const named = box({ id: 'w2', label: 'Common Raccoon', labelScore: 0.93, x: 0.5 });
+        store.appendTrackFrames('v1', [event(5_000), { t: 5_250, boxes: [box(), named] }, event(5_500)]);
+        store.appendTrackFrames('v1', [event(5_250, { x: 0.9 })]);               // a time that is already kept: the first one wins
+        store.close();
+
+        store = new KestrelStore(path);
+        assert.deepEqual(store.getTrack('v1'), { clipStartAt: null, clipOffsetMs: null, frames: [event(5_000), { t: 5_250, boxes: [box(), named] }, event(5_500)] });
+        const visit = store.getVisit('v1');
+        assert.equal('detections' in visit, false);
+        assert.equal('detections' in store.listVisits().items[0], false, 'lists do not carry them either');
+        assert.equal('detections' in JSON.parse(store.getRawVisit('v1').data), false, 'and they are not part of the stored visit');
+        store.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('only a seen visit whose clip was not deleted has a track; an unknown visit, a heard visit and the empty list are ignored', async () => {
+    await withStore(store => {
+        store.saveVisit(makeHeardVisit('heard', 'Blue Jay', 1_000));
+        store.saveVisit(makeVisit('seen', 'Raccoon', 0.8, 1_000));
+        store.appendTrackFrames('ghost', [event(1_000)]);
+        store.appendTrackFrames('heard', [event(1_000)]);
+        store.appendTrackFrames('seen', []);
+        assert.equal(Number(store.db.prepare('SELECT COUNT(*) AS n FROM visit_boxes').get().n), 0);
+        // The foreign key is real: a row for a visit that is not there cannot be written by any path.
+        assert.throws(() => store.db.prepare('INSERT INTO visit_boxes(visit_id,t,boxes) VALUES(?,?,?)').run('ghost', 1, '[]'), /FOREIGN KEY/);
+        assert.deepEqual(store.getTrack('ghost'), { clipStartAt: null, clipOffsetMs: null, frames: [] });
+        assert.deepEqual(store.getTrack('seen'), { clipStartAt: null, clipOffsetMs: null, frames: [] });
+        // A visit whose clip is deleted has nothing to draw on, so a late event does not start a new track.
+        store.setClip('seen', 'ready', '/clips/seen.mp4', { source: 'events', startAt: 900 });
+        store.appendTrackFrames('seen', [event(1_000)]);
+        assert.equal(rows(store, 'seen'), 1);
+        store.setClip('seen', 'deleted', null);
+        assert.equal(rows(store, 'seen'), 0);
+        store.appendTrackFrames('seen', [event(1_250)]);
+        assert.equal(rows(store, 'seen'), 0);
+    });
+});
+
+test('a visit keeps at most 480 events and none later than 90 s after its first: whatever would break either is dropped, whichever call it comes in', async () => {
+    assert.equal(TRACK_MAX_FRAMES, 480);
+    assert.equal(TRACK_MAX_SPAN_MS, 90_000);
+    await withStore(store => {
+        // By count: 600 events 100 ms apart (a minute), in two calls.
+        store.saveVisit(makeVisit('many', 'Raccoon', 0.8, 0));
+        store.appendTrackFrames('many', Array.from({ length: 300 }, (_, index) => event(1_000 + index * 100)));
+        assert.equal(rows(store, 'many'), 300);
+        store.appendTrackFrames('many', Array.from({ length: 300 }, (_, index) => event(1_000 + (300 + index) * 100)));
+        assert.equal(rows(store, 'many'), 480);
+        assert.equal(times(store, 'many')[479], 1_000 + 479 * 100, 'the first 480 stay');
+        store.appendTrackFrames('many', [event(1_000 + 50)]);
+        assert.equal(rows(store, 'many'), 480, 'a full visit takes nothing more, not even an event between two it has');
+
+        // By span: one event a second for two minutes. The event exactly 90 s after the first stays, the next does not.
+        store.saveVisit(makeVisit('long', 'Raccoon', 0.8, 0));
+        store.appendTrackFrames('long', Array.from({ length: 121 }, (_, index) => event(10_000 + index * 1_000)));
+        const kept = times(store, 'long');
+        assert.equal(kept.length, 91);
+        assert.equal(kept[0], 10_000);
+        assert.equal(kept[90], 100_000);
+        store.appendTrackFrames('long', [event(100_001), event(130_000)]);
+        assert.equal(rows(store, 'long'), 91, 'later calls cannot add what is too late either');
+        store.appendTrackFrames('long', [event(45_500)]);
+        assert.equal(rows(store, 'long'), 92, 'while an event inside the span is still welcome');
+
+        // Events older than everything kept move the first one back: whatever then lies beyond 90 s from it goes.
+        store.saveVisit(makeVisit('older', 'Raccoon', 0.8, 0));
+        store.appendTrackFrames('older', [event(100_000), event(110_000), event(130_000), event(150_000)]);
+        store.appendTrackFrames('older', [event(20_000), event(25_000)]);
+        assert.deepEqual(times(store, 'older'), [20_000, 25_000, 100_000, 110_000]);
+        store.appendTrackFrames('older', [event(10_000), event(105_000)]);
+        assert.deepEqual(times(store, 'older'), [10_000, 20_000, 25_000, 100_000], 'the first moved back to 10 s: 110 s is now more than 90 s after it and goes, and 105 s is too late');
+    });
+});
+
+test('deleting a visit by any path removes its detection events and nobody else\'s: the visit row, the repair and the three-year retention', async () => {
+    await withStore(async (store, directory) => {
+        const announced = [];
+        store.onVisitsDeleted = ids => announced.push(...ids);
+        const now = Date.parse('2026-10-30T12:00:00Z');
+        const year = 365 * 24 * 60 * 60 * 1000;
+        for (const [id, startedAt] of [['a', now - 1_000], ['b', now - 2_000], ['expired', now - 3 * year - 60_000]]) {
+            store.saveVisit(makeVisit(id, 'Raccoon', 0.8, startedAt));
+            store.appendTrackFrames(id, [event(startedAt), event(startedAt + 300)]);
+            // A clip that is there: the retention is the only thing that can remove the track of the oldest visit.
+            store.setClip(id, 'ready', `/NVR/kestrel/clips/88/${id}.mp4`, { source: 'events', startAt: startedAt - 100 });
+        }
+        store.deleteVisitRow('a');
+        assert.deepEqual([rows(store, 'a'), rows(store, 'b'), rows(store, 'expired')], [0, 2, 2]);
+        await store.prune(now, join(directory, 'media'), 1_000_000);
+        assert.deepEqual([rows(store, 'a'), rows(store, 'b'), rows(store, 'expired')], [0, 2, 0]);
+        assert.deepEqual(announced.sort(), ['a', 'expired']);
+        assert.equal(Number(store.db.prepare('SELECT COUNT(*) AS n FROM visit_boxes WHERE visit_id NOT IN (SELECT id FROM visits)').get().n), 0, 'no row is left without its visit');
+        // Heard visits are purged without touching a seen visit's events.
+        store.saveVisit(makeHeardVisit('call', 'Blue Jay', now - 4_000));
+        assert.equal(store.purgeHeardBefore(now, true).removed, 1);
+        assert.equal(rows(store, 'b'), 2);
+    });
+});
+
+test('a ready clip knows when it starts, no other state does; a deleted clip takes the track along, and a pending, missing or ready one keeps it', async () => {
+    await withStore(store => {
+        store.saveVisit(makeVisit('v', 'Raccoon', 0.8, 5_000));
+        store.appendTrackFrames('v', [event(5_000), event(5_300), event(5_600)]);
+        const start = () => store.getRawVisit('v').clip_start_at;
+
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/1.mp4', { source: 'events', startAt: 4_400 });
+        assert.equal(start(), 4_400);
+        assert.deepEqual(store.getTrack('v').clipStartAt, 4_400);
+        // Copying the clip into Kestrel's store later, or saving the visit for another reason, does not disturb it.
+        store.markClipKept('v', '/NVR/kestrel/clips/88/v.mp4', 99);
+        assert.equal(start(), 4_400);
+        store.saveVisit({ ...store.getVisit('v'), species: 'Coyote', status: 'corrected' });
+        assert.equal(start(), 4_400);
+        assert.equal(store.getVisit('v').clip.source, 'events');
+
+        store.setClip('v', 'pending', null);
+        assert.equal(start(), null, 'a clip that is not ready has no start');
+        assert.equal(rows(store, 'v'), 3, 'and the track stays: the clip may still come');
+        store.setClip('v', 'ready', '/NVR/kestrel/clips/88/v.mp4', { source: 'nvr', startAt: 4_500 });
+        assert.equal(start(), 4_500, 'a new clip says its own start');
+        store.setClip('v', 'none', null);
+        assert.equal(start(), null);
+        assert.equal(rows(store, 'v'), 3, 'no clip: the backfill may still recover one, so the track stays');
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/2.mp4', { source: 'events' });
+        assert.equal(start(), null, 'a clip whose start was never recorded is stored as unknown');
+        assert.deepEqual(store.getTrack('v').clipStartAt, null);
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/2.mp4', { source: 'events', startAt: 4_450 });
+        assert.equal(start(), 4_450);
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/2.mp4', { source: 'events', startAt: null });
+        assert.equal(start(), null, 'a start that could not be told replaces an earlier one with nothing: the clip is a new clip');
+        assert.equal(store.getVisit('v').clip.state, 'ready', 'and the clip is ready all the same');
+        assert.equal(rows(store, 'v'), 3, 'the boxes are kept');
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/2.mp4', { source: 'events', startAt: 4_450 });
+        store.setClip('v', 'deleted', null, { deletedBy: 'user' });
+        assert.equal(start(), null);
+        assert.equal(rows(store, 'v'), 0, 'a deleted clip has nothing left to draw on');
+        assert.equal(store.getVisit('v').clip.state, 'deleted');
+    });
+});
+
+test('the nightly prune drops the detection events of visits that never got a clip and started over 30 days ago, and of nobody else', async () => {
+    await withStore(async (store, directory) => {
+        const now = Date.parse('2026-10-30T12:00:00Z');
+        const day = 24 * 60 * 60 * 1000;
+        const seed = (id, startedAt, state) => {
+            store.saveVisit(makeVisit(id, 'Raccoon', 0.8, startedAt));
+            store.appendTrackFrames(id, [event(startedAt), event(startedAt + 300)]);
+            if (state === 'ready') store.setClip(id, 'ready', `/NVR/kestrel/clips/88/${id}.mp4`, { source: 'events', startAt: startedAt - 100, kept: true, bytes: 10 });
+            else store.setClip(id, state, null);
+        };
+        seed('none-old', now - 31 * day, 'none');
+        seed('none-edge', now - 30 * day + 60_000, 'none');
+        seed('none-recent', now - 2 * day, 'none');
+        seed('pending-old', now - 40 * day, 'pending');
+        seed('ready-old', now - 400 * day, 'ready');
+        seed('ready-recent', now - 2 * day, 'ready');
+        await store.prune(now, join(directory, 'media'), 1_000_000);
+        const left = Object.fromEntries(['none-old', 'none-edge', 'none-recent', 'pending-old', 'ready-old', 'ready-recent'].map(id => [id, rows(store, id)]));
+        assert.deepEqual(left, { 'none-old': 0, 'none-edge': 2, 'none-recent': 2, 'pending-old': 2, 'ready-old': 2, 'ready-recent': 2 });
+        assert.deepEqual(store.getTrack('ready-old').clipStartAt, now - 400 * day - 100, 'a kept clip\'s events stay as long as the visit, whatever the media budget');
+        assert.ok(store.getVisit('none-old'), 'the visit itself stays');
+    });
+});
+
+test('the split-visit repair moves the dropped visit\'s detection events to the kept visit (its own win a clash) and adopts the clip start together with the clip', async () => {
+    await withStore(async store => {
+        store.saveVisit(makeVisit('keep', 'Common Raccoon', 0.84, 10_000));
+        store.saveVisit(makeVisit('drop', 'Southern Flying Squirrel', 0.82, 10_750));
+        store.appendTrackFrames('keep', [event(10_000, { id: 'keep-1' }), event(10_250, { id: 'keep-2' })]);
+        store.appendTrackFrames('drop', [event(10_250, { id: 'drop-clash' }), event(10_500, { id: 'drop-3' }), event(10_750, { id: 'drop-4' })]);
+        store.setClip('drop', 'ready', '/NVR/clips/88/videoclips/1.mp4', { source: 'events', startAt: 10_555 });
+        store.setClipAlignment('drop', 330, 77);
+        assert.equal(await store.repairSplitSeenVisit('keep', 'drop'), 'merged');
+        assert.equal(store.getVisit('drop'), undefined);
+        assert.equal(rows(store, 'drop'), 0, 'nothing is left of the dropped visit');
+        const track = store.getTrack('keep');
+        assert.deepEqual(track.frames.map(frame => [frame.t, frame.boxes[0].id]), [[10_000, 'keep-1'], [10_250, 'keep-2'], [10_500, 'drop-3'], [10_750, 'drop-4']]);
+        assert.equal(track.clipStartAt, 10_555, 'the kept visit took the dropped visit\'s clip and with it when that clip starts');
+        assert.deepEqual([track.clipOffsetMs, store.getRawVisit('keep').clip_aligned_at], [330, 77], 'and what was measured for that clip');
+        assert.equal(store.getVisit('keep').clip.state, 'ready');
+        assert.equal(store.getVisit('keep').clip.source, 'events');
+
+        // A kept visit that has a clip of its own keeps its own start, and still takes the events.
+        store.saveVisit(makeVisit('keep2', 'Common Raccoon', 0.84, 20_000));
+        store.saveVisit(makeVisit('drop2', 'Southern Flying Squirrel', 0.82, 20_750));
+        store.setClip('keep2', 'ready', '/NVR/kestrel/clips/88/keep2.mp4', { source: 'nvr', startAt: 15_000 });
+        store.setClip('drop2', 'ready', '/NVR/clips/88/videoclips/2.mp4', { source: 'events', startAt: 20_555 });
+        store.appendTrackFrames('drop2', [event(20_750)]);
+        assert.equal(await store.repairSplitSeenVisit('keep2', 'drop2'), 'merged');
+        assert.deepEqual([store.getTrack('keep2').clipStartAt, times(store, 'keep2'), store.getVisit('keep2').clip.source], [15_000, [20_750], 'nvr']);
+
+        // Neither visit has a clip: the events move, the start stays unknown.
+        store.saveVisit(makeVisit('keep3', 'Common Raccoon', 0.84, 30_000));
+        store.saveVisit(makeVisit('drop3', 'Southern Flying Squirrel', 0.82, 30_750));
+        store.appendTrackFrames('drop3', [event(30_750), event(31_000)]);
+        assert.equal(await store.repairSplitSeenVisit('keep3', 'drop3'), 'merged');
+        assert.deepEqual(store.getTrack('keep3'), { clipStartAt: null, clipOffsetMs: null, frames: [event(30_750), event(31_000)] });
+    });
+});
+
+test('a row of detection events that cannot be read is skipped and the others are still returned', async () => {
+    await withStore(store => {
+        store.saveVisit(makeVisit('v', 'Raccoon', 0.8, 1_000));
+        store.appendTrackFrames('v', [event(1_000), event(1_600)]);
+        const put = store.db.prepare('INSERT INTO visit_boxes(visit_id,t,boxes) VALUES(?,?,?)');
+        put.run('v', 1_200, '{not json');
+        put.run('v', 1_300, '{"x":1}');
+        put.run('v', 1_400, 'null');
+        assert.deepEqual(times(store, 'v'), [1_000, 1_600]);
+    });
+});
+
+test('a database from before detection boxes opens, gains clip_start_at and visit_boxes, keeps every visit as it was, and can then record boxes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-track-migrate-'));
+    const path = join(directory, 'kestrel.sqlite');
+    try {
+        const old = new DatabaseSync(path);
+        // visits exactly as it was the day before clip_start_at: every other clip column is already there.
+        old.exec(`CREATE TABLE visits (
+            id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, camera_name TEXT NOT NULL, kind TEXT NOT NULL, started_at INTEGER NOT NULL,
+            species TEXT NOT NULL, grp TEXT NOT NULL, status TEXT NOT NULL, score REAL, detection_label TEXT, snapshot_file TEXT, crop_file TEXT,
+            clip_file TEXT, audio_file TEXT, clip_state TEXT NOT NULL DEFAULT 'pending', clip_expected_ready_at INTEGER,
+            review_flag INTEGER NOT NULL DEFAULT 0, first_ever INTEGER NOT NULL DEFAULT 0, muted INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL,
+            last_change_at INTEGER, undo_data TEXT, last_correction_id INTEGER, updated_at INTEGER NOT NULL,
+            birdnet_detection_id INTEGER, birdnet_clip TEXT, tier TEXT,
+            clip_source TEXT, clip_kept INTEGER NOT NULL DEFAULT 0, clip_bytes INTEGER, clip_deleted_by TEXT)`);
+        const seen = { ...makeVisit('old-seen', 'Raccoon', 0.8, 5_000), clip: { state: 'ready', expectedReadyAt: 50_000 } };
+        const heard = makeHeardVisit('old-heard', 'Blue Jay', 6_000);
+        const insert = old.prepare(`INSERT INTO visits(id,camera_id,camera_name,kind,started_at,species,grp,status,score,clip_file,clip_state,clip_expected_ready_at,first_ever,data,updated_at,clip_source,clip_kept,clip_bytes)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        insert.run('old-seen', '88', 'Backyard Camera', 'seen', 5_000, 'Raccoon', 'mammal', 'auto', 0.8, '/NVR/kestrel/clips/88/old-seen.mp4', 'ready', 50_000, 1, JSON.stringify(seen), 1, 'nvr', 1, 4_321);
+        insert.run('old-heard', '88', 'Backyard Camera', 'heard', 6_000, 'Blue Jay', 'bird', 'auto', 0.8, null, 'none', null, 0, JSON.stringify(heard), 1, null, 0, null);
+        old.close();
+
+        for (let opening = 0; opening < 2; opening++) {
+            const store = new KestrelStore(path);
+            try {
+                const columns = store.db.prepare('PRAGMA table_info(visits)').all().map(column => column.name);
+                assert.ok(columns.includes('clip_start_at'), `the column exists (opening ${opening + 1})`);
+                assert.equal(columns.filter(name => name === 'clip_start_at').length, 1);
+                for (const name of ['clip_offset_ms', 'clip_aligned_at']) assert.equal(columns.filter(column => column === name).length, 1, `${name} exists once (opening ${opening + 1})`);
+                assert.deepEqual(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='visit_boxes'").all().map(row => row.name), ['visit_boxes']);
+                assert.equal(store.db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
+                assert.equal(store.db.prepare('PRAGMA foreign_key_list(visit_boxes)').get().on_delete, 'CASCADE');
+                // Old visits are as they were, and a clip from before the start was recorded has no start.
+                const decoded = store.getVisit('old-seen');
+                assert.equal(decoded.species, 'Raccoon');
+                assert.deepEqual(decoded.clip, { state: 'ready', expectedReadyAt: 50_000, url: 'media/clip/old-seen.mp4', source: 'nvr' });
+                assert.equal(store.getRawVisit('old-seen').clip_bytes, 4_321);
+                assert.equal(store.getVisit('old-heard').kind, 'heard');
+                assert.equal(store.listVisits().items.length, 2);
+                if (opening === 0) {
+                    assert.equal(store.getRawVisit('old-seen').clip_start_at, null, 'the start of an old clip is not known');
+                    assert.deepEqual(store.getTrack('old-seen'), { clipStartAt: null, clipOffsetMs: null, frames: [] });
+                    // And the new things work on it.
+                    store.appendTrackFrames('old-seen', [event(5_000), event(5_300)]);
+                    store.setClip('old-seen', 'ready', '/NVR/kestrel/clips/88/old-seen.mp4', { source: 'nvr', startAt: 4_900, kept: true, bytes: 4_321 });
+                } else {
+                    assert.deepEqual(store.getTrack('old-seen'), { clipStartAt: 4_900, clipOffsetMs: null, frames: [event(5_000), event(5_300)] }, 'what was recorded after the upgrade is still there after the next start');
+                }
+            } finally {
+                store.close();
+            }
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+// --- Lining the boxes up with the video (align.ts): what is kept with a clip, and which clips are still to be looked at -----------------------------
+
+test('a database from before the boxes were lined up opens, gains clip_offset_ms and clip_aligned_at, keeps its visits and boxes, and then records an alignment', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-align-migrate-'));
+    const path = join(directory, 'kestrel.sqlite');
+    try {
+        // The first store ever made, then the two new columns taken away again: what the database was the day before this existed.
+        const first = new KestrelStore(path);
+        first.saveVisit(makeVisit('old-seen', 'Raccoon', 0.8, 5_000));
+        first.appendTrackFrames('old-seen', [event(5_000), event(5_300)]);
+        first.setClip('old-seen', 'ready', '/NVR/kestrel/clips/88/old-seen.mp4', { source: 'nvr', startAt: 4_900, kept: true, bytes: 4_321 });
+        first.close();
+        const old = new DatabaseSync(path);
+        old.exec('ALTER TABLE visits DROP COLUMN clip_offset_ms; ALTER TABLE visits DROP COLUMN clip_aligned_at');
+        assert.deepEqual(old.prepare('PRAGMA table_info(visits)').all().map(column => column.name).filter(name => name.startsWith('clip_a') || name === 'clip_offset_ms'), []);
+        old.close();
+
+        for (let opening = 0; opening < 2; opening++) {
+            const store = new KestrelStore(path);
+            try {
+                const columns = store.db.prepare('PRAGMA table_info(visits)').all().map(column => column.name);
+                for (const name of ['clip_offset_ms', 'clip_aligned_at']) assert.equal(columns.filter(column => column === name).length, 1, `${name} exists once (opening ${opening + 1})`);
+                const raw = store.getRawVisit('old-seen');
+                assert.deepEqual([raw.clip_offset_ms, raw.clip_aligned_at, raw.clip_start_at, raw.clip_bytes], opening === 0 ? [null, null, 4_900, 4_321] : [-440, 99_000, 4_900, 4_321]);
+                assert.deepEqual(store.getTrack('old-seen'), { clipStartAt: 4_900, clipOffsetMs: opening === 0 ? null : -440, frames: [event(5_000), event(5_300)] });
+                assert.equal(store.getVisit('old-seen').clip.source, 'nvr');
+                if (opening === 0) {
+                    assert.deepEqual(store.listUnaligned(0, 10).map(row => row.id), [], 'two events are too few to be looked at');
+                    store.setClipAlignment('old-seen', -440, 99_000);
+                }
+            } finally { store.close(); }
+        }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('an alignment is kept with its ready clip and cleared whenever the clip is set again, whatever state it is set to; saving the visit or keeping a copy of the clip does not touch it', async () => {
+    await withStore(store => {
+        store.saveVisit(makeVisit('v', 'Raccoon', 0.8, 5_000));
+        const aligned = () => { const raw = store.getRawVisit('v'); return [raw.clip_offset_ms, raw.clip_aligned_at]; };
+        assert.deepEqual(aligned(), [null, null], 'a new visit has not been looked at');
+        store.setClipAlignment('v', -440, 1_000);
+        assert.deepEqual(aligned(), [null, null], 'a visit without a ready clip has nothing to line up');
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/1.mp4', { source: 'events', startAt: 4_400 });
+        store.setClipAlignment('v', 330, 2_000);
+        assert.deepEqual(aligned(), [330, 2_000]);
+        assert.equal(store.getTrack('v').clipOffsetMs, 330);
+        // Other writes leave it alone: a correction saves the visit again, keeping the copy moves the file.
+        store.saveVisit({ ...store.getVisit('v'), species: 'Coyote', status: 'corrected' });
+        store.markClipKept('v', '/NVR/kestrel/clips/88/v.mp4', 99);
+        assert.deepEqual(aligned(), [330, 2_000]);
+        // A clip set again is a new clip: in every state.
+        for (const [state, file, details] of [['ready', '/NVR/kestrel/clips/88/v.mp4', { source: 'nvr', startAt: 4_500 }], ['pending', null, {}], ['none', null, {}], ['deleted', null, {}]]) {
+            store.setClip('v', 'ready', '/NVR/clips/88/videoclips/1.mp4', { source: 'events', startAt: 4_400 });
+            store.setClipAlignment('v', 330, 2_000);
+            assert.deepEqual(aligned(), [330, 2_000]);
+            store.setClip('v', state, file, details);
+            assert.deepEqual(aligned(), [null, null], `set to ${state}`);
+        }
+        // "Nothing clear was found" is kept too, as a null offset with the time it was looked at.
+        store.setClip('v', 'ready', '/NVR/clips/88/videoclips/1.mp4', { source: 'events', startAt: 4_400 });
+        store.setClipAlignment('v', null, 3_000);
+        assert.deepEqual(aligned(), [null, 3_000]);
+        assert.equal(store.getTrack('v').clipOffsetMs, null);
+    });
+});
+
+test('the clips still to be looked at: seen visits with a ready clip that starts at a known moment, whose file is there, with at least 6 events, started recently enough; the newest first', async () => {
+    await withStore(async (store, directory) => {
+        const day = 24 * 60 * 60 * 1000;
+        const now = Date.parse('2026-10-30T12:00:00Z');
+        const events = count => Array.from({ length: count }, (_, k) => event(now + k * 300));
+        const present = join(directory, 'events-clip.mp4');
+        await writeFile(present, 'a clip');
+        const seed = (id, startedAt, { count = 6, clip = 'ready', startAt = startedAt - 100, kept = true, file = `/NVR/kestrel/clips/88/${id}.mp4`, kind = 'seen' } = {}) => {
+            store.saveVisit(kind === 'seen' ? makeVisit(id, 'Raccoon', 0.8, startedAt) : makeHeardVisit(id, 'Blue Jay', startedAt));
+            if (kind === 'seen') store.appendTrackFrames(id, events(count));
+            if (clip === 'ready') store.setClip(id, 'ready', file, { source: 'events', startAt: startAt ?? undefined, kept, bytes: kept ? 10 : null });
+            else store.setClip(id, clip, null);
+            if (startAt === null) store.db.prepare('UPDATE visits SET clip_start_at=NULL WHERE id=?').run(id);
+        };
+        seed('newest', now - 1 * day);
+        seed('older', now - 5 * day);
+        seed('oldest-in-window', now - 13 * day);
+        seed('too-old', now - 15 * day);
+        seed('five-events', now - 2 * day, { count: 5 });
+        seed('no-events', now - 2 * day, { count: 0 });
+        seed('no-start', now - 2 * day, { startAt: null });
+        seed('still-pending', now - 2 * day, { clip: 'pending' });
+        seed('no-clip', now - 2 * day, { clip: 'none' });
+        seed('deleted', now - 2 * day, { clip: 'ready' });
+        store.setClip('deleted', 'deleted', null);
+        seed('heard', now - 2 * day, { kind: 'heard', clip: 'none', count: 0 });
+        seed('already-looked-at', now - 2 * day);
+        store.setClipAlignment('already-looked-at', null, now);
+        seed('other-plugins-file', now - 3 * day, { kept: false, file: present });
+        seed('other-plugins-file-gone', now - 3 * day, { kept: false, file: join(directory, 'gone.mp4') });
+        const since = now - 14 * day;
+        assert.deepEqual(store.listUnaligned(since, 20).map(row => row.id), ['newest', 'other-plugins-file', 'older', 'oldest-in-window'], 'newest first; another plugin\'s file only while it is there');
+        assert.deepEqual(store.listUnaligned(since, 2).map(row => row.id), ['newest', 'other-plugins-file'], 'at most the limit');
+        assert.deepEqual(store.listUnaligned(now - 6 * day, 20).map(row => row.id), ['newest', 'other-plugins-file', 'older'], 'nothing that started before `since`');
+        assert.deepEqual(store.listUnaligned(now - 15 * day, 20).map(row => row.id).slice(-2), ['oldest-in-window', 'too-old']);
+        // Looking at one takes it off the list; replacing its clip puts it back.
+        store.setClipAlignment('newest', 120, now);
+        assert.deepEqual(store.listUnaligned(since, 1).map(row => row.id), ['other-plugins-file']);
+        store.setClip('newest', 'ready', '/NVR/kestrel/clips/88/newest.mp4', { source: 'nvr', startAt: now - 1 * day - 5_000, kept: true, bytes: 10 });
+        assert.deepEqual(store.listUnaligned(since, 1).map(row => row.id), ['newest']);
+    });
 });

@@ -30,20 +30,30 @@ export const NVR_RETENTION_MARGIN_MS = 12 * 3_600_000;
 // What the resolver needs to know about a visit. `endedAt` is the last detection of the animal when the plugin watched it.
 export interface ClipVisit { id: string; cameraId: string; startedAt: number; endedAt?: number }
 
-export type NvrCut = { ok: true; file: string } | { ok: false; reason: 'unavailable' | 'failed' };
+// A clip found in the Events Recorder's folder: the file, and what the Events Recorder says of the recording: the moment it stopped
+// (`endAt`, wall-clock ms) and how long it says it lasted (`spanMs`). Where the clip's first frame is follows from the end and from the
+// video in the file (see eventsClipStart), not from where the recording is said to have begun.
+export interface FoundClip { file: string; endAt: number; spanMs: number }
+
+// `startAt` is the wall-clock moment (ms) of the cut clip's first frame (see nvrClipStart).
+export type NvrCut = { ok: true; file: string; startAt: number } | { ok: false; reason: 'unavailable' | 'failed' };
 
 // Everything outside this file: main.ts answers these from Scrypted, the tests from fakes.
 export interface ClipSources {
-    // The Events Recorder's clip for the visit, if it has one: the file.
-    events(visit: ClipVisit): Promise<string | undefined>;
+    // The Events Recorder's clip for the visit, if it has one: the file and when its recording stopped.
+    events(visit: ClipVisit): Promise<FoundClip | undefined>;
+    // How many ms of video a clip file holds (0 when it cannot be read). Asked once for each Events Recorder clip, when it is found.
+    videoDurationMs(file: string): Promise<number>;
     // Whether the NVR records this camera, so a clip can be cut from it.
     nvrRecords(cameraId: string): boolean;
     // Cuts the visit's clip out of the NVR's recording, into Kestrel's clip store. 'unavailable' means the NVR has no footage there.
     cutNvr(visit: ClipVisit): Promise<NvrCut>;
 }
 
+// `startAt` is the wall-clock moment (ms) the clip's first frame was recorded: the detection boxes are drawn from it. It is null when
+// that cannot be told (an Events Recorder clip whose video does not measure up, see eventsClipStart): the clip still plays, without boxes.
 export type ClipVerdict =
-    | { verdict: 'ready'; file: string; source: ClipSource }
+    | { verdict: 'ready'; file: string; source: ClipSource; startAt: number | null }
     // Nothing yet, ask again at the next poll.
     | { verdict: 'wait' }
     | { verdict: 'none'; reason: 'no_nvr' | 'unavailable' | 'failed' };
@@ -58,23 +68,53 @@ export function nvrClipWindow(startedAt: number, endedAt?: number | null): { sta
     return { start, duration: Math.min(visitEnd + NVR_TAIL_MS - start, NVR_MAX_CLIP_MS) };
 }
 
+// The wall-clock moment (ms) of the first frame of a clip cut for `window`. The NVR's stream ends exactly at the end of the window,
+// and the clip begins `spanMs` before that end (cutClip measures it): the window's whole length when the footage reached back that
+// far, less when the NVR had less of it, more when more lead-in came than can be trimmed.
+export function nvrClipStart(window: { start: number; duration: number }, spanMs: number): number {
+    return window.start + window.duration - spanMs;
+}
+
+// The Events Recorder starts its ffmpeg on the camera's prebuffered stream when an event triggers, so a clip begins at the keyframe
+// before that: 0.6 to 3.7 s ahead of the start in its file name (measured on 10 clips of cameras 88 and 104). The end in the name is when
+// the recording stopped. A clip whose video is longer than its name says by more than this, or shorter than half of it, is not believed.
+export const EVENTS_VIDEO_MAX_EXTRA_MS = 30_000;
+
+// The wall-clock moment (ms) of the first frame of an Events Recorder clip: where its recording stopped minus the length of the video in
+// the file (measured on the same 10 clips, that matched the real first frame to within 0.2 s; the start in the name is off by seconds).
+// null when the video's length (0 when it could not be measured) is not believable. The start in the name is never used instead.
+export function eventsClipStart(clip: FoundClip, videoMs: number): number | null {
+    if (!(videoMs > 0) || videoMs > clip.spanMs + EVENTS_VIDEO_MAX_EXTRA_MS || videoMs < clip.spanMs / 2) return null;
+    return Math.round(clip.endAt - videoMs);
+}
+
 // The oldest visit start the NVR can still have footage for.
 export function backfillSince(now: number, retentionDays: number | undefined): number {
     const days = retentionDays !== undefined && retentionDays > 0 ? retentionDays : NVR_UNKNOWN_RETENTION_DAYS;
     return now - days * 86_400_000 - NVR_RETENTION_MARGIN_MS;
 }
 
+export interface ClipResolverOptions {
+    now?: () => number;
+    // An NVR cut threw.
+    onError?: (visit: ClipVisit, error: unknown) => void;
+    // The first frame of an Events Recorder clip cannot be placed: its video measured `videoMs` (0 when it could not be measured).
+    onNoStart?: (visit: ClipVisit, clip: FoundClip, videoMs: number) => void;
+}
+
 export class ClipResolver {
     private readonly sources: ClipSources;
     private readonly now: () => number;
     private readonly onError: (visit: ClipVisit, error: unknown) => void;
+    private readonly onNoStart: (visit: ClipVisit, clip: FoundClip, videoMs: number) => void;
     // When the NVR was last asked for each pending visit.
     private readonly nvrTries = new Map<string, number>();
 
-    constructor(sources: ClipSources, options: { now?: () => number; onError?: (visit: ClipVisit, error: unknown) => void } = {}) {
+    constructor(sources: ClipSources, options: ClipResolverOptions = {}) {
         this.sources = sources;
         this.now = options.now ?? Date.now;
         this.onError = options.onError ?? (() => undefined);
+        this.onNoStart = options.onNoStart ?? (() => undefined);
     }
 
     // One look at a pending visit (the poller runs this every few seconds). Events Recorder first; the NVR only once the visit is
@@ -83,7 +123,7 @@ export class ClipResolver {
         const events = await this.sources.events(visit);
         if (events) {
             this.nvrTries.delete(visit.id);
-            return { verdict: 'ready', file: events, source: 'events' };
+            return { verdict: 'ready', file: events.file, source: 'events', startAt: await this.eventsStart(visit, events) };
         }
         const now = this.now();
         const age = now - visit.startedAt;
@@ -96,7 +136,7 @@ export class ClipResolver {
         const cut = await this.cut(visit);
         if (cut.ok) {
             this.nvrTries.delete(visit.id);
-            return { verdict: 'ready', file: cut.file, source: 'nvr' };
+            return { verdict: 'ready', file: cut.file, source: 'nvr', startAt: cut.startAt };
         }
         if (!lastChance) return WAIT;
         this.nvrTries.delete(visit.id);
@@ -106,10 +146,10 @@ export class ClipResolver {
     // A visit that already ended with no clip (the backfill): the same two sources in the same order, no waiting.
     async resolveMissing(visit: ClipVisit): Promise<ClipVerdict> {
         const events = await this.sources.events(visit);
-        if (events) return { verdict: 'ready', file: events, source: 'events' };
+        if (events) return { verdict: 'ready', file: events.file, source: 'events', startAt: await this.eventsStart(visit, events) };
         if (!this.sources.nvrRecords(visit.cameraId)) return { verdict: 'none', reason: 'no_nvr' };
         const cut = await this.cut(visit);
-        return cut.ok ? { verdict: 'ready', file: cut.file, source: 'nvr' } : { verdict: 'none', reason: cut.reason };
+        return cut.ok ? { verdict: 'ready', file: cut.file, source: 'nvr', startAt: cut.startAt } : { verdict: 'none', reason: cut.reason };
     }
 
     // Forget the visits that are not pending any more.
@@ -125,6 +165,20 @@ export class ClipResolver {
             return { ok: false, reason: 'failed' };
         }
     }
+
+    // Where an Events Recorder clip begins. The clip file is asked how much video it holds exactly once, now that the clip is found (a
+    // visit that has no clip yet is never asked); a file that cannot be measured is the same as one that measures as nothing.
+    private async eventsStart(visit: ClipVisit, clip: FoundClip): Promise<number | null> {
+        let videoMs = 0;
+        try {
+            videoMs = await this.sources.videoDurationMs(clip.file);
+        } catch {
+            // Left at 0: not believable, so the clip gets no start.
+        }
+        const startAt = eventsClipStart(clip, videoMs);
+        if (startAt === null) this.onNoStart(visit, clip, videoMs);
+        return startAt;
+    }
 }
 
 export interface PendingRow { id: string; camera_id: string; started_at: number }
@@ -135,8 +189,9 @@ export interface PendingPorts<Row extends PendingRow> {
     // When the animal was last seen, while the plugin watched the visit.
     endedAt(row: Row): number | undefined;
     resolve(visit: ClipVisit): Promise<ClipVerdict>;
-    // Records the clip (the caller keeps its own copy and tells the dashboards).
-    ready(row: Row, file: string, source: ClipSource): Promise<void>;
+    // Records the clip (the caller keeps its own copy and tells the dashboards); `startAt` is when its first frame was recorded, null when
+    // that cannot be told (the clip then plays without detection boxes).
+    ready(row: Row, file: string, source: ClipSource, startAt: number | null): Promise<void>;
     // The visit ends with no clip.
     none(row: Row, reason: 'no_nvr' | 'unavailable' | 'failed'): void;
     failed(row: Row, error: unknown): void;
@@ -151,7 +206,7 @@ export async function pollPendingClips<Row extends PendingRow>(ports: PendingPor
         if (ports.stopped()) break;
         try {
             const verdict = await ports.resolve({ id: row.id, cameraId: row.camera_id, startedAt: row.started_at, endedAt: ports.endedAt(row) });
-            if (verdict.verdict === 'ready') await ports.ready(row, verdict.file, verdict.source);
+            if (verdict.verdict === 'ready') await ports.ready(row, verdict.file, verdict.source, verdict.startAt);
             else if (verdict.verdict === 'none') ports.none(row, verdict.reason);
         } catch (error) {
             ports.failed(row, error);
@@ -168,8 +223,8 @@ export interface BackfillPorts<Row extends BackfillRow> {
     // How many visits with no clip are older than that: their footage is gone.
     beyondRetention(): number;
     resolve(visit: ClipVisit): Promise<ClipVerdict>;
-    // Records the recovered clip (the caller sets the visit's state and tells the dashboards).
-    recovered(row: Row, file: string, source: ClipSource): Promise<void>;
+    // Records the recovered clip (the caller sets the visit's state and tells the dashboards); `startAt` as for `ready` above.
+    recovered(row: Row, file: string, source: ClipSource, startAt: number | null): Promise<void>;
     stopped(): boolean;
 }
 
@@ -196,7 +251,7 @@ export async function backfillClips<Row extends BackfillRow>(ports: BackfillPort
         try {
             verdict = await ports.resolve({ id: row.id, cameraId: row.camera_id, startedAt: row.started_at });
             if (verdict.verdict === 'ready') {
-                await ports.recovered(row, verdict.file, verdict.source);
+                await ports.recovered(row, verdict.file, verdict.source, verdict.startAt);
                 report.recovered.push({ id: row.id, source: verdict.source });
                 continue;
             }

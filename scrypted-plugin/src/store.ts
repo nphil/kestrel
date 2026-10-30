@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import type { StatementSync } from 'node:sqlite';
+import type { TrackBox, TrackSample, VisitTrack } from './track';
 
 export type VisitKind = 'seen' | 'heard';
 export type VisitGroup = 'bird' | 'mammal' | 'other' | 'unknown';
@@ -58,6 +60,14 @@ export interface VisitMeta {
     cropFile?: string | null;
     clipFile?: string | null;
     clipSource?: ClipSource | null;
+    // Wall-clock ms of the first frame of a ready clip (the detection boxes are drawn from it); null when that is not known: a clip from
+    // before it was recorded, or one whose start could not be told.
+    clipStartAt?: number | null;
+    // Where the detection boxes really lie in the clip's video, measured from the footage (align.ts): the ms to add to a detection's time to get
+    // its time in the video, and when that was tried. Both are null until the clip has been looked at; the offset stays null when nothing clear
+    // was found (the default for the clip's source is used then).
+    clipOffsetMs?: number | null;
+    clipAlignedAt?: number | null;
     // Whether the clip file is Kestrel's own copy (in the clip store) rather than another plugin's file, and its size.
     clipKept?: boolean;
     clipBytes?: number | null;
@@ -156,6 +166,9 @@ interface RawVisit {
     crop_file: string | null;
     clip_file: string | null;
     clip_source: ClipSource | null;
+    clip_start_at: number | null;
+    clip_offset_ms: number | null;
+    clip_aligned_at: number | null;
     clip_kept: number;
     clip_bytes: number | null;
     clip_deleted_by: 'user' | null;
@@ -200,6 +213,12 @@ const VISIT_RETENTION_MS = 3 * 365 * 24 * 60 * 60 * 1000;
 // Heard calls (the raw BirdNET-Go detections behind a heard visit) are only needed to pair the two models and to
 // count repeats within minutes; a month is plenty for looking back at what the models said.
 const HEARD_CALL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+// What one visit keeps of the boxes the detector drew (track.ts): at most this many events, none later than this long after its first
+// one (no clip is longer than about 70 s).
+export const TRACK_MAX_FRAMES = 480;
+export const TRACK_MAX_SPAN_MS = 90_000;
+// A clip is only looked at to find where its boxes lie (align.ts) when its visit kept at least this many detection events.
+export const ALIGN_MIN_SAMPLES = 6;
 
 // A visit counts toward the species list, "first ever", the camera's latest sighting and the like unless it is a heard
 // call that is only Possible or Check and nobody has confirmed or corrected it. A NULL tier (camera visits, older heard
@@ -391,6 +410,13 @@ export class KestrelStore {
                 rank INTEGER NOT NULL,
                 last_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS visit_boxes (
+                visit_id TEXT NOT NULL,
+                t INTEGER NOT NULL,
+                boxes TEXT NOT NULL,
+                PRIMARY KEY(visit_id, t),
+                FOREIGN KEY(visit_id) REFERENCES visits(id) ON DELETE CASCADE
+            ) WITHOUT ROWID;
         `);
         // One-time migration: the visits table predates these two columns (BirdNET-Go's
         // own detection reference), so a pre-existing on-disk DB needs them added explicitly --
@@ -408,6 +434,13 @@ export class KestrelStore {
         if (!visitColumns.has('clip_kept')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_kept INTEGER NOT NULL DEFAULT 0');
         if (!visitColumns.has('clip_bytes')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_bytes INTEGER');
         if (!visitColumns.has('clip_deleted_by')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_deleted_by TEXT');
+        // One-time migration: the wall-clock moment a ready clip's first frame was recorded (NULL = not known, as for every clip from before
+        // this existed); the detection boxes of the visit (table visit_boxes) are drawn from it.
+        if (!visitColumns.has('clip_start_at')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_start_at INTEGER');
+        // One-time migration: where the boxes really lie in a ready clip's video, measured from the footage (`clip_offset_ms`, NULL = not known),
+        // and when that was tried (`clip_aligned_at`, NULL = not yet: the clip is looked at once, and again only if it is replaced).
+        if (!visitColumns.has('clip_offset_ms')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_offset_ms INTEGER');
+        if (!visitColumns.has('clip_aligned_at')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_aligned_at INTEGER');
         this.recordDetectorCheckStatement = this.db.prepare(`INSERT INTO camera_daily_stats(day,camera_id,checks,empty_checks) VALUES(?,?,1,?)
             ON CONFLICT(day,camera_id) DO UPDATE SET checks=checks+1,empty_checks=empty_checks+excluded.empty_checks`);
         this.recordBirdnetIgnoredStatement = this.db.prepare(`INSERT INTO birdnet_daily_stats(day,ignored) VALUES(?,1)
@@ -475,6 +508,9 @@ export class KestrelStore {
         const cropFile = value('cropFile', prior?.crop_file) as string | null;
         const clipFile = value('clipFile', prior?.clip_file) as string | null;
         const clipSource = value('clipSource', prior?.clip_source) as ClipSource | null;
+        const clipStartAt = value('clipStartAt', prior?.clip_start_at) as number | null;
+        const clipOffsetMs = value('clipOffsetMs', prior?.clip_offset_ms) as number | null;
+        const clipAlignedAt = value('clipAlignedAt', prior?.clip_aligned_at) as number | null;
         const clipKept = has('clipKept') ? Number(!!meta.clipKept) : Number(prior?.clip_kept ?? 0);
         const clipBytes = value('clipBytes', prior?.clip_bytes) as number | null;
         const clipDeletedBy = value('clipDeletedBy', prior?.clip_deleted_by) as 'user' | null;
@@ -486,15 +522,16 @@ export class KestrelStore {
         const updatedAt = Date.now();
         this.db.prepare(`INSERT INTO visits (
             id,camera_id,camera_name,kind,started_at,species,grp,status,score,detection_label,
-            snapshot_file,crop_file,clip_file,clip_source,clip_kept,clip_bytes,clip_deleted_by,audio_file,birdnet_detection_id,birdnet_clip,clip_state,clip_expected_ready_at,
+            snapshot_file,crop_file,clip_file,clip_source,clip_start_at,clip_offset_ms,clip_aligned_at,clip_kept,clip_bytes,clip_deleted_by,audio_file,birdnet_detection_id,birdnet_clip,clip_state,clip_expected_ready_at,
             review_flag,first_ever,muted,data,last_change_at,undo_data,last_correction_id,tier,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             camera_id=excluded.camera_id,camera_name=excluded.camera_name,kind=excluded.kind,
             started_at=excluded.started_at,species=excluded.species,grp=excluded.grp,status=excluded.status,
             score=excluded.score,detection_label=excluded.detection_label,snapshot_file=excluded.snapshot_file,
             crop_file=excluded.crop_file,clip_file=excluded.clip_file,audio_file=excluded.audio_file,
-            clip_source=excluded.clip_source,clip_kept=excluded.clip_kept,clip_bytes=excluded.clip_bytes,clip_deleted_by=excluded.clip_deleted_by,
+            clip_source=excluded.clip_source,clip_start_at=excluded.clip_start_at,clip_offset_ms=excluded.clip_offset_ms,clip_aligned_at=excluded.clip_aligned_at,
+            clip_kept=excluded.clip_kept,clip_bytes=excluded.clip_bytes,clip_deleted_by=excluded.clip_deleted_by,
             birdnet_detection_id=excluded.birdnet_detection_id,birdnet_clip=excluded.birdnet_clip,
             clip_state=excluded.clip_state,clip_expected_ready_at=excluded.clip_expected_ready_at,
             review_flag=excluded.review_flag,first_ever=excluded.first_ever,muted=excluded.muted,data=excluded.data,
@@ -502,7 +539,7 @@ export class KestrelStore {
             last_correction_id=excluded.last_correction_id,tier=excluded.tier,updated_at=excluded.updated_at`).run(
             visit.id, visit.camera.id, visit.camera.name, visit.kind, visit.startedAt, visit.species, visit.grp,
             visit.status, visit.score, has('detectionLabel') ? meta.detectionLabel ?? null : prior?.detection_label ?? null,
-            snapshotFile, cropFile, clipFile, clipSource, clipKept, clipBytes, clipDeletedBy, audioFile, birdnetDetectionId, birdnetClip, visit.clip.state, visit.clip.expectedReadyAt,
+            snapshotFile, cropFile, clipFile, clipSource, clipStartAt, clipOffsetMs, clipAlignedAt, clipKept, clipBytes, clipDeletedBy, audioFile, birdnetDetectionId, birdnetClip, visit.clip.state, visit.clip.expectedReadyAt,
             Number(review), Number(visit.firstEver), Number(visit.muted), data,
             has('lastChangeAt') ? meta.lastChangeAt ?? null : prior?.last_change_at ?? null,
             has('undoData') ? meta.undoData ?? null : prior?.undo_data ?? null,
@@ -689,10 +726,11 @@ export class KestrelStore {
 
     // One-time repair for a raccoon that was filed twice (see seen.ts): folds `dropId` into
     // `keepId` -- the kept visit keeps its species, adopts the dropped visit's READY clip if it has
-    // none, and offers the dropped visit's label as a 'model' suggestion -- then deletes the dropped
-    // visit, its best-photo entry and its photo files. Not a user correction, so no corrections row
-    // is written. 'absent' = one of the visits does not exist (nothing to repair); 'skipped' = they
-    // are not a plain same-camera seen pair, or a correction points at the dropped visit.
+    // none, takes over the dropped visit's detection boxes, and offers the dropped visit's label as
+    // a 'model' suggestion -- then deletes the dropped visit, its best-photo entry and its photo
+    // files. Not a user correction, so no corrections row is written. 'absent' = one of the visits
+    // does not exist (nothing to repair); 'skipped' = they are not a plain same-camera seen pair,
+    // or a correction points at the dropped visit.
     async repairSplitSeenVisit(keepId: string, dropId: string): Promise<'merged' | 'absent' | 'skipped'> {
         const keepRaw = this.getRawVisit(keepId);
         const dropRaw = this.getRawVisit(dropId);
@@ -702,15 +740,17 @@ export class KestrelStore {
         const keep = this.decodeVisit(keepRaw);
         const drop = this.decodeVisit(dropRaw);
         let clipFile = keepRaw.clip_file;
-        let clipDetails: { clipSource?: ClipSource | null; clipKept?: boolean; clipBytes?: number | null } = {};
+        let clipDetails: { clipSource?: ClipSource | null; clipStartAt?: number | null; clipOffsetMs?: number | null; clipAlignedAt?: number | null; clipKept?: boolean; clipBytes?: number | null } = {};
         if (keep.clip.state !== 'ready' && drop.clip.state === 'ready' && dropRaw.clip_file) {
             keep.clip.state = 'ready';
             clipFile = dropRaw.clip_file;
-            clipDetails = { clipSource: dropRaw.clip_source, clipKept: !!dropRaw.clip_kept, clipBytes: dropRaw.clip_bytes };
+            clipDetails = { clipSource: dropRaw.clip_source, clipStartAt: dropRaw.clip_start_at, clipOffsetMs: dropRaw.clip_offset_ms, clipAlignedAt: dropRaw.clip_aligned_at, clipKept: !!dropRaw.clip_kept, clipBytes: dropRaw.clip_bytes };
         }
         if (drop.species !== keep.species && drop.species !== 'Unidentified animal')
             keep.suggestions = [{ species: drop.species, why: 'model' }, ...keep.suggestions.filter(item => item.species !== drop.species)];
         this.saveVisit(keep, { clipFile, ...clipDetails });
+        // The boxes are wall-clock events, so they fit the kept visit whichever clip it ended up with; its own win where both have one.
+        this.appendTrackFrames(keepId, this.getTrack(dropId).frames);
         const files = [dropRaw.snapshot_file, dropRaw.crop_file].filter((file): file is string => !!file);
         this.deleteVisitRow(dropId);
         this.recomputeFirstEverForSpecies(drop.species);
@@ -876,9 +916,11 @@ export class KestrelStore {
         return this.db.prepare("SELECT * FROM visits WHERE kind='seen' AND clip_state='pending' AND started_at<=? ORDER BY started_at LIMIT ?").all(before, limit) as unknown as RawVisit[];
     }
 
-    // Sets what a visit's clip is. A ready clip says where it came from (`source`) and whether the file is Kestrel's own copy
-    // (`kept`, with its size); every other state clears all of that. `deletedBy` records a deletion a person asked for.
-    setClip(id: string, state: ClipState, file: string | null, details: { source?: ClipSource; kept?: boolean; bytes?: number | null; deletedBy?: 'user' } = {}): void {
+    // Sets what a visit's clip is. A ready clip says where it came from (`source`), the wall-clock moment its first frame was recorded
+    // (`startAt`, null when that cannot be told) and whether the file is Kestrel's own copy (`kept`, with its size); every other state
+    // clears all of that. `deletedBy` records a deletion a person asked for. A deleted clip has nothing left to draw the detection boxes
+    // on, so its track goes with it.
+    setClip(id: string, state: ClipState, file: string | null, details: { source?: ClipSource; startAt?: number | null; kept?: boolean; bytes?: number | null; deletedBy?: 'user' } = {}): void {
         const row = this.getRawVisit(id);
         if (!row) return;
         const visit = this.decodeVisit(row);
@@ -887,15 +929,84 @@ export class KestrelStore {
         this.saveVisit(visit, {
             clipFile: file,
             clipSource: ready ? details.source ?? null : null,
+            clipStartAt: ready ? details.startAt ?? null : null,
+            // A new or changed clip has not been looked at yet.
+            clipOffsetMs: null,
+            clipAlignedAt: null,
             clipKept: ready && !!details.kept,
             clipBytes: ready && details.kept ? details.bytes ?? null : null,
             clipDeletedBy: state === 'deleted' ? details.deletedBy ?? null : null,
         });
+        if (state === 'deleted') this.deleteTrack(id);
     }
 
     // A ready clip whose file was another plugin's now has Kestrel's own copy: serve that one from now on.
     markClipKept(id: string, file: string, bytes: number): void {
         this.db.prepare("UPDATE visits SET clip_file=?,clip_kept=1,clip_bytes=?,updated_at=? WHERE id=? AND clip_state='ready'").run(file, bytes, Date.now(), id);
+    }
+
+    // What looking at a ready clip found (align.ts): the offset of its boxes in its video, null when the footage showed nothing clear, and when
+    // it was looked at. Either way the clip is not looked at again until it is replaced (setClip clears both).
+    setClipAlignment(id: string, offsetMs: number | null, at: number): void {
+        this.db.prepare("UPDATE visits SET clip_offset_ms=?,clip_aligned_at=?,updated_at=? WHERE id=? AND clip_state='ready'").run(offsetMs, at, Date.now(), id);
+    }
+
+    // Seen visits whose ready clip has not been looked at yet and can be: the clip's start is known, its file is there (Kestrel's own copy, or
+    // another plugin's file that still exists) and the visit kept at least ALIGN_MIN_SAMPLES detection events. Started at or after `since`,
+    // newest first, at most `limit`.
+    listUnaligned(since: number, limit: number): RawVisit[] {
+        const rows = this.db.prepare(`SELECT * FROM visits v WHERE kind='seen' AND clip_state='ready' AND clip_start_at IS NOT NULL AND clip_aligned_at IS NULL AND started_at>=?
+            AND (SELECT COUNT(*) FROM visit_boxes b WHERE b.visit_id=v.id)>=? ORDER BY started_at DESC`).all(since, ALIGN_MIN_SAMPLES) as unknown as RawVisit[];
+        return rows.filter(row => row.clip_kept === 1 || (!!row.clip_file && existsSync(row.clip_file))).slice(0, limit);
+    }
+
+    // --- Detection boxes: what the detector drew around the animal during a visit (track.ts), one row per detection event ---
+
+    // Adds detection events (oldest first) to a seen visit's track. A visit keeps at most TRACK_MAX_FRAMES events and none later than
+    // TRACK_MAX_SPAN_MS after its first one: an event that would break either is dropped, and an event at a time that is already kept
+    // is ignored. A visit that does not exist, that was only heard, or whose clip was deleted (nothing to draw on) has no track.
+    appendTrackFrames(visitId: string, samples: readonly TrackSample[]): void {
+        if (!samples.length) return;
+        const visit = this.db.prepare('SELECT kind,clip_state FROM visits WHERE id=?').get(visitId) as { kind: VisitKind; clip_state: ClipState } | undefined;
+        if (visit?.kind !== 'seen' || visit.clip_state === 'deleted') return;
+        const stored = this.db.prepare('SELECT COUNT(*) AS n, MIN(t) AS first FROM visit_boxes WHERE visit_id=?').get(visitId) as { n: number; first: number | null };
+        // Events older than everything kept move the first one back, and whatever then lies beyond the span from it goes.
+        const first = Math.min(stored.first ?? samples[0].t, samples[0].t);
+        let count = Number(stored.n);
+        const insert = this.db.prepare('INSERT OR IGNORE INTO visit_boxes(visit_id,t,boxes) VALUES(?,?,?)');
+        this.db.exec('BEGIN');
+        try {
+            if (stored.first !== null && first < stored.first)
+                count -= Number(this.db.prepare('DELETE FROM visit_boxes WHERE visit_id=? AND t>?').run(visitId, first + TRACK_MAX_SPAN_MS).changes);
+            for (const sample of samples) {
+                if (count >= TRACK_MAX_FRAMES || sample.t - first > TRACK_MAX_SPAN_MS) break;
+                count += Number(insert.run(visitId, sample.t, JSON.stringify(sample.boxes)).changes);
+            }
+            this.db.exec('COMMIT');
+        } catch (error) {
+            this.db.exec('ROLLBACK');
+            throw error;
+        }
+    }
+
+    // A visit's track: when its clip starts (null when that was never recorded) and its detection events, oldest first. A row that
+    // cannot be read is skipped.
+    getTrack(visitId: string): VisitTrack {
+        const clip = this.db.prepare('SELECT clip_start_at,clip_offset_ms FROM visits WHERE id=?').get(visitId) as { clip_start_at: number | null; clip_offset_ms: number | null } | undefined;
+        const frames: TrackSample[] = [];
+        for (const row of this.db.prepare('SELECT t,boxes FROM visit_boxes WHERE visit_id=? ORDER BY t').all(visitId) as { t: number; boxes: string }[]) {
+            try {
+                const boxes: unknown = JSON.parse(row.boxes);
+                if (Array.isArray(boxes)) frames.push({ t: row.t, boxes: boxes as TrackBox[] });
+            } catch {
+                // Not JSON any more: this event is lost, the others are not.
+            }
+        }
+        return { clipStartAt: clip?.clip_start_at ?? null, clipOffsetMs: clip?.clip_offset_ms ?? null, frames };
+    }
+
+    deleteTrack(visitId: string): void {
+        this.db.prepare('DELETE FROM visit_boxes WHERE visit_id=?').run(visitId);
     }
 
     // Seen visits that ended with no clip but still have footage in the NVR (started at or after `since`), oldest first because the
@@ -1155,6 +1266,9 @@ export class KestrelStore {
         this.db.prepare('DELETE FROM camera_daily_stats WHERE day<?').run(newYorkDayKey(now - 30 * 24 * 60 * 60 * 1000));
         this.db.prepare('DELETE FROM birdnet_daily_stats WHERE day<?').run(newYorkDayKey(now - 30 * 24 * 60 * 60 * 1000));
         this.db.prepare('DELETE FROM heard_calls WHERE at<?').run(now - HEARD_CALL_RETENTION_MS);
+        // A visit that never got a clip and started more than 30 days ago is past any NVR retention, so no clip is coming for its boxes to
+        // be drawn on. Every other track stays as long as its visit does (tracks of kept clips are not subject to the media pruning).
+        this.db.prepare("DELETE FROM visit_boxes WHERE visit_id IN (SELECT id FROM visits WHERE clip_state='none' AND started_at<?)").run(cutoff);
         const old = this.db.prepare('SELECT id,snapshot_file,crop_file FROM visits WHERE started_at<? AND (snapshot_file IS NOT NULL OR crop_file IS NOT NULL)')
             .all(cutoff) as { id: string; snapshot_file: string | null; crop_file: string | null }[];
         for (const row of old) {

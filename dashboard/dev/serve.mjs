@@ -6,7 +6,9 @@
 //   /dev/**                         files of dashboard/dev (build the harness first: node dev/build.mjs), never cached
 //   /api/kestrel/media/<kind>/<id>  stands in for the integration's signed media route: needs `?authSig=` and refuses any other
 //                                   query parameter except width/height (like Home Assistant's signed links), then answers with
-//                                   fixtures/placeholder.svg, fixtures/call.mp3 (audio, audio-original, species_sound: a reference recording) or fixtures/clip.mp4 (clip).
+//                                   fixtures/placeholder.svg, fixtures/call.mp3 (audio, audio-original, species_sound: a reference recording) or a clip
+//                                   (clip: fixtures/clip.mp4, 640x360; the visits made to show 4:3 and portrait pictures get clip-4x3.mp4 and clip-3x4.mp4;
+//                                   a recording of your own at fixtures/local/<visit id>.mp4 comes before all of those: see "Real data" in the README).
 //                                   `reference-info/<species slug>` is JSON, not a file: who took a reference photo (see PHOTO_INFO: two credits, 204, 500).
 //                                   It cannot know the harness's signing epoch: a test's request interceptor does (dev/smoke/lib).
 //   anything else without a file extension (/kestrel/live, /lovelace/0 ...)  dev/index.html, the single-page fallback.
@@ -18,8 +20,17 @@ import { fileURLToPath } from "node:url";
 const devDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(devDir, "..");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".map": "application/json", ".json": "application/json", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".webmanifest": "application/manifest+json" };
-const MEDIA_FILE = { clip: "clip.mp4", audio: "call.mp3", "audio-original": "call.mp3", species_sound: "call.mp3" };
+const MEDIA_FILE = { audio: "call.mp3", "audio-original": "call.mp3", species_sound: "call.mp3" };
 const ALLOWED_PARAMS = new Set(["authSig", "width", "height"]);
+/** The clips of the fixture visits that show a picture of another shape than the generic 640x360 one (see dev/harness.ts). */
+const CLIPS = new Map([["fixture-visit-4x3", "clip-4x3.mp4"], ["fixture-visit-3x4", "clip-3x4.mp4"]]);
+
+/** The clip answered for a visit: its own recording in the git-ignored fixtures/local/ when there is one, else the fixture made for it, else the generic one. */
+function clipFile(id) {
+  const own = join(devDir, "fixtures", "local", `${id}.mp4`);
+  return /^[\w-]+$/.test(id) && existsSync(own) ? own : join(devDir, "fixtures", CLIPS.get(id) ?? "clip.mp4");
+}
+
 /** `reference-info/<slug>`: the credit for a species' reference photo as the integration answers it. A number is a bare status (204: nothing known, 500: a failing server); a slug not listed is 204. */
 const PHOTO_INFO = {
   "common-raccoon": { source: "iNaturalist", credit: "Jane Birder", licence: "CC BY-NC", page: "https://www.inaturalist.org/photos/123" },
@@ -70,7 +81,7 @@ function handle(request, response) {
       if (typeof info === "number") return response.writeHead(info, HEADERS).end();
       return response.writeHead(200, { ...HEADERS, "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(info));
     }
-    return sendFile(request, response, join(devDir, "fixtures", MEDIA_FILE[media[1]] ?? "placeholder.svg"));
+    return sendFile(request, response, media[1] === "clip" ? clipFile(media[2]) : join(devDir, "fixtures", MEDIA_FILE[media[1]] ?? "placeholder.svg"));
   }
   if (path.startsWith("/api/")) return deny(response, 404, "not found");
 

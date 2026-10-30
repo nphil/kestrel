@@ -14,24 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import math
-import re
 from typing import Any
 
-import aiohttp
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from . import birdnet_api
 from .client import KestrelApiError
-from .const import BIRDNET_GO_INTERNAL_URL
 
 MIN_THRESHOLD = 0.005
 MAX_THRESHOLD = 0.5
 
-_API = f"{BIRDNET_GO_INTERNAL_URL}/api/v2"
-_TIMEOUT = aiohttp.ClientTimeout(total=15)
 _REBUILD_POLL_S = 0.5
 _REBUILD_POLLS = 20  # up to ~10 s for BirdNET-Go to finish rebuilding its species list
-_CSRF_TOKEN = re.compile(r"[A-Za-z0-9+/=_.\-]{8,512}")
 
 
 def checked_threshold(value: object) -> float:
@@ -45,34 +39,13 @@ def checked_threshold(value: object) -> float:
     return round(float(value), 4)
 
 
-async def _request(
-    hass: HomeAssistant,
-    method: str,
-    path: str,
-    *,
-    body: Any | None = None,
-    headers: dict[str, str] | None = None,
-) -> Any:
-    try:
-        async with async_get_clientsession(hass).request(
-            method, f"{_API}{path}", json=body, headers=headers, timeout=_TIMEOUT
-        ) as response:
-            if response.status != 200:
-                raise KestrelApiError(
-                    f"BirdNET-Go refused the request (HTTP {response.status})", status=response.status
-                )
-            return await response.json(content_type=None)
-    except (aiohttp.ClientError, TimeoutError, OSError, ValueError) as err:
-        raise KestrelApiError("Could not reach BirdNET-Go") from err
-
-
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 async def async_read(hass: HomeAssistant) -> dict[str, Any]:
     """Current strictness, how many species it allows, and where BirdNET-Go thinks it is."""
-    payload = await _request(hass, "GET", "/range/species/count")
+    payload = await birdnet_api.async_request(hass, "GET", "/range/species/count")
     location = payload.get("location") if isinstance(payload, dict) else None
     threshold = _number(payload.get("threshold")) if isinstance(payload, dict) else None
     count = payload.get("count") if isinstance(payload, dict) else None
@@ -101,22 +74,19 @@ async def async_set_threshold(hass: HomeAssistant, threshold: object) -> dict[st
     if abs(before["threshold"] - value) < 1e-9:
         return before  # BirdNET-Go only rebuilds on a real change
 
-    config = await _request(hass, "GET", "/app/config")
-    token = config.get("csrfToken") if isinstance(config, dict) else None
-    if not isinstance(token, str) or not _CSRF_TOKEN.fullmatch(token):
-        raise KestrelApiError("BirdNET-Go did not give a usable security token")
-    section = await _request(hass, "GET", "/settings/birdnet")
+    headers = await birdnet_api.async_write_headers(hass)
+    section = await birdnet_api.async_request(hass, "GET", "/settings/birdnet")
     current = section.get("rangeFilter") if isinstance(section, dict) else None
     if not isinstance(current, dict):
         raise KestrelApiError("BirdNET-Go sent an answer Kestrel does not understand")
     # The species list is BirdNET-Go's own output; it refuses to take it back.
     keep = {key: item for key, item in current.items() if key != "species"}
-    await _request(
+    await birdnet_api.async_request(
         hass,
         "PATCH",
         "/settings/birdnet",
         body={"rangeFilter": {**keep, "threshold": value}},
-        headers={"X-CSRF-Token": token, "Cookie": f"csrf={token}"},
+        headers=headers,
     )
 
     for _ in range(_REBUILD_POLLS):

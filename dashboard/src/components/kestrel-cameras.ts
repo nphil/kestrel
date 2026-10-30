@@ -14,13 +14,16 @@ import { heardHero } from "../ui/heard-hero.ts";
 import { photoCaption } from "../ui/photo-credit.ts";
 import { forgetStableUrls, keptLink, sameMedia } from "../urls.ts";
 import { clipFailure } from "../clips.ts";
+import { keepTrack } from "../detections.ts";
 import { GROUP_LABEL, KIND, asKind, couldAlsoBe, evidenceCount, evidenceWord, percentSure, recordingNotes, tierWhyLine, tierWord, visitConfidence } from "../vocab.ts";
 import { filterCounts, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberedFilter, type SpeciesFilter } from "../wildlife.ts";
 import "../ui/live-picture.ts";
 import "./kestrel-alternatives.ts";
+import "./kestrel-keep-recording.ts";
 import "./kestrel-live-player.ts";
 import "./kestrel-settings-sheet.ts";
 import "./kestrel-clip-confirm.ts";
+import "./kestrel-detection-boxes.ts";
 import { forgetSheetCache, forgetVisit } from "./kestrel-species-sheet.ts";
 import { forgetReferenceCache } from "./kestrel-reference-sound.ts";
 import type { KestrelLivePlayer } from "./kestrel-live-player.ts";
@@ -689,7 +692,7 @@ export class KestrelCameras extends LitElement {
     if (!this._isActive(generation) || id !== this._visitId) return;
     const visit = asVisit(response);
     if (!visit) throw new Error("Visit response was empty");
-    this._visit = visit;
+    this._visit = keepTrack(this._visit, visit);
     this._audioUrl = visitAudio(visit);
     this._visitReferencePhoto = null;
     this._visitReferencePhotoFailed = false;
@@ -885,6 +888,9 @@ export class KestrelCameras extends LitElement {
     if (!this._species.length) void this._loadSpecies();
   }
 
+  /** A press on a box drawn over the clip asks the same question as "Wrong?": what was it? Nothing while a correction is being saved, as the button is. */
+  private _onBoxTap = (): void => { if (!this._saving) this._openWrongPicker(); };
+
   private _onPickerClose = (): void => { this._pickerOpen = false; this._search = ""; };
 
   private _openHelp(): void { this._helpMounted = true; this._helpOpen = true; }
@@ -905,7 +911,7 @@ export class KestrelCameras extends LitElement {
     try {
       const response = await api.correct(this._hass, current.id, species);
       const updated = asVisit(response);
-      if (updated && this.isConnected && this._visitId === current.id) this._visit = updated;
+      if (updated && this.isConnected && this._visitId === current.id) this._visit = keepTrack(this._visit, updated);
     } catch {
       if (this.isConnected && this._visitId === current.id) this._visit = before;
       this._pendingUndo = null;
@@ -925,7 +931,7 @@ export class KestrelCameras extends LitElement {
     try {
       const response = await api.confirm(this._hass, visitId, alsoHeard);
       const updated = asVisit(response);
-      if (updated && this.isConnected && this._visitId === visitId) this._visit = updated;
+      if (updated && this.isConnected && this._visitId === visitId) this._visit = keepTrack(this._visit, updated);
     } catch {
       if (before && this.isConnected && this._visitId === visitId) this._visit = before;
       if (alsoHeard) this._heardConfirmed = false;
@@ -940,10 +946,10 @@ export class KestrelCameras extends LitElement {
     this._saving = true;
     try {
       await api.undo(this._hass, pending.visitId);
-      if (pending.before && this._visitId === pending.visitId) this._visit = pending.before;
+      if (pending.before && this._visitId === pending.visitId) this._visit = keepTrack(this._visit, pending.before);
       else if (this._visitId) {
         const refreshed = asVisit(await api.visit(this._hass, this._visitId));
-        if (refreshed) this._visit = refreshed;
+        if (refreshed) this._visit = keepTrack(this._visit, refreshed);
       }
       this._heardConfirmed = false;
       this._pendingUndo = null;
@@ -1309,7 +1315,7 @@ export class KestrelCameras extends LitElement {
       <section class="visit-hero sheet">
         <div class="hero-media">
           ${visit.clip?.state === "ready" && clip
-            ? html`<video class="visit-video" src=${clip} poster=${photo ?? nothing} controls autoplay muted playsinline preload="auto" aria-label=${`${visit.species} visit clip`} @error=${this._onVideoError}></video>`
+            ? html`<kestrel-detection-boxes .detections=${visit.detections} @box-tap=${this._onBoxTap}><video class="visit-video" src=${clip} poster=${photo ?? nothing} controls autoplay muted playsinline preload="auto" aria-label=${`${visit.species} visit clip`} @error=${this._onVideoError}></video></kestrel-detection-boxes>`
             : photo
               ? html`<kestrel-lu-image priority="high" ratio="16/10" .src=${photo} alt=${`${visit.species} at ${visit.camera.name}`}></kestrel-lu-image>`
               : visit.kind === "heard"
@@ -1340,9 +1346,10 @@ export class KestrelCameras extends LitElement {
           <kestrel-lu-button kind="primary" icon="mdi:check" label=${confirmed ? "Confirmed" : "That's right"} ?disabled=${confirmed || this._saving} @click=${() => this._confirmVisit()}></kestrel-lu-button>
           <kestrel-lu-button kind="secondary" label="Wrong?" ?disabled=${this._saving} @click=${this._openWrongPicker}></kestrel-lu-button>
         </div>
-        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording was kept for this visit.</span>`}${this._renderReference(visit.species, visit.status)}${this._renderAlternatives(visit)}</section>` : nothing}
+        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording was kept for this visit.</span>`}${this._audioUrl ? this._renderKeep(visit.id) : nothing}${this._renderReference(visit.species, visit.status)}${this._renderAlternatives(visit)}</section>` : nothing}
         ${heard ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Also heard: ${heard.species}</strong><span class="muted">Sound recorded near this visit</span></div><kestrel-lu-button kind="secondary" icon="mdi:check" label="Also heard" ?disabled=${this._saving || this._heardConfirmed} @click=${() => this._confirmVisit(visit.id, true)}></kestrel-lu-button>
           ${this._audioUrl ? this._renderRecording(this._audioUrl, this._callVisit ?? heard, `Call recording of ${heard.species}`) : html`<kestrel-lu-button kind="quiet" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} label=${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"} @click=${() => this._loadCallAudio(heard.visitId)}></kestrel-lu-button>`}
+          ${heard.hasAudio ? this._renderKeep(heard.visitId) : nothing}
           ${this._renderReference(heard.species)}
         </section>` : nothing}
       </div>
@@ -1370,6 +1377,11 @@ export class KestrelCameras extends LitElement {
   private _renderReference(species: string, status: Visit["status"] = "auto") {
     if (!species || status === "not_animal" || status === "unknown") return nothing;
     return html`<kestrel-reference-sound compact .hass=${this._hass} .species=${species}></kestrel-reference-sound>`;
+  }
+
+  /** "Keep recording" under a recording of a heard call, for the visit that owns the recording: BirdNET-Go deletes sounds after 30 days unless they are kept. */
+  private _renderKeep(visitId: string) {
+    return html`<kestrel-keep-recording .hass=${this._hass} .visitId=${visitId}></kestrel-keep-recording>`;
   }
 
   /** "Could also be" for a heard visit: the species a second listen to the recording hears more strongly than the detector's, each with its "Play reference"
