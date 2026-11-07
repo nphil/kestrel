@@ -203,6 +203,9 @@ re-run it if Scrypted reinstalls 0.0.52, and retire it once upstream ships a rel
 
 - Home Assistant integration tests need no Home Assistant install:
   `python3 -m unittest discover -s tests -v`.
+- Tests that load the real integration into Home Assistant (`tests/ha`) use Home Assistant's own
+  test harness: `pip install "pytest-homeassistant[bluetooth]"`, then `pytest`. A weekly GitHub
+  run repeats them against the current Home Assistant beta.
 - Plugin tests: see [scrypted-plugin/README.md](scrypted-plugin/README.md).
 
 ## Licences

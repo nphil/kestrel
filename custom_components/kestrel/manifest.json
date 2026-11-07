@@ -1,11 +1,12 @@
 {
   "domain": "kestrel",
   "name": "Kestrel",
+  "categories": ["security_safety.cameras", "ai_voice.image_recognition"],
   "codeowners": ["@nphil"],
   "config_flow": true,
   "documentation": "https://github.com/nphil/kestrel",
   "issue_tracker": "https://github.com/nphil/kestrel/issues",
   "integration_type": "service",
   "iot_class": "local_polling",
-  "version": "1.4.0"
+  "version": "1.4.1"
 }
