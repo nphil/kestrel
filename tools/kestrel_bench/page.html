@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kestrel bench</title>
+<style>
+/* Lucent (v2) for a plain web page: the --lu-* names of languages/lucent/tokens.css and the Rosé Pine palette (--pal-*), dark by default, light when the system is. */
+:root {
+  --pal-canvas: #191724; --pal-sheet: #1F1D2E; --pal-glass-raised: #2C263A; --pal-edge: #ffffff1f; --pal-edge-raised: #ffffff33;
+  --pal-ink: #F2EFF6; --pal-ink-2: #F2EFF6A8; --pal-ink-3: #F2EFF66B; --pal-track-off: #ffffff29;
+  --pal-accent: #A79BF5; --pal-accent-ink: #17131F; --pal-positive: #9CCFD8; --pal-warning: #F6C177; --pal-danger: #EB6F92;
+  --lu-radius-card: 24px; --lu-radius-row: 18px; --lu-radius-control: 14px; --lu-radius-pill: 999px;
+  --lu-space-1: 4px; --lu-space-2: 8px; --lu-space-3: 12px; --lu-space-4: 16px; --lu-space-5: 20px; --lu-space-6: 24px;
+  --lu-target: 48px; --lu-font: Manrope, system-ui, sans-serif;
+  --lu-press: .97; --lu-motion-press: 120ms;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --pal-canvas: #FAF4ED; --pal-sheet: #FFFAF3; --pal-glass-raised: #FFFFFF; --pal-edge: #17131F1F; --pal-edge-raised: #17131F33;
+    --pal-ink: #17131F; --pal-ink-2: #17131FA8; --pal-ink-3: #17131F8C; --pal-track-off: #17131F1F;
+    --pal-accent: #907AA9; --pal-accent-ink: #FFFFFF; --pal-positive: #286983; --pal-warning: #8A5A12; --pal-danger: #B4637A;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--pal-canvas); color: var(--pal-ink); font: 400 16px/1.45 var(--lu-font); }
+h1 { font: 600 20px/1.25 var(--lu-font); margin: 0; letter-spacing: -.01em; }
+h2 { font: 600 14px/1.3 var(--lu-font); margin: 0 0 var(--lu-space-2); color: var(--pal-ink-2); text-transform: none; }
+p { margin: 0; }
+.muted { color: var(--pal-ink-2); font-size: 14px; }
+.app { display: grid; gap: var(--lu-space-4); padding: var(--lu-space-4); max-width: 1500px; margin: 0 auto; }
+@media (min-width: 980px) { .app { grid-template-columns: minmax(340px, 440px) 1fr; align-items: start; } .controls { position: sticky; top: var(--lu-space-4); max-height: calc(100vh - 32px); overflow: auto; } }
+.controls, .preview { display: grid; gap: var(--lu-space-3); align-content: start; }
+.card { background: var(--pal-sheet); border: 1px solid var(--pal-edge); border-radius: var(--lu-radius-card); padding: var(--lu-space-4); display: grid; gap: var(--lu-space-3); }
+label { display: grid; gap: var(--lu-space-1); font-size: 14px; color: var(--pal-ink-2); }
+input[type=search], select { min-height: var(--lu-target); border-radius: var(--lu-radius-control); border: 1px solid var(--pal-edge-raised); background: var(--pal-glass-raised); color: var(--pal-ink); padding: 0 var(--lu-space-3); font: inherit; width: 100%; }
+input[type=range] { width: 100%; accent-color: var(--pal-accent); min-height: var(--lu-target); }
+button { min-height: var(--lu-target); border-radius: var(--lu-radius-control); border: 1px solid var(--pal-edge-raised); background: var(--pal-glass-raised); color: var(--pal-ink); font: 500 14px var(--lu-font); padding: 0 var(--lu-space-4); cursor: pointer; transition: transform var(--lu-motion-press); }
+button:active { transform: scale(var(--lu-press)); }
+button.primary { background: var(--pal-accent); color: var(--pal-accent-ink); border-color: transparent; font-weight: 600; }
+button.danger { color: var(--pal-danger); }
+button.danger.armed { background: var(--pal-danger); color: var(--pal-accent-ink); }
+button[disabled] { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid var(--pal-accent); outline-offset: 2px; }
+.row { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); }
+.row > * { flex: 1 1 auto; }
+.list { display: grid; gap: var(--lu-space-2); }
+.pick { display: grid; gap: 2px; text-align: left; border-radius: var(--lu-radius-row); padding: var(--lu-space-2) var(--lu-space-3); min-height: var(--lu-target); }
+.pick[aria-pressed=true] { border-color: var(--pal-accent); }
+.pick b { font-weight: 600; }
+.pick span { font-size: 12px; color: var(--pal-ink-2); }
+.seg { display: flex; gap: var(--lu-space-1); padding: var(--lu-space-1); background: var(--pal-track-off); border-radius: var(--lu-radius-pill); }
+.seg button { flex: 1; border-radius: var(--lu-radius-pill); border-color: transparent; background: transparent; }
+.seg button[aria-pressed=true] { background: var(--pal-accent); color: var(--pal-accent-ink); font-weight: 600; }
+.chip { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: var(--lu-radius-pill); background: var(--pal-track-off); color: var(--pal-ink-2); margin-right: 4px; }
+.chip.good { color: var(--pal-positive); } .chip.warn { color: var(--pal-warning); } .chip.bad { color: var(--pal-danger); }
+.log { display: grid; gap: var(--lu-space-2); margin: 0; padding: 0; list-style: none; }
+.log li { padding: var(--lu-space-2) var(--lu-space-3); border-radius: var(--lu-radius-row); background: var(--pal-track-off); font-size: 14px; }
+.visit { display: flex; justify-content: space-between; align-items: center; gap: var(--lu-space-2); border-radius: var(--lu-radius-row); text-align: left; padding: var(--lu-space-2) var(--lu-space-3); }
+pre { margin: 0; overflow: auto; font-size: 12px; background: var(--pal-track-off); border-radius: var(--lu-radius-row); padding: var(--lu-space-3); }
+iframe { width: 100%; height: min(86vh, 900px); border: 1px solid var(--pal-edge-raised); border-radius: var(--lu-radius-card); background: #fff; display: block; margin: 0 auto; }
+iframe.phone { width: 390px; max-width: 100%; }
+.error { color: var(--pal-danger); font-size: 14px; min-height: 1.4em; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { button { transition: none; } }
+</style>
+</head>
+<body>
+<main class="app">
+  <section class="controls" aria-label="Bench controls">
+    <div>
+      <h1>Kestrel bench</h1>
+      <p class="muted">Make any animal show up in a test copy of Kestrel. Your real cameras and Home Assistant are not touched.</p>
+    </div>
+
+    <div class="card">
+      <h2>Pick an animal</h2>
+      <input id="q" type="search" placeholder="Type a few letters, like cardinal or coyote" autocomplete="off" autofocus aria-label="Animal name">
+      <div id="results" class="list" role="list"></div>
+      <p id="picked" class="muted" hidden></p>
+    </div>
+
+    <div class="card" id="actions" hidden>
+      <h2>What should happen?</h2>
+      <div class="seg" role="group" aria-label="Heard or seen">
+        <button id="modeHear" aria-pressed="true">Heard</button>
+        <button id="modeSee" aria-pressed="false">Seen</button>
+      </div>
+
+      <div id="hearBox" class="list">
+        <label>Who heard it
+          <select id="model">
+            <option value="v3">BirdNET v3.0 (the main one)</option>
+            <option value="perch">Perch only (a second opinion)</option>
+            <option value="disagree">The two disagree</option>
+            <option value="v24">Old BirdNET 2.4</option>
+            <option value="none">No model named</option>
+          </select>
+        </label>
+        <label><span>How sure the microphone is: <b id="hearConfidenceText">90%</b></span>
+          <input id="hearConfidence" type="range" min="30" max="99" value="90">
+        </label>
+        <label>Is it usual here this week
+          <select id="occurrence">
+            <option value="common">Yes, common here</option>
+            <option value="uncommon">Not often</option>
+            <option value="rare">Rare here</option>
+            <option value="unknown">BirdNET-Go did not say</option>
+          </select>
+        </label>
+        <label>Which microphone <select id="hearCamera"></select></label>
+        <button id="hear" class="primary">Hear it</button>
+      </div>
+
+      <div id="seeBox" class="list" hidden>
+        <label>Which camera <select id="seeCamera"></select></label>
+        <label><span>How sure the camera is: <b id="seeConfidenceText">90%</b></span>
+          <input id="seeConfidence" type="range" min="30" max="99" value="90">
+        </label>
+        <label class="row" style="display:flex;align-items:center"><input id="second" type="checkbox" checked> <span>A second animal walks through too</span></label>
+        <button id="see" class="primary">See it</button>
+      </div>
+      <p id="error" class="error" role="alert"></p>
+    </div>
+
+    <div class="card">
+      <h2>Repeat, undo or start over</h2>
+      <div class="row">
+        <button id="again" title="Send the same thing once more, as a new moment">Again</button>
+        <button id="drop" title="Take back the newest visit">Drop newest</button>
+        <button id="reset" class="danger">Reset everything</button>
+      </div>
+      <p class="muted">Again sends it once more. A bird heard again soon after folds into the same visit as a repeat, which can raise how sure Kestrel is.</p>
+    </div>
+
+    <div class="card">
+      <h2>What happened</h2>
+      <ul id="log" class="log"><li class="muted">Nothing yet.</li></ul>
+      <div id="visits" class="list"></div>
+      <details><summary class="muted">What the plugin was sent</summary><pre id="sent">Nothing yet.</pre></details>
+    </div>
+  </section>
+
+  <section class="preview" aria-label="Kestrel preview">
+    <div class="row">
+      <div class="seg" role="group" aria-label="Page">
+        <button data-page="live" aria-pressed="false">Live</button>
+        <button data-page="wildlife" aria-pressed="true">Wildlife</button>
+        <button data-page="insights" aria-pressed="false">Needs a look</button>
+      </div>
+      <div class="seg" role="group" aria-label="Width" style="max-width:260px">
+        <button data-width="phone" aria-pressed="false">Phone</button>
+        <button data-width="wide" aria-pressed="true">Wide</button>
+      </div>
+    </div>
+    <iframe id="frame" title="Kestrel"></iframe>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const frame = $("frame");
+let picked = null, mode = "hear", lastQuery = 0, resetTimer = 0;
+const pageUrl = (page) => `/kestrel/${page}?bench=1&toolbar=0`;
+const open = (path) => { frame.src = path; };
+open(pageUrl("wildlife"));
+
+async function call(path, body) {
+  const response = await fetch(`/bench/api/${path}`, body === undefined ? undefined : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
+}
+
+// Tells the Kestrel page what the plugin would push, so its lists and the visit page update on their own, like the real thing.
+function push(changed) {
+  const emit = frame.contentWindow && frame.contentWindow.__emit;
+  if (!emit) return;
+  for (const item of changed || []) {
+    if (item.type === "reset") { frame.contentWindow.location.reload(); return; }
+    emit({ type: item.type, data: { id: item.id } });
+  }
+}
+
+const chip = (text, cls = "") => `<span class="chip ${cls}">${text}</span>`;
+const esc = (text) => String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function render(state) {
+  $("log").innerHTML = state.log.length ? state.log.map((line) => `<li>${esc(line.text)}</li>`).join("") : '<li class="muted">Nothing yet.</li>';
+  $("visits").innerHTML = state.visits.map((visit) => {
+    const tier = visit.tier ? chip({ likely: "Likely", possible: "Possible", check: "Check" }[visit.tier], { likely: "good", possible: "warn", check: "bad" }[visit.tier]) : "";
+    const flags = [visit.kind === "heard" ? chip("heard") : chip("seen"), tier, visit.firstEver ? chip("first ever", "good") : "", visit.review ? chip("needs a look", "bad") : "", visit.repeats ? chip(`${visit.repeats} repeat${visit.repeats === 1 ? "" : "s"}`) : "", visit.frames ? chip(`${visit.frames} box frames`) : ""].join("");
+    return `<button class="visit" data-visit="${esc(visit.id)}"><span><b>${esc(visit.species)}</b> <span class="muted">on ${esc(visit.camera)}</span><br>${flags}</span><span class="muted">Open</span></button>`;
+  }).join("");
+  $("sent").textContent = state.sent ? JSON.stringify(state.sent, null, 2) : "Nothing yet.";
+  $("again").disabled = !state.canAgain;
+  $("drop").disabled = !state.canDrop;
+  for (const select of [$("hearCamera"), $("seeCamera")]) {
+    if (select.options.length) continue;
+    for (const camera of state.cameras) select.add(new Option(camera.name, camera.id));
+  }
+  if (!$("seeCamera").dataset.chosen) { $("seeCamera").dataset.chosen = "1"; $("seeCamera").value = state.cameras[1].id; }
+}
+
+function show(error) { $("error").textContent = error ? error.message : ""; }
+
+async function act(path, body) {
+  show(null);
+  try {
+    const result = await call(path, body);
+    render(result.state);
+    push(result.changed);
+  } catch (error) { show(error); }
+}
+
+$("q").addEventListener("input", async () => {
+  const ticket = ++lastQuery, query = $("q").value.trim();
+  if (!query) { $("results").innerHTML = ""; return; }
+  const { results } = await call(`search?q=${encodeURIComponent(query)}`);
+  if (ticket !== lastQuery) return;
+  $("results").innerHTML = results.length ? results.map((item, index) => `<button class="pick" role="listitem" data-index="${index}" aria-pressed="${picked && picked.scientific === item.scientific}"><b>${esc(item.heardAs || item.seenAs)}</b><span>${esc(item.scientific)} ${item.sources.map((source) => chip(source === "BirdNET-Go" ? "heard by mic" : "seen by camera")).join("")}</span></button>`).join("") : '<p class="muted">No animal matches. Try fewer letters.</p>';
+  $("results").results = results;
+});
+$("q").addEventListener("keydown", (event) => { if (event.key === "Enter") { const first = $("results").querySelector(".pick"); if (first) first.click(); } });
+$("results").addEventListener("click", (event) => {
+  const button = event.target.closest(".pick");
+  if (!button) return;
+  picked = $("results").results[Number(button.dataset.index)];
+  $("picked").hidden = false;
+  $("picked").textContent = `Picked: ${picked.heardAs || picked.seenAs} (${picked.scientific})`;
+  $("actions").hidden = false;
+  for (const item of $("results").querySelectorAll(".pick")) item.setAttribute("aria-pressed", item === button);
+});
+
+function setMode(next) {
+  mode = next;
+  $("modeHear").setAttribute("aria-pressed", next === "hear");
+  $("modeSee").setAttribute("aria-pressed", next === "see");
+  $("hearBox").hidden = next !== "hear";
+  $("seeBox").hidden = next !== "see";
+}
+$("modeHear").onclick = () => setMode("hear");
+$("modeSee").onclick = () => setMode("see");
+$("hearConfidence").oninput = () => { $("hearConfidenceText").textContent = `${$("hearConfidence").value}%`; };
+$("seeConfidence").oninput = () => { $("seeConfidenceText").textContent = `${$("seeConfidence").value}%`; };
+
+$("hear").onclick = () => act("hear", { species: picked.scientific, model: $("model").value, confidence: Number($("hearConfidence").value) / 100, occurrence: $("occurrence").value, camera: $("hearCamera").value });
+$("see").onclick = () => act("see", { species: picked.scientific, camera: $("seeCamera").value, confidence: Number($("seeConfidence").value) / 100, second: $("second").checked });
+$("again").onclick = () => act("again", {});
+$("drop").onclick = () => act("drop", {});
+$("reset").onclick = () => {
+  const button = $("reset");
+  if (!button.classList.contains("armed")) {
+    button.classList.add("armed");
+    button.textContent = "Tap again to wipe everything";
+    resetTimer = setTimeout(() => { button.classList.remove("armed"); button.textContent = "Reset everything"; }, 3000);
+    return;
+  }
+  clearTimeout(resetTimer);
+  button.classList.remove("armed");
+  button.textContent = "Reset everything";
+  act("reset", {});
+};
+$("visits").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-visit]");
+  if (button) open(`/kestrel/visit?v=${encodeURIComponent(button.dataset.visit)}&bench=1&toolbar=0`);
+});
+for (const button of document.querySelectorAll("[data-page]")) {
+  button.onclick = () => {
+    for (const other of document.querySelectorAll("[data-page]")) other.setAttribute("aria-pressed", other === button);
+    open(pageUrl(button.dataset.page));
+  };
+}
+for (const button of document.querySelectorAll("[data-width]")) {
+  button.onclick = () => {
+    for (const other of document.querySelectorAll("[data-width]")) other.setAttribute("aria-pressed", other === button);
+    frame.classList.toggle("phone", button.dataset.width === "phone");
+  };
+}
+call("state").then(render);
+</script>
+</body>
+</html>

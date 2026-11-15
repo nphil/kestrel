@@ -453,8 +453,8 @@ async function pressRows(ctx, view) {
     const sheet = `k.sheet('species')`;
     const inert = SHEET_INERT("species");
     rows.push(await press(ctx, "video thumbnail", `(k) => ${sheet}?.querySelector('kestrel-lu-media-rail')?.shadowRoot.querySelector('.item')`, inert));
-    rows.push(await press(ctx, "play button", `(k) => ${sheet}?.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`, inert));
-    rows.push(await press(ctx, "recording row", `(k) => ${sheet}?.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.open')`, inert));
+    rows.push(await press(ctx, "play button", `(k) => ${sheet}?.querySelector('kestrel-recording-list')?.shadowRoot.querySelector('.play:not(:disabled)')`, inert));
+    rows.push(await press(ctx, "recording row", `(k) => ${sheet}?.querySelector('kestrel-recording-list')?.shadowRoot.querySelector('.open')`, inert));
     const closeRow = await press(ctx, "close button", `(k) => k.sheetClose(${sheet})`, inert);
     // With Home Assistant's own dialog (ha-adaptive-dialog) the close button is Home Assistant's element: its pressed look lives in its
     // own shadow roots, which the press probe does not read, so it cannot be judged here.
@@ -534,7 +534,7 @@ async function scrollWindow(ctx) {
 async function scrollSheetList(ctx) {
   const { page, cdp, size } = ctx;
   const spot = await page.evaluate(() => {
-    const list = window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list");
+    const list = window.__kp.sheet("species")?.querySelector("kestrel-recording-list");
     const body = list ? window.__kp.scroller(list) : null;
     if (!body) return null;
     const r = body.getBoundingClientRect();
@@ -571,7 +571,7 @@ const SPECIES_TILE = (needle) => `(k) => [...(k.view('wildlife')?.querySelectorA
 async function openSpecies(ctx, needle) {
   const { page } = ctx;
   if (!await clickAt(ctx, SPECIES_TILE(needle))) return false;
-  await page.waitForFunction(() => window.__kp.sheet("species")?.querySelector("kestrel-lu-media-rail, kestrel-lu-audio-list"), null, { timeout: 15000 }).catch(() => undefined);
+  await page.waitForFunction(() => window.__kp.sheet("species")?.querySelector("kestrel-lu-media-rail, kestrel-recording-list"), null, { timeout: 15000 }).catch(() => undefined);
   await page.waitForTimeout(600);
   return true;
 }
@@ -614,9 +614,9 @@ async function pickSpecies(ctx) {
 
 async function audioStart(ctx) {
   const { page } = ctx;
-  const find = `(k) => k.sheet('species')?.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.play:not(:disabled)')`;
+  const find = `(k) => k.sheet('species')?.querySelector('kestrel-recording-list')?.shadowRoot.querySelector('.play:not(:disabled)')`;
   await page.evaluate(() => {
-    const audio = window.__kp.sheet("species").querySelector("kestrel-lu-audio-list").shadowRoot.querySelector("audio");
+    const audio = window.__kp.sheet("species").querySelector("kestrel-recording-list").shadowRoot.querySelector("audio");
     window.__audio = new Promise((resolve) => {
       let down = 0; let tap = 0;
       window.addEventListener("pointerdown", (e) => { down = e.timeStamp; }, { capture: true, once: true });
@@ -634,14 +634,14 @@ async function audioStart(ctx) {
  * the list ended up saying "Couldn't load this recording." for some row (a recording that cannot be loaded plays nothing). */
 async function oneAtATime(ctx) {
   const { page } = ctx;
-  const second = `(k) => [...k.sheet('species').querySelector('kestrel-lu-audio-list').shadowRoot.querySelectorAll('.play:not(:disabled)')][1]`;
+  const second = `(k) => [...k.sheet('species').querySelector('kestrel-recording-list').shadowRoot.querySelectorAll('.play:not(:disabled)')][1]`;
   const target = await page.evaluate(`(() => { try { return (${second})(window.__kp)?.getAttribute('aria-label') ?? null; } catch { return null; } })()`);
   await clickAt(ctx, second);
   await page.waitForTimeout(800);
   return page.evaluate((label) => {
     const playing = window.__kp.deep(document, "audio").filter((a) => !a.paused && !a.ended).length;
     let failedRows = [];
-    try { failedRows = [...(window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list")?.shadowRoot.querySelectorAll("li:has(.note.failed) .play") ?? [])].map((b) => b.getAttribute("aria-label")); } catch { /* report detail only */ }
+    try { failedRows = [...(window.__kp.sheet("species")?.querySelector("kestrel-recording-list")?.shadowRoot.querySelectorAll("li:has(.note.failed) .play") ?? [])].map((b) => b.getAttribute("aria-label")); } catch { /* report detail only */ }
     return { playing, pass: playing === 1, target: label, failedRows, elements: window.__kp.media() };
   }, target);
 }
@@ -711,7 +711,7 @@ async function backRestores(ctx, needle) {
   await page.waitForTimeout(300);
   if (!await openSpecies(ctx, needle)) return { skipped: "species not listed" };
   const opened = await read();
-  const opener = `(k) => { const s = k.sheet('species'); return s.querySelector('kestrel-lu-media-rail')?.shadowRoot.querySelector('.item') ?? s.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.open'); }`;
+  const opener = `(k) => { const s = k.sheet('species'); return s.querySelector('kestrel-lu-media-rail')?.shadowRoot.querySelector('.item') ?? s.querySelector('kestrel-recording-list')?.shadowRoot.querySelector('.open'); }`;
   if (!await clickAt(ctx, opener)) return { skipped: "nothing to open" };
   await page.waitForFunction(() => location.pathname.endsWith("/visit"), null, { timeout: 8000 }).catch(() => undefined);
   await page.waitForTimeout(700);
@@ -952,11 +952,11 @@ async function runSize(browser, key, size, harnessUrl) {
         }
         if (pick.heard && await openSpecies(ctx, pick.heard)) {
           if (want("scroll")) {
-            for (let i = 0; i < 4; i++) { if (!await clickAt(ctx, `(k) => k.sheet('species')?.querySelector('kestrel-lu-audio-list')?.shadowRoot.querySelector('.text-button:not(:disabled)')`)) break; await ctx.page.waitForTimeout(700); }
-            const rows = await ctx.page.evaluate(() => window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list")?.rows?.length ?? 0);
+            for (let i = 0; i < 4; i++) { if (!await clickAt(ctx, `(k) => k.sheet('species')?.querySelector('kestrel-recording-list')?.shadowRoot.querySelector('.text-button:not(:disabled)')`)) break; await ctx.page.waitForTimeout(700); }
+            const rows = await ctx.page.evaluate(() => window.__kp.sheet("species")?.querySelector("kestrel-recording-list")?.rows?.length ?? 0);
             c.scrollRecordings = { rows, ...await scrollSheetList(ctx) };
             c.scrollRecordings.pass = (c.scrollRecordings.ownWorstMs ?? 0) <= GATE.longTaskMs && (c.scrollRecordings.cls ?? 0) <= GATE.cls;
-            await ctx.page.evaluate(() => { const list = window.__kp.sheet("species")?.querySelector("kestrel-lu-audio-list"); window.__kp.scroller(list)?.scrollTo(0, 0); });
+            await ctx.page.evaluate(() => { const list = window.__kp.sheet("species")?.querySelector("kestrel-recording-list"); window.__kp.scroller(list)?.scrollTo(0, 0); });
           }
           if (want("media")) {
             c.audio = await audioStart(ctx);

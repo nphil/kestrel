@@ -12,7 +12,8 @@
 // A call waits a few seconds before it becomes a visit, long enough for the other model's message to arrive; the
 // second opinion waits a little longer than the main model so the main model's visit exists when it is looked for.
 
-import type { HeardCallInput, HeardCallRow, KestrelStore, ModelCall, Tier, TierWhy, Visit } from './store';
+import type { HeardCallInput, HeardCallRow, KestrelStore, ModelCall, Tier, TierWhy, Visit, VisitGroup } from './store';
+import type { TaxonomicClass } from './taxonomy';
 
 export const REPEAT_WINDOW_MS = 5 * 60_000;
 // The two models analyse the same audio and BirdNET-Go publishes both a few seconds after it: messages this close are one moment.
@@ -71,6 +72,119 @@ export function occurrenceOf(message: Record<string, unknown>): number | null {
     const raw = message.occurrence ?? message.Occurrence;
     const value = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() ? Number(raw) : NaN;
     return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+
+// BirdNET-Go publishes Date ("2024-01-15") and Time ("14:30:00") as separate local-wall-clock strings plus an optional IANA
+// `timezone`, not a single combined timestamp. This install's BirdNET-Go and Home Assistant both run on America/New_York,
+// so that is the fallback when `timezone` is absent from a message.
+export const DEFAULT_BIRDNET_TIME_ZONE = 'America/New_York';
+
+function asNumber(value: unknown): number | undefined {
+    const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+    return Number.isFinite(number) ? number : undefined;
+}
+
+function zonedDateTimeToUtcMillis(dateStr: string, timeStr: string, timeZone: string): number | undefined {
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+    const timeMatch = /^(\d{2}):(\d{2}):(\d{2})/.exec(timeStr);
+    if (!dateMatch || !timeMatch) return undefined;
+    const [, year, month, day] = dateMatch;
+    const [, hour, minute, second] = timeMatch;
+    // Guess the UTC instant is the wall-clock numbers taken literally, then see how that guess renders back in `timeZone`;
+    // the gap is the zone's offset at that instant (DST-aware), so subtracting it corrects the guess to the true UTC instant.
+    const guess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+    let formatter: Intl.DateTimeFormat;
+    try {
+        formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+    } catch {
+        return guess; // Unrecognized IANA zone name: treat the wall-clock numbers as UTC rather than fail outright.
+    }
+    const parts = Object.fromEntries(formatter.formatToParts(guess).map(part => [part.type, part.value]));
+    const renderedAsUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    return guess - (renderedAsUtc - guess);
+}
+
+// When a detection was made: BirdNET-Go's Date + Time in its own zone, else a single combined timestamp field (ms, or
+// epoch seconds), else undefined.
+export function birdnetTimestamp(message: Record<string, unknown>): number | undefined {
+    const dateValue = message.Date ?? message.date;
+    const timeValue = message.Time ?? message.time;
+    if (typeof dateValue === 'string' && typeof timeValue === 'string') {
+        const zoneValue = message.timezone;
+        const zone = typeof zoneValue === 'string' && zoneValue.trim() ? zoneValue.trim() : DEFAULT_BIRDNET_TIME_ZONE;
+        const zoned = zonedDateTimeToUtcMillis(dateValue, timeValue, zone);
+        if (zoned !== undefined) return zoned;
+    }
+    // Fallback for a payload shaped with a single combined timestamp field instead.
+    const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime;
+    const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
+    if (parsedTime === undefined || !Number.isFinite(parsedTime)) return undefined;
+    return parsedTime > 0 && parsedTime < 100_000_000_000 ? parsedTime * 1000 : parsedTime;
+}
+
+// What one BirdNET-Go MQTT message says, in Kestrel's terms. `grp` is 'drop' for a call Kestrel never keeps (an insect).
+export interface BirdnetReading {
+    species: string;
+    scientific: string | null;
+    // The name BirdNET-Go gave the microphone; which camera it is, is the caller's business.
+    source: string;
+    at: number;
+    score: number | null;
+    grp: VisitGroup | 'drop';
+    occurrence: number | null;
+    model: ModelInfo;
+    detectionId: number | null;
+    clip: string | null;
+}
+
+// Reads a BirdNET-Go detection. Real shape is BirdNET-Go's MQTTEventDTO (internal/mqtt/dto.go): flat, mostly PascalCase, Date+Time as
+// separate local-wall-clock strings. The lowercase/camelCase fallbacks are tolerance for a differently-shaped publisher on the same
+// topic, not anything BirdNET-Go itself sends. `classOf` is the taxonomic class of a scientific name (taxonomy.ts, which this file
+// cannot import): exact species first, then genus; anything it does not know is a bird. Returns undefined for a message that names no
+// species. `now` stands in for a message with no usable time.
+export function readBirdnetMessage(message: Record<string, unknown>, classOf: (scientific: string) => TaxonomicClass | undefined, now: number): BirdnetReading | undefined {
+    const speciesValue = message.CommonName ?? message.commonName ?? message.species ?? message.Species;
+    if (typeof speciesValue !== 'string' || !speciesValue.trim()) return undefined;
+    const sourceValue = message.sourceName ?? message.SourceName ?? message.source ?? message.Source ?? message.camera ?? message.Camera;
+    const confidence = asNumber(message.Confidence ?? message.confidence ?? message.score ?? message.Score);
+    const scientificValue = message.ScientificName ?? message.scientificName ?? message.scientific_name;
+    const scientific = typeof scientificValue === 'string' && scientificValue.trim() ? scientificValue.trim() : null;
+    const lower = scientific?.toLowerCase();
+    let grp: VisitGroup | 'drop' = 'bird';
+    if (lower) {
+        switch (classOf(lower)) {
+            case 'Mammalia': grp = 'mammal'; break;
+            case 'Amphibia':
+            case 'Reptilia': grp = 'other'; break;
+            // BirdNET-Go's insect calls are too unreliable to keep as a visit.
+            case 'Insecta': grp = 'drop'; break;
+        }
+    }
+    const clipValue = message.ClipName ?? message.clipName ?? message.clip_name;
+    return {
+        species: speciesValue.trim(),
+        scientific,
+        source: String(sourceValue ?? ''),
+        at: birdnetTimestamp(message) ?? now,
+        score: confidence === undefined ? null : confidence > 1 ? confidence / 100 : confidence,
+        grp,
+        occurrence: occurrenceOf(message),
+        model: modelOf(message),
+        // BirdNET-Go's own reference to its detection and clip: Kestrel never fetches or stores the audio itself.
+        detectionId: asNumber(message.detectionId ?? message.DetectionID ?? message.detection_id) ?? null,
+        clip: typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null,
+    };
+}
+
+// The call the ingest keeps for a reading that is not dropped, heard on `cameraId`.
+export function heardCallOf(reading: BirdnetReading, grp: VisitGroup, cameraId: string, receivedAt: number): HeardCallInput {
+    return {
+        cameraId, at: reading.at, receivedAt, species: reading.species, scientific: reading.scientific, grp, score: reading.score, occurrence: reading.occurrence,
+        model: reading.model.key, modelRank: reading.model.rank, modelLabel: reading.model.label, detectionId: reading.detectionId, clip: reading.clip,
+    };
 }
 
 // The one place that decides a bird is rare here: BirdNET-Go says it is unlikely this week, or local sightings say it

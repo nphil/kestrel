@@ -1,12 +1,17 @@
-import { BASE_CSS, type AudioListRow, type LuCloseDetail, type RailItem } from "lucent-ha";
+import { BASE_CSS, renderIcon, type AudioListRow, type LuCloseDetail, type RailItem } from "lucent-ha";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { api, loadPhotoCredit, speciesPicture, visitAudio, visitAudioOriginal, visitPage, visitSnapshot } from "../api.ts";
-import { clamp, dateTime, sentence, timestamp, when } from "../format.ts";
+import { DEFAULT_CREDIT, dayBars, dayCaption, dayChartLabel, factRows, newChip, speciesFacts, type FactRow, type SpeciesFacts } from "../facts.ts";
+import { pluralize, sentence, timestamp, when } from "../format.ts";
+import { forgetExtras } from "../recordings.ts";
 import type { Camera, HomeAssistant, PhotoCredit, Species, Visit, VisitKind } from "../types.ts";
 import { pathOf, sameMedia } from "../urls.ts";
+import { BARS_CSS, barChart } from "../ui/bars.ts";
+import { descriptionCredit } from "../ui/description-credit.ts";
 import { HEARD_HERO_CSS, heardHero } from "../ui/heard-hero.ts";
 import { photoCaption } from "../ui/photo-credit.ts";
 import { GROUP_LABEL, KIND, evidenceWord, recordingNotes, tierWord, visitConfidence } from "../vocab.ts";
+import "./kestrel-recording-list.ts";
 import "./kestrel-reference-sound.ts";
 
 interface Section { items: Visit[]; next: string | null; state: "loading" | "ready" | "error" }
@@ -29,6 +34,9 @@ const CACHE = new Map<string, { at: number; sections: Sections }>();
 const CACHE_MAX = 12;
 const CACHE_TTL_MS = 30 * 60_000;
 
+/** What the sheet's own answer adds to the list's fields (`speciesFacts`: the days, first and last, the surest ID, the description), kept the same way. */
+const FACTS = new Map<string, { at: number; facts: SpeciesFacts }>();
+
 const fresh = (): Sections => ({ seen: { items: [], next: null, state: "loading" }, heard: { items: [], next: null, state: "loading" } });
 const startedMs = (visit: Visit): number => timestamp(visit.startedAt) ?? 0;
 
@@ -39,9 +47,11 @@ export function forgetVisit(id: string): void {
   }
 }
 
-/** Forgets every remembered species: their pictures and recordings carry links Home Assistant signed with a key it has since replaced. */
+/** Forgets every remembered species: their pictures and recordings carry links Home Assistant signed with a key it has since replaced, and so do the spectrograms asked for under them. */
 export function forgetSheetCache(): void {
   CACHE.clear();
+  FACTS.clear();
+  forgetExtras();
 }
 
 function remember(name: string, sections: Sections): void {
@@ -66,6 +76,7 @@ export class KestrelSpeciesSheet extends LitElement {
     _sections: { state: true },
     _photoFailed: { state: true },
     _credit: { state: true },
+    _facts: { state: true },
   };
 
   declare hass: HomeAssistant | undefined;
@@ -77,10 +88,12 @@ export class KestrelSpeciesSheet extends LitElement {
   declare _sections: Sections;
   declare _photoFailed: boolean;
   declare _credit: PhotoCredit | null;
+  declare _facts: SpeciesFacts | null;
 
   private _loadedFor = "";
   private _requests: Record<VisitKind, number> = { seen: 0, heard: 0 };
   private _creditKey = "";
+  private _factsRequest = 0;
   private _rail: RailItem[] = [];
   private _rows: AudioListRow[] = [];
 
@@ -93,10 +106,12 @@ export class KestrelSpeciesSheet extends LitElement {
     this._sections = fresh();
     this._photoFailed = false;
     this._credit = null;
+    this._facts = null;
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._factsRequest += 1;
     this._requests = { seen: this._requests.seen + 1, heard: this._requests.heard + 1 };
     if (this._loadedFor) remember(this._loadedFor, this._sections);
   }
@@ -114,6 +129,8 @@ export class KestrelSpeciesSheet extends LitElement {
     if (!name || name === this._loadedFor) return;
     this._loadedFor = name;
     this._photoFailed = false;
+    const known = FACTS.get(name);
+    this._facts = known && Date.now() - known.at < CACHE_TTL_MS ? known.facts : null;
     const cached = CACHE.get(name);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) this._setSections(cached.sections);
     else this._setSections(fresh());
@@ -124,6 +141,7 @@ export class KestrelSpeciesSheet extends LitElement {
     if (!this.hass || !name || this._started === name) return;
     this._started = name;
     for (const kind of KINDS) void this._load(kind, false);
+    void this._loadFacts();
   }
 
   private _started = "";
@@ -175,6 +193,7 @@ export class KestrelSpeciesSheet extends LitElement {
    * it is being identified, so the newest page replaces what it overlaps instead of only adding to it.
    * Resolves to false when a list could not be fetched. */
   async refresh(): Promise<boolean> {
+    void this._loadFacts();
     const results = await Promise.all(KINDS.map((kind) => this._load(kind, false)));
     return results.every(Boolean);
   }
@@ -185,6 +204,7 @@ export class KestrelSpeciesSheet extends LitElement {
     if (!this._loadedFor) return true;
     this._requests = { seen: this._requests.seen + 1, heard: this._requests.heard + 1 };
     this._setSections(fresh());
+    void this._loadFacts();
     const results = await Promise.all(KINDS.map((kind) => this._load(kind, false)));
     return results.every(Boolean);
   }
@@ -227,6 +247,24 @@ export class KestrelSpeciesSheet extends LitElement {
     }
   }
 
+  /** Asks for what the lists do not carry: the days, the surest ID, the description. They are extras: when asking fails the sheet is simply without them, and the lists carry on. */
+  private async _loadFacts(): Promise<void> {
+    const hass = this.hass;
+    const name = this.species?.species;
+    if (!hass || !name) return;
+    const request = ++this._factsRequest;
+    try {
+      const facts = speciesFacts(await api.speciesDetail(hass, name));
+      if (request !== this._factsRequest || name !== this.species?.species) return;
+      FACTS.delete(name);
+      FACTS.set(name, { at: Date.now(), facts });
+      while (FACTS.size > CACHE_MAX) FACTS.delete(FACTS.keys().next().value as string);
+      this._facts = facts;
+    } catch {
+      // nothing to show for them
+    }
+  }
+
   private _onClose(event: CustomEvent<LuCloseDetail>): void {
     event.stopPropagation();
     this.dispatchEvent(new CustomEvent("close", { detail: event.detail }));
@@ -260,17 +298,48 @@ export class KestrelSpeciesSheet extends LitElement {
     return html`<kestrel-lu-section .icon=${KIND[kind].icon} .heading=${TITLE[kind]} .summary=${summary} .state=${section.state} .count=${section.items.length} .empty=${EMPTY[kind]} .noun=${many} .variant=${kind === "seen" ? "thumbs" : "rows"} @lu-retry=${() => this._load(kind, section.items.length > 0)}>
       ${kind === "seen"
         ? html`<kestrel-lu-media-rail .items=${this._rail} .more=${section.next !== null} .loading=${loadingMore} @lu-select=${(event: Event) => this._open(event, "seen")} @lu-warm=${this._warm} @lu-more=${() => this._load("seen", true)}></kestrel-lu-media-rail>`
-        : html`<kestrel-lu-audio-list .rows=${this._rows} .more=${section.next !== null} .loading=${loadingMore} @lu-select=${(event: Event) => this._open(event, "heard")} @lu-more=${() => this._load("heard", true)}></kestrel-lu-audio-list>`}
+        : html`<kestrel-recording-list .hass=${this.hass} .rows=${this._rows} .more=${section.next !== null} .loading=${loadingMore} @lu-select=${(event: Event) => this._open(event, "heard")} @lu-more=${() => this._load("heard", true)}></kestrel-recording-list>`}
     </kestrel-lu-section>`;
   }
 
   private _renderHours(species: Species) {
     const hours = species.hours ?? [];
-    const max = Math.max(1, ...hours.map((hour) => Number(hour) || 0));
-    return html`<section class="block"><h3>When it visits</h3>
-      <div class="hours" role="img" aria-label="Visits by hour of day">${Array.from({ length: 24 }, (_, hour) => html`<span class="hour" style=${`--bar-height:${clamp(((Number(hours[hour]) || 0) / max) * 100, 4, 100)}%`} title=${`${hour}:00 — ${hours[hour] ?? 0} visits`}></span>`)}</div>
-      <div class="hour-labels"><span>12 am</span><span>6 am</span><span>12 pm</span><span>6 pm</span><span>12 am</span></div>
-    </section>`;
+    const bars = Array.from({ length: 24 }, (_, hour) => ({ value: Number(hours[hour]) || 0, title: `${hour}:00 — ${hours[hour] ?? 0} visits` }));
+    return html`<section class="block"><h3>When it visits</h3>${barChart(bars, ["12 am", "6 am", "12 pm", "6 pm", "12 am"], "Visits by hour of day")}</section>`;
+  }
+
+  /** The last 30 days, a bar for each: how busy the species has been lately, next to the 24-hour chart of when in the day. */
+  private _renderDays() {
+    const facts = this._facts;
+    if (!facts?.perDay.length) return nothing;
+    const days = dayBars(facts);
+    const last = days.bars.length - 1;
+    const labels = [days.bars[0].label, days.bars[Math.floor(last / 2)].label, days.bars[last].label];
+    const bars = days.bars.map((bar) => ({ value: bar.count, title: `${bar.label} — ${pluralize(bar.count, "visit")}` }));
+    return html`<section class="block"><h3>Last ${days.bars.length} days</h3>${days.total > 0
+      ? html`${barChart(bars, labels, dayChartLabel(days))}<p class="caption days">${dayCaption(days)}</p>`
+      : html`<p class="line muted">No visits in the last ${days.bars.length} days.</p>`}</section>`;
+  }
+
+  /** A few sentences from Wikipedia, with who wrote them and under which licence. */
+  private _renderAbout() {
+    const facts = this._facts;
+    if (!facts?.description) return nothing;
+    return html`<section class="block"><h3>About</h3><p class="blurb">${facts.description}</p>${descriptionCredit(facts.credit ?? DEFAULT_CREDIT)}</section>`;
+  }
+
+  /** First and last time, and the surest ID: small cells under the photo. The surest ID is the one that opens something (that visit). */
+  private _renderFacts(species: Species) {
+    const rows = factRows(species, this._facts);
+    return rows.length ? html`<div class="facts">${rows.map((row) => this._renderFact(row))}</div>` : nothing;
+  }
+
+  private _renderFact(row: FactRow) {
+    const body = html`<span class="fact-label">${renderIcon(row.icon)}${row.label}</span><strong>${row.value}</strong>`;
+    const id = row.visitId;
+    return id
+      ? html`<button class="fact fact-link" type="button" aria-label=${`${row.label}: ${row.value}. Open that visit`} @click=${() => this.dispatchEvent(new CustomEvent("open-visit", { detail: { id } }))}>${body}${renderIcon("mdi:chevron-right", "icon fact-go")}</button>`
+      : html`<div class="fact">${body}</div>`;
   }
 
   private _renderCameras(species: Species) {
@@ -280,7 +349,7 @@ export class KestrelSpeciesSheet extends LitElement {
       : html`<p class="line muted">No camera breakdown is available yet.</p>`}</section>`;
   }
 
-  static styles = [BASE_CSS, HEARD_HERO_CSS, css`
+  static styles = [BASE_CSS, HEARD_HERO_CSS, BARS_CSS, css`
     .credit { margin-top: var(--lu-space-1); overflow-wrap: anywhere; }
     :host { display: contents; }
     h3, p { margin: 0; }
@@ -288,15 +357,23 @@ export class KestrelSpeciesSheet extends LitElement {
     ul { margin: 0; padding: 0; list-style: none; }
     .hero { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(110px, .6fr); align-items: center; gap: var(--lu-space-4); margin-bottom: var(--lu-space-2); }
     .photo { position: relative; }
-    .chip { position: absolute; top: var(--lu-space-2); right: var(--lu-space-2); z-index: 1; }
+    .badges { position: absolute; inset: var(--lu-space-2) var(--lu-space-2) auto; z-index: 1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--lu-space-1) var(--lu-space-2); pointer-events: none; }
+    .badges .new { margin-inline-end: auto; }
     .total { display: grid; gap: var(--lu-space-1); text-align: center; }
     .total strong { font-size: var(--lu-type-display); font-weight: 350; font-variant-numeric: tabular-nums; line-height: 1; }
     .total span { color: var(--lu-ink-2); font-size: var(--lu-type-caption); }
+    .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: var(--lu-space-2); margin-bottom: var(--lu-space-2); }
+    .fact { position: relative; display: grid; align-content: center; gap: 2px; min-width: 0; min-height: var(--lu-target); padding: var(--lu-space-2) var(--lu-space-3); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-tile); color: var(--lu-ink); background: var(--lu-tile); font: inherit; text-align: start; }
+    .fact strong { overflow-wrap: anywhere; font-size: var(--lu-type-label); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .fact-label { display: flex; align-items: center; gap: var(--lu-space-1); color: var(--lu-ink-3); font-size: var(--lu-type-caption); }
+    .fact-label .icon { --lu-icon: 14px; flex: none; }
+    .fact-link { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    .fact-link:is(:active, [data-pressed]) { background: var(--lu-material-press-wash); }
+    .fact-go { --lu-icon: 16px; position: absolute; top: var(--lu-space-2); inset-inline-end: var(--lu-space-2); color: var(--lu-ink-3); }
+    .blurb { color: var(--lu-ink-2); font-size: var(--lu-type-label); line-height: 1.5; }
+    .days { margin-top: var(--lu-space-1); }
     .block { margin-top: var(--lu-space-5); padding-top: var(--lu-space-4); border-top: 1px solid var(--lu-edge); }
     .line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-2); min-height: var(--lu-target); font-size: var(--lu-type-label); }
-    .hours { display: grid; height: 100px; grid-template-columns: repeat(24, minmax(0, 1fr)); align-items: end; gap: 3px; padding: var(--lu-space-2) 0; }
-    .hour { height: var(--bar-height); min-height: 4px; border-radius: 4px 4px 1px 1px; background: var(--lu-accent); opacity: .78; }
-    .hour-labels { display: flex; justify-content: space-between; color: var(--lu-ink-3); font-size: var(--lu-type-caption); }
     .simple li { display: flex; min-height: var(--lu-target); align-items: center; justify-content: space-between; gap: var(--lu-space-3); border-bottom: 1px solid var(--lu-edge); color: var(--lu-ink-2); font-size: var(--lu-type-label); }
     .simple li:last-child { border-bottom: 0; }
     .simple strong { color: var(--lu-ink); font-variant-numeric: tabular-nums; }
@@ -319,21 +396,29 @@ export class KestrelSpeciesSheet extends LitElement {
     const picture = speciesPicture(species);
     const showChip = picture.isReference && !this._photoFailed;
     const group = GROUP_LABEL[species.grp] ?? GROUP_LABEL.unknown;
-    const subheading = `${group}${species.first ? ` · First detected ${dateTime(species.first)}` : ""}`;
+    const scientific = this._facts?.scientific ?? species.scientific;
+    const subheading = scientific ? `${group} · ${scientific}` : group;
+    const badge = newChip(species, this._facts);
+    const badges = badge || showChip
+      ? html`<div class="badges">${badge ? html`<kestrel-lu-chip class="new" kind="info" overlay icon=${badge.icon} label=${badge.label}></kestrel-lu-chip>` : nothing}${showChip ? html`<kestrel-lu-chip overlay label="Reference photo"></kestrel-lu-chip>` : nothing}</div>`
+      : nothing;
     return html`<kestrel-lu-sheet .open=${this.open} .history=${false} engine="native" layer="species" .heading=${species.species} .subheading=${subheading} @lu-close=${this._onClose}>
       <div class="hero">
         <div class="photo">
           <kestrel-lu-image .src=${picture.url ?? ""} ratio="16/10" alt=${species.species} @lu-image-error=${() => { this._photoFailed = true; }}>${species.heard ? heardHero(KIND.heard.icon, "fallback") : nothing}</kestrel-lu-image>
           ${species.heard && !picture.url ? heardHero(KIND.heard.icon) : nothing}
-          ${showChip ? html`<kestrel-lu-chip class="chip" overlay label="Reference photo"></kestrel-lu-chip>` : nothing}
+          ${badges}
           ${showChip ? photoCaption(this._credit) : nothing}
         </div>
         <div class="total"><strong>${species.count30d}</strong><span>${species.count30d === 1 ? "visit" : "visits"} in the last 30 days</span></div>
       </div>
+      ${this._renderFacts(species)}
       <kestrel-reference-sound .hass=${this.hass} .species=${species.species}></kestrel-reference-sound>
       ${this._renderSection("seen", species)}
       ${this._renderSection("heard", species)}
       ${this._renderHours(species)}
+      ${this._renderDays()}
+      ${this._renderAbout()}
       ${this._renderCameras(species)}
       <div slot="footer" class="footer"><kestrel-lu-button kind="secondary" icon=${this.muted ? "mdi:bell-outline" : "mdi:bell-off-outline"} ?disabled=${!this.canMute} label=${this.muted ? "Unmute notifications" : "Mute notifications"} @click=${() => this.dispatchEvent(new CustomEvent("toggle-mute"))}></kestrel-lu-button><span class="caption">${this.muted ? "Muted for wildlife alerts" : "Wildlife alerts are enabled"}</span></div>
     </kestrel-lu-sheet>`;

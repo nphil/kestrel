@@ -4,7 +4,7 @@ import type { HomeAssistant } from "lucent-ha";
 import { HaFrame } from "./frame.ts";
 import { MockHa } from "./mock-hass.ts";
 import { HaPanelCustom } from "./panel.ts";
-import { HaCard, HaIcon, HaSvgIcon } from "./standins.ts";
+import { HaCard, HaForm, HaIcon, HaSvgIcon } from "./standins.ts";
 import { THEME_NAMES, applyTheme, installHaDefaults, isThemeName, type ThemeName } from "./theme.ts";
 
 /** Home Assistant's `narrow`: the viewport is 870px wide or less (src/layouts/home-assistant-main.ts). */
@@ -83,6 +83,7 @@ export function mountHa(options: MountOptions): MiniHa {
   defineOnce("ha-svg-icon", HaSvgIcon);
   defineOnce("ha-icon", HaIcon);
   defineOnce("ha-card", HaCard);
+  defineOnce("ha-form", HaForm);
   defineOnce("ha-panel-custom", HaPanelCustom);
   defineOnce("ha-frame", HaFrame);
 

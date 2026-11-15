@@ -86,7 +86,7 @@ SOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 IMAGE_TYPES = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
 _PAGE = re.compile(r"https://(?:www\.inaturalist\.org/photos/[0-9]+|en\.wikipedia\.org/wiki/[^\s\"'<>]+)")  # the only pages the panel links to
-_SPECIES_PAGE = re.compile(r"\b(?:species|subspecies|breed|hybrid)\b", re.I)  # what a Wikipedia description of an animal says
+SPECIES_PAGE = re.compile(r"\b(?:species|subspecies|breed|hybrid)\b", re.I)  # what a Wikipedia description of an animal says
 _PROVIDERS = {"wikimedia": "Wikimedia Commons", "avicommons": "Avicommons"}
 
 
@@ -284,7 +284,7 @@ async def inaturalist_photo(session: aiohttp.ClientSession, taxon: Taxon) -> Pho
 # ---- Wikipedia -------------------------------------------------------------------------------------------------------
 
 
-async def _wikipedia_summary(session: aiohttp.ClientSession, title: str) -> dict[str, Any] | None:
+async def wikipedia_summary(session: aiohttp.ClientSession, title: str) -> dict[str, Any] | None:
     """The REST summary of the Wikipedia page called `title` (redirects followed within Wikipedia), or None if there is none."""
     url = f"{WIKI_API}/{quote(title.replace(' ', '_'), safe='')}"
     status, data = await get_json(session, url, {}, follow_host="en.wikipedia.org")
@@ -320,10 +320,10 @@ async def wikipedia_photo(session: aiohttp.ClientSession, name: str, scientific:
     article); a page found by common name must say it is about a species. None when there is no article or it has no
     picture. Unavailable when Wikipedia cannot be asked."""
     for title, exact in ([(scientific, True)] if scientific else []) + [(name, False)]:
-        summary = await _wikipedia_summary(session, title)
+        summary = await wikipedia_summary(session, title)
         if summary is None or summary.get("type") != "standard":
             continue
-        if not exact and not _SPECIES_PAGE.search(str(summary.get("description") or "")):
+        if not exact and not SPECIES_PAGE.search(str(summary.get("description") or "")):
             continue  # "Cardinal" is a church office, not a bird
         image = wikipedia_image(summary)
         if image is None:
@@ -331,7 +331,8 @@ async def wikipedia_photo(session: aiohttp.ClientSession, name: str, scientific:
         credit, licence = await _commons_credit(session, image)
         desktop = (summary.get("content_urls") or {}).get("desktop") if isinstance(summary.get("content_urls"), dict) else None
         page = desktop.get("page") if isinstance(desktop, dict) else None
-        return Photo("wikipedia", credit, licence, page if isinstance(page, str) and _PAGE.fullmatch(page) else "", image, _extension(image) or "jpg")
+        page = page.replace("'", "%27") if isinstance(page, str) else ""  # Wikipedia writes Cooper's_hawk as it is; %27 is the same page, with no quote
+        return Photo("wikipedia", credit, licence, page if _PAGE.fullmatch(page) else "", image, _extension(image) or "jpg")
     return None
 
 
@@ -391,6 +392,11 @@ class ReferencePhotos:
         return {"species_remembered": len(self._entries), "by_source": sources}
 
     # ---- lookup ----
+
+    def scientific(self, species: str) -> str | None:
+        """The scientific name a lookup found for this species, or None. Never asks anyone."""
+        entry = self._entries.get(name_key(clean_name(species)))
+        return entry.scientific if entry is not None else None
 
     def offer(self, species: str) -> bool:
         """False when no source is known to have a picture of this species, so a link would only fail. It never asks anyone."""

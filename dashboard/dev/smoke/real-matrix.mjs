@@ -1117,7 +1117,7 @@ async function runCell(c) {
       await tap(await speciesTile(heardLabel));
       return sheetUp("species", 8000);
     };
-    const rowsReady = () => poll(() => ev(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return s ? window.__in(s, "kestrel-lu-audio-list", "button.play:not([disabled])").length : 0; }), { timeout: 25000, every: 250 });
+    const rowsReady = () => poll(() => ev(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return s ? window.__in(s, "kestrel-recording-list", "button.play:not([disabled])").length : 0; }), { timeout: 25000, every: 250 });
     const sheet = await openSheet();
     const url = await where();
     await verdict("5.open", !!sheet && /[?&]s=/.test(url), `${heardLabel}: lu-sheet open=${sheet?.open}, HA dialog shown=${sheet?.dialog}, ${url}`);
@@ -1152,7 +1152,7 @@ async function runCell(c) {
     const ready = await rowsReady();
     if (!ready) { skip("5.play", "the Heard section has no playable row"); skip("5.pause", "the Heard section has no playable row"); }
     else {
-      const play = () => handle(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return window.__in(s, "kestrel-lu-audio-list", "button.play:not([disabled])")[0] ?? null; });
+      const play = () => handle(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return window.__in(s, "kestrel-recording-list", "button.play:not([disabled])")[0] ?? null; });
       const state = () => ev(() => window.__deep(document, "audio").map((a) => ({ paused: a.paused, t: a.currentTime, ready: a.readyState, net: a.networkState, err: a.error?.code ?? null, src: a.currentSrc.split("?")[0].slice(-40) })));
       await tap(await play());
       await sleep(1500);
@@ -1325,10 +1325,10 @@ async function runCell(c) {
     const label = (await tileLabel(tileH)).split(".")[0];
     await tap(tileH);
     await sheetUp("species", 8000);
-    await poll(() => ev(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return window.__in(s, "kestrel-lu-audio-list", "button.open").length + window.__in(s, "kestrel-lu-media-rail", ".item").length; }), { timeout: 25000, every: 250 });
+    await poll(() => ev(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return window.__in(s, "kestrel-recording-list", "button.open").length + window.__in(s, "kestrel-lu-media-rail", ".item").length; }), { timeout: 25000, every: 250 });
     await sleep(600);
     const sheetUrl = await where();
-    const rowH = await handle(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return window.__in(s, "kestrel-lu-audio-list", "button.open")[0] ?? window.__in(s, "kestrel-lu-media-rail", ".item")[0] ?? null; });
+    const rowH = await handle(() => { const s = window.__deep(window.__panel(), "kestrel-lu-sheet[layer=species]")[0]; return window.__in(s, "kestrel-recording-list", "button.open")[0] ?? window.__in(s, "kestrel-lu-media-rail", ".item")[0] ?? null; });
     if (!rowH) { for (const id of ["7.visit", "7.picker", "7.backpicker", "7.backsheet", "7.backlist"]) skip(id, `${label} has no recording row or clip to open`); return; }
     await tap(rowH);
     const onVisit = await poll(async () => (await where()).startsWith("/kestrel/visit") && (await currentView()) === "visit", { timeout: 10000 });

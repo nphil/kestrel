@@ -147,9 +147,10 @@ await runSmoke("fixture-reference", async (fx) => {
     const hero = sheet.querySelector(".hero");
     const reference = sheet.querySelector("kestrel-reference-sound");
     const onCamera = [...sheet.querySelectorAll("kestrel-lu-section")].find((section) => section.heading === "On camera");
-    return { directlyAfterHero: hero?.nextElementSibling === reference, directlyBeforeOnCamera: reference?.nextElementSibling === onCamera };
+    const afterHero = hero?.nextElementSibling?.matches(".facts") ? hero.nextElementSibling.nextElementSibling : hero?.nextElementSibling; // the facts strip (first and last detected) sits under the photo
+    return { directlyAfterHero: afterHero === reference, directlyBeforeOnCamera: reference?.nextElementSibling === onCamera };
   });
-  await fx.check("(1) placement: directly after the photo block and before the 'On camera' section", order.directlyAfterHero && order.directlyBeforeOnCamera, JSON.stringify(order));
+  await fx.check("(1) placement: directly after the photo block (and the facts under it) and before the 'On camera' section", order.directlyAfterHero && order.directlyBeforeOnCamera, JSON.stringify(order));
   let g = await geometryOk("(1) idle");
   await fx.check("(1) idle: one hairline above the block, and the section inside adds none (no doubled edge)", g.border.width === "1px" && g.border.style === "solid" && g.sectionBorder === "0px", `${g.border.width} ${g.border.style}; section ${g.sectionBorder}`);
   await reveal();

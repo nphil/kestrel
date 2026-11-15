@@ -16,11 +16,13 @@ import { forgetStableUrls, keptLink, sameMedia } from "../urls.ts";
 import { clipFailure } from "../clips.ts";
 import { keepTrack } from "../detections.ts";
 import { GROUP_LABEL, KIND, asKind, couldAlsoBe, evidenceCount, evidenceWord, percentSure, recordingNotes, tierWhyLine, tierWord, visitConfidence } from "../vocab.ts";
-import { filterCounts, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberedFilter, type SpeciesFilter } from "../wildlife.ts";
+import { PERIODS, PERIOD_LABEL, asPeriod, speciesKey, type SpeciesPeriod } from "../period.ts";
+import { emptyWildlife, filterCounts, inPeriod, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberPeriod, rememberedFilter, rememberedPeriod, tileEvidence, type SpeciesFilter } from "../wildlife.ts";
 import "../ui/live-picture.ts";
 import "./kestrel-alternatives.ts";
 import "./kestrel-keep-recording.ts";
 import "./kestrel-live-player.ts";
+import "./kestrel-recording-extras.ts";
 import "./kestrel-settings-sheet.ts";
 import "./kestrel-clip-confirm.ts";
 import "./kestrel-detection-boxes.ts";
@@ -48,8 +50,9 @@ const SCRYPTED_URL = "https://192.168.1.69:10443";
 /** The last cameras and species, kept in memory and (for 6 hours, as long as their signed links are good for) in storage,
  * so the panel paints real content at once, also when Home Assistant has re-created it. Change the name when the shape changes. */
 const CAMERAS_KEY = "kestrel/cameras/v1";
-const SPECIES_KEY = "kestrel/species/v1";
+const SPECIES_KEY = speciesKey("all");
 const STORE = { maxAgeMs: 30_000, persist: { maxAgeMs: 6 * 3_600_000 } } as const;
+const PERIOD_OPTIONS = PERIODS.map((value) => ({ value, label: PERIOD_LABEL[value] }));
 const USER_KEY = "kestrel.user";
 /** The Live picture asks for fresh links at most this often when one is refused. */
 const EXPIRED_REFRESH_MS = 60_000;
@@ -82,6 +85,9 @@ export class KestrelCameras extends LitElement {
     _selectedSpecies: { state: true },
     _sheetSpecies: { state: true },
     _speciesFilter: { state: true },
+    _speciesPeriod: { state: true },
+    _periodSpecies: { state: true },
+    _periodFailed: { state: true },
     _labels: { state: true },
     _pickerOpen: { state: true },
     _pickerMounted: { state: true },
@@ -128,6 +134,11 @@ export class KestrelCameras extends LitElement {
   /** Whose sheet is drawn. Kept until the sheet has finished closing, so it does not blank mid-exit. */
   declare _sheetSpecies: string;
   declare _speciesFilter: SpeciesFilter;
+  /** How far back the Wildlife list looks. "all" is `_species`; the others are lists the server counted for that stretch of time. */
+  declare _speciesPeriod: SpeciesPeriod;
+  declare _periodSpecies: Partial<Record<SpeciesPeriod, Species[]>>;
+  /** The stretch of time whose list could not be loaded, so Wildlife offers a retry instead of waiting for it. */
+  declare _periodFailed: SpeciesPeriod | null;
   declare _labels: string[];
   declare _pickerOpen: boolean;
   declare _pickerMounted: boolean;
@@ -193,6 +204,7 @@ export class KestrelCameras extends LitElement {
   private _lastMediaCheck = 0;
   private _camerasSignature = "";
   private _speciesSignature = "";
+  private _periodSignatures: Partial<Record<SpeciesPeriod, string>> = {};
 
   constructor() {
     super();
@@ -212,6 +224,9 @@ export class KestrelCameras extends LitElement {
     this._selectedSpecies = null;
     this._sheetSpecies = "";
     this._speciesFilter = rememberedFilter();
+    this._speciesPeriod = rememberedPeriod();
+    this._periodSpecies = {};
+    this._periodFailed = null;
     this._labels = [];
     this._pickerOpen = false;
     this._pickerMounted = false;
@@ -325,6 +340,10 @@ export class KestrelCameras extends LitElement {
     const species = this._speciesStore();
     if (cameras.data?.length) { this._camerasSignature = JSON.stringify(cameras.data.slice(0, 32)); this._cameras = cameras.data.slice(0, 32); }
     if (species.data?.length) { this._speciesSignature = JSON.stringify(species.data.slice(0, 500)); this._species = species.data.slice(0, 500); }
+    if (this._speciesPeriod !== "all") {
+      const saved = this._periodStore(this._speciesPeriod).data;
+      if (saved?.length) this._setPeriodSpecies(this._speciesPeriod, saved);
+    }
   }
 
   /** Saved copies belong to whoever was signed in when they were made. */
@@ -346,6 +365,10 @@ export class KestrelCameras extends LitElement {
     return swr<Species[]>(SPECIES_KEY, async () => speciesArray(await api.species(this._requireHass())), STORE);
   }
 
+  private _periodStore(period: SpeciesPeriod) {
+    return swr<Species[]>(speciesKey(period), async () => speciesArray(await api.species(this._requireHass(), period)), STORE);
+  }
+
   private _requireHass(): HomeAssistant {
     if (!this._hass) throw new Error("Home Assistant is not connected.");
     return this._hass;
@@ -361,6 +384,13 @@ export class KestrelCameras extends LitElement {
 
   private async _fetchSpecies(): Promise<Species[]> {
     const handle = this._speciesStore();
+    const snapshot = await (handle.pending ?? handle.revalidate());
+    if (snapshot.error !== undefined || snapshot.data === undefined) throw snapshot.error ?? new Error("No species");
+    return snapshot.data;
+  }
+
+  private async _fetchPeriod(period: SpeciesPeriod): Promise<Species[]> {
+    const handle = this._periodStore(period);
     const snapshot = await (handle.pending ?? handle.revalidate());
     if (snapshot.error !== undefined || snapshot.data === undefined) throw snapshot.error ?? new Error("No species");
     return snapshot.data;
@@ -398,7 +428,7 @@ export class KestrelCameras extends LitElement {
   private _onAudioPress = (event: Event): void => {
     for (const node of event.composedPath()) {
       const player = node as { localName?: string; src?: unknown; original?: unknown; rows?: ReadonlyArray<{ src?: string | null; fallback?: string | null }> };
-      if (player.localName !== "kestrel-lu-audio-player" && player.localName !== "kestrel-lu-audio-list") continue;
+      if (player.localName !== "kestrel-lu-audio-player" && player.localName !== "kestrel-recording-list") continue;
       const links = player.localName === "kestrel-lu-audio-player"
         ? [player.src, player.original]
         : (player.rows ?? []).flatMap((row) => [row.src, row.fallback]);
@@ -657,6 +687,14 @@ export class KestrelCameras extends LitElement {
     this._species = next;
   }
 
+  private _setPeriodSpecies(period: SpeciesPeriod, species: Species[]): void {
+    const next = species.slice(0, 500);
+    const signature = JSON.stringify(next);
+    if (signature === this._periodSignatures[period] && this._periodSpecies[period]) return;
+    this._periodSignatures[period] = signature;
+    this._periodSpecies = { ...this._periodSpecies, [period]: next };
+  }
+
   private _ensureNvrComponents(): void {
     const hass = this._hass;
     if (KestrelCameras._nvrComponentsPromise || !hass) return;
@@ -718,11 +756,26 @@ export class KestrelCameras extends LitElement {
     if (speciesResult.status === "fulfilled") this._setSpecies(speciesResult.value);
     if (settingsResult.status === "fulfilled" && JSON.stringify(settingsResult.value) !== JSON.stringify(this._settings)) this._settings = settingsResult.value;
     if (camerasResult.status === "fulfilled") this._setCameras(camerasResult.value);
+    void this._loadPeriod();
     if (speciesResult.status === "rejected") throw speciesResult.reason;
+  }
+
+  /** The list for the stretch of time the Wildlife switch is on. A saved copy paints first. "all" is `_species`, which has its own loader. */
+  private async _loadPeriod(period = this._speciesPeriod): Promise<void> {
+    if (!this._hass || period === "all") return;
+    const saved = this._periodStore(period).data;
+    if (saved?.length && !this._periodSpecies[period]) this._setPeriodSpecies(period, saved);
+    try {
+      this._setPeriodSpecies(period, await this._fetchPeriod(period));
+      if (this._periodFailed === period) this._periodFailed = null;
+    } catch {
+      if (!this._periodSpecies[period]) this._periodFailed = period; // with a list on screen, the last good one simply stays
+    }
   }
 
   private async _loadSpecies(): Promise<void> {
     if (!this._hass) return;
+    void this._loadPeriod();
     try { this._setSpecies(await this._fetchSpecies()); }
     catch { /* keep the last good species list */ }
   }
@@ -808,7 +861,7 @@ export class KestrelCameras extends LitElement {
         await this._loadView(this._view, generation);
         // The other lists feed names and pictures elsewhere: Live, Wildlife and the check-up fetch the cameras, only Wildlife fetches the species.
         if (this._view === "visit") await this._loadCameras(generation);
-        if (this._view !== "wildlife") this._setSpecies(await this._fetchSpecies());
+        if (this._view !== "wildlife") { this._setSpecies(await this._fetchSpecies()); void this._loadPeriod(); }
         const sheet = this.renderRoot.querySelector<KestrelSpeciesSheet>("kestrel-species-sheet");
         if (sheet && !(await (this._reloadSheets ? sheet.reload() : sheet.refresh()))) throw new Error("The species sheet could not be refreshed");
         this._reloadSheets = false;
@@ -878,6 +931,21 @@ export class KestrelCameras extends LitElement {
     this._speciesFilter = filter;
     this._speciesVisible = 24;
     rememberFilter(filter);
+  }
+
+  private _onPeriod(event: CustomEvent<{ value: string }>): void {
+    this._setPeriod(asPeriod(event.detail.value));
+  }
+
+  private _showAllTime(): void { this._setPeriod("all"); }
+
+  private _setPeriod(period: SpeciesPeriod): void {
+    if (period === this._speciesPeriod) return;
+    this._speciesPeriod = period;
+    this._periodFailed = null;
+    this._speciesVisible = 24;
+    rememberPeriod(period);
+    void this._loadPeriod(period);
   }
 
   private _openWrongPicker(): void {
@@ -1204,23 +1272,38 @@ export class KestrelCameras extends LitElement {
     if (!this._species.length) {
       return html`<div class="page"><h2 class="sr-only">Wildlife</h2><kestrel-lu-state kind="empty" icon="mdi:paw-outline" heading="No wildlife visits yet" message="Identified birds and animals will appear here with their videos and recordings."></kestrel-lu-state></div>`;
     }
-    const counts = filterCounts(this._species);
-    const shown = this._species.filter((species) => matchesFilter(species, this._speciesFilter));
+    const period = this._speciesPeriod;
+    const list = period === "all" ? this._species : this._periodSpecies[period];
+    const periodSwitch = html`<kestrel-lu-segmented label="Time" .value=${period} .options=${PERIOD_OPTIONS} @lu-change=${this._onPeriod}></kestrel-lu-segmented>`;
+    if (!list) {
+      // That stretch of time has no list yet (or it could not be loaded): the switch stays, so another one can be picked meanwhile.
+      return html`<div class="page">
+        <h2 class="sr-only">Wildlife</h2>
+        <div class="toolbar">${periodSwitch}</div>
+        ${this._periodFailed === period
+          ? html`<kestrel-lu-state kind="error" compact heading="Couldn't load this list" message="Check the connection and try again." @lu-retry=${() => this._loadPeriod()}></kestrel-lu-state>`
+          : html`<kestrel-lu-state kind="loading" variant="tiles" tile="species" count="12" heading="Loading your wildlife list"></kestrel-lu-state>`}
+      </div>`;
+    }
+    const inside = inPeriod(list, period);
+    const counts = filterCounts(inside, period);
+    const shown = inside.filter((species) => matchesFilter(species, this._speciesFilter, period));
     const visible = shown.slice(0, this._speciesVisible);
     const options = [
       { value: "all", label: "All", icon: "mdi:paw", count: counts.all },
       { value: "seen", label: "On camera", icon: KIND.seen.icon, count: counts.seen },
       { value: "heard", label: KIND.heard.word, icon: KIND.heard.icon, count: counts.heard },
     ];
-    const empty = this._speciesFilter === "seen";
+    const empty = emptyWildlife(period, this._speciesFilter);
     return html`<div class="page">
       <h2 class="sr-only">Wildlife</h2>
-      <div class="toolbar"><kestrel-lu-segmented label="Show species" .value=${this._speciesFilter} .options=${options} @lu-change=${this._onFilter}></kestrel-lu-segmented></div>
+      <div class="toolbar">${periodSwitch}<kestrel-lu-segmented label="Show species" .value=${this._speciesFilter} .options=${options} @lu-change=${this._onFilter}></kestrel-lu-segmented></div>
       ${visible.length
         ? html`<kestrel-lu-grid kind="species" lazy>${repeat(visible, (species) => species.species, (species, index) => this._renderSpeciesTile(species, index))}</kestrel-lu-grid>
           ${this._speciesVisible < shown.length ? html`<div class="show-more"><kestrel-lu-button kind="secondary" label="Show more species" @click=${() => { this._speciesVisible = Math.min(this._speciesVisible + 24, shown.length); }}></kestrel-lu-button></div>` : nothing}`
-        : html`<kestrel-lu-state kind="empty" icon=${empty ? KIND.seen.icon : KIND.heard.icon} heading=${empty ? "Nothing on camera yet" : "Nothing heard yet"} message=${empty ? "When a camera catches an animal, it shows up here with its video." : "Sounds picked up by BirdNET-Go show up here with their recordings."}>
-            <kestrel-lu-button slot="action" kind="secondary" label="Show all species" @click=${this._showAllSpecies}></kestrel-lu-button>
+        : html`<kestrel-lu-state kind="empty" icon=${empty.kind === "any" ? "mdi:paw-outline" : KIND[empty.kind].icon} heading=${empty.heading} message=${empty.message}>
+            ${empty.action === "all-time" ? html`<kestrel-lu-button slot="action" kind="secondary" label="Show all time" @click=${this._showAllTime}></kestrel-lu-button>`
+              : empty.action === "all-species" ? html`<kestrel-lu-button slot="action" kind="secondary" label="Show all species" @click=${this._showAllSpecies}></kestrel-lu-button>` : nothing}
           </kestrel-lu-state>`}
     </div>`;
   }
@@ -1231,7 +1314,7 @@ export class KestrelCameras extends LitElement {
     const camera = activity?.camera ? this._cameraName(activity.camera) : null;
     const when1 = activity ? (activity.kind ? `${KIND[activity.kind].verb} ${when(activity.at)}` : sentence(when(activity.at))) : null;
     const line = when1 ? `${when1}${camera ? ` · ${camera}` : ""}` : null;
-    const evidence = (["seen", "heard"] as const).filter((kind) => species[kind]).map((kind) => ({ kind, count: kind === "seen" ? species.seenCount30d : species.heardCount30d }));
+    const evidence = tileEvidence(species, this._speciesPeriod);
     const summary = evidence.map(({ kind, count }) => count ? evidenceCount(kind, count) : KIND[kind].verb).join(", ");
     return html`<button class="species-tile" type="button" aria-label=${`${species.species}. ${summary}${line ? `. ${line}` : ""}`} @click=${() => this._openSpecies(species.species)}>
       <div class="species-photo">
@@ -1346,9 +1429,9 @@ export class KestrelCameras extends LitElement {
           <kestrel-lu-button kind="primary" icon="mdi:check" label=${confirmed ? "Confirmed" : "That's right"} ?disabled=${confirmed || this._saving} @click=${() => this._confirmVisit()}></kestrel-lu-button>
           <kestrel-lu-button kind="secondary" label="Wrong?" ?disabled=${this._saving} @click=${this._openWrongPicker}></kestrel-lu-button>
         </div>
-        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`) : html`<span class="muted">No recording was kept for this visit.</span>`}${this._audioUrl ? this._renderKeep(visit.id) : nothing}${this._renderReference(visit.species, visit.status)}${this._renderAlternatives(visit)}</section>` : nothing}
+        ${visit.kind === "heard" ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Call recording</strong><span class="muted">${visit.species || "Unidentified sound"} detected here</span></div>${this._audioUrl ? this._renderRecording(this._audioUrl, visit, `Call recording of ${visit.species}`, visit.id) : html`<span class="muted">No recording was kept for this visit.</span>`}${this._audioUrl ? this._renderKeep(visit.id) : nothing}${this._renderReference(visit.species, visit.status)}${this._renderAlternatives(visit)}</section>` : nothing}
         ${heard ? html`<section class="heard-panel tile"><div class="heard-copy"><strong>Also heard: ${heard.species}</strong><span class="muted">Sound recorded near this visit</span></div><kestrel-lu-button kind="secondary" icon="mdi:check" label="Also heard" ?disabled=${this._saving || this._heardConfirmed} @click=${() => this._confirmVisit(visit.id, true)}></kestrel-lu-button>
-          ${this._audioUrl ? this._renderRecording(this._audioUrl, this._callVisit ?? heard, `Call recording of ${heard.species}`) : html`<kestrel-lu-button kind="quiet" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} label=${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"} @click=${() => this._loadCallAudio(heard.visitId)}></kestrel-lu-button>`}
+          ${this._audioUrl ? this._renderRecording(this._audioUrl, this._callVisit ?? heard, `Call recording of ${heard.species}`, heard.visitId) : html`<kestrel-lu-button kind="quiet" ?disabled=${!heard.hasAudio || this._audioLoading === heard.visitId} label=${this._audioLoading === heard.visitId ? "Loading recording…" : heard.hasAudio ? "Play call" : "No call recording"} @click=${() => this._loadCallAudio(heard.visitId)}></kestrel-lu-button>`}
           ${heard.hasAudio ? this._renderKeep(heard.visitId) : nothing}
           ${this._renderReference(heard.species)}
         </section>` : nothing}
@@ -1366,10 +1449,10 @@ export class KestrelCameras extends LitElement {
   /** A recording player with what the preview service says about it: whether it was cleaned, the moment that
    * was matched, and the untouched original (only when it really is a different file). A fresh player after every
    * restart of Home Assistant, so a player that gave up on dead links does not stay on the fallback. */
-  private _renderRecording(src: string, source: { audioOriginal?: string | null; audioInfo?: AudioInfo | null } | null, label: string) {
+  private _renderRecording(src: string, source: { audioOriginal?: string | null; audioInfo?: AudioInfo | null } | null, label: string, visitId: string) {
     const original = source ? visitAudioOriginal(source) : null;
     const notes = recordingNotes(source?.audioInfo);
-    return keyed(this._epoch, html`<kestrel-lu-audio-player .src=${src} .original=${original && !sameMedia(original, src) ? original : ""} .mark=${notes.mark} .caption=${notes.caption} label=${label} preload="metadata"></kestrel-lu-audio-player>`);
+    return keyed(this._epoch, html`<kestrel-lu-audio-player .src=${src} .original=${original && !sameMedia(original, src) ? original : ""} .mark=${notes.mark} .caption=${notes.caption} label=${label} preload="metadata"></kestrel-lu-audio-player><kestrel-recording-extras .hass=${this._hass} .visitId=${visitId} .follows=${[src, original ?? ""]} .label=${label}></kestrel-recording-extras>`);
   }
 
   /** "Play reference" for a species named on this page: what it sounds like, from a public sound library, under the recording of it. Not for a visit

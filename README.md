@@ -166,6 +166,16 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    The panel names the photographer and licence under the picture. Looked-up pictures
    are kept 30 days (a week when no source has one) and downloaded on first view into
    `.storage/kestrel_reference_photos` (at most 48 MB, least recently shown removed first).
+   **Species descriptions** are the same kind of lookup: a species' sheet shows the first few
+   sentences of its Wikipedia article (the article of its scientific name, which BirdNET-Go or
+   iNaturalist tells Kestrel), credited and linked, under the article's CC BY-SA 4.0 licence. They
+   are kept 30 days (a week when there is no article) in `.storage/kestrel.species_descriptions`
+   and asked for when a sheet opens; a slow Wikipedia just leaves the sheet without them for now.
+   **Weather and spectrogram** on a recording need nothing to set up either, but need BirdNET-Go:
+   a heard visit (or a sighting with its call linked) shows the weather when the bird called, in
+   your Home Assistant's temperature unit, if BirdNET-Go has a weather source set up, and a
+   spectrogram (a picture of the sound, drawn by BirdNET-Go from the saved recording). Kestrel
+   keeps neither; it asks BirdNET-Go when a sheet opens and remembers the weather in memory.
 6. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first
@@ -186,9 +196,10 @@ re-run it if Scrypted reinstalls 0.0.52, and retire it once upstream ships a rel
 
 ## Privacy and footprint
 
-- Everything runs locally, with one exception: *Play reference* and the reference photos
-  ask iNaturalist, Wikipedia (and Xeno-canto, if you added a key) for a recording or
-  picture of a species **by name**, from the Home Assistant host. No picture, recording
+- Everything runs locally, with one exception: *Play reference*, the reference photos and the
+  species descriptions ask iNaturalist, Wikipedia (and Xeno-canto, if you added a key) for a
+  recording, a picture or a few sentences about a species **by name**, from the Home Assistant
+  host. No picture, recording
   or camera data is sent, the browser never contacts those sites, and your Xeno-canto
   key goes only to Xeno-canto and is never written to a log or to diagnostics.
 - The plugin API requires a key; media reaches the browser only through Home
@@ -208,6 +219,42 @@ re-run it if Scrypted reinstalls 0.0.52, and retire it once upstream ships a rel
   run repeats them against the current Home Assistant beta.
 - Plugin tests: see [scrypted-plugin/README.md](scrypted-plugin/README.md).
 
+### Kestrel bench: fake wildlife on demand
+
+`tools/kestrel_bench` makes any animal show up in a test copy of Kestrel, so a screen can be checked without waiting
+for a real bird. The idea comes from the bench in [Birdsong](https://github.com/dopeytree/birdsong). Nothing in it
+touches your real cameras, Scrypted, MQTT or Home Assistant, and it needs no network.
+
+```
+node --experimental-strip-types tools/kestrel_bench/bench.mjs serve      # then open http://127.0.0.1:8770/bench
+```
+
+- **What it runs.** A small Kestrel plugin of its own, built from the plugin's real parts (the store on a temp
+  database, the heard-call ingest, the sighting-and-call linker, the detection-box recorder), next to the dashboard's
+  test page. It rebuilds the test page first, so it shows your current dashboard code. Ctrl-C stops it and deletes its
+  temp folder (under `$CODY_DATA_SCRATCH`, else the system temp folder).
+- **Heard.** Type a few letters of an animal and pick it. The bench sends a message shaped like BirdNET-Go's MQTT
+  message (BirdNET v3.0, Perch, old 2.4 or none; "the two disagree"; common, rare or unknown occurrence; a clip name)
+  through the plugin's own reader. You see the tier Kestrel gives it (Likely, Possible, Check), repeats and first-ever
+  flags. An insect call is dropped, as the real plugin does.
+- **Seen.** An animal walks across a camera, 12 detection events with a moving box (named after the first second,
+  with a second unnamed animal passing), plus a 3 second clip. Open the visit and switch the box button on to check the
+  overlay on a 16:9, 4:3 and portrait picture (cameras 88, 103, 104).
+- **Again, Drop, Reset.** Again sends the same thing as a new moment (a bird heard again soon folds into its visit as a
+  repeat). Drop takes back the newest visit. Reset wipes the sandbox.
+- **From a terminal** (a running bench is needed for everything but `search`):
+  `bench.mjs search card`, `bench.mjs hear "great horned owl" --model disagree`, `bench.mjs see coyote --camera 103`,
+  `bench.mjs again | drop | reset | state`; `--json` gives the raw answer.
+- **Species** come from `classifier/species/atlanta.json` (what a camera can name) merged with
+  `tools/kestrel_bench/data/birdnet-go-labels.txt`, a snapshot of the BirdNET-Go add-on's range-filter list (refresh it
+  by saving that list's `label` fields over the file).
+- **The test page can show it without the bench page:** `/kestrel/wildlife?bench=1` reads the bench's data.
+  Visits made in the bench can be opened and corrected there like the fixtures; the correction stays in the page.
+- **Tests:** `node --experimental-strip-types --test tools/kestrel_bench/test/*.test.mjs` checks every message and
+  event shape against the plugin's real readers and runs the sandbox end to end.
+- **Not covered:** it does not publish to a real MQTT broker, and BirdNET-Go's live message shape could not be captured
+  (the broker wants a login), so the message follows what the plugin reads (`scrypted-plugin/src/heard.ts`).
+
 ## Licences
 
 - Kestrel code: MIT ([LICENSE](LICENSE)).
@@ -223,3 +270,6 @@ re-run it if Scrypted reinstalls 0.0.52, and retire it once upstream ships a rel
   licence, often all rights reserved; Wikipedia: the Wikimedia Commons licence, shown
   with the picture). Kestrel names the photographer and links to the source; it is for
   personal, non-commercial viewing.
+- Species descriptions are the opening sentences of the species' Wikipedia article, shared under
+  CC BY-SA 4.0 ([creativecommons.org](https://creativecommons.org/licenses/by-sa/4.0/)). Kestrel
+  credits Wikipedia and links to the article.

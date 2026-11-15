@@ -467,12 +467,18 @@ async def check_xeno_canto_key(hass: HomeAssistant, key: str) -> str | None:
 # ---- iNaturalist -----------------------------------------------------------------------------------------------------
 
 
-async def inaturalist_taxon(session: aiohttp.ClientSession, name: str, scientific: str | None) -> Taxon | None:
+async def inaturalist_taxon(
+    session: aiohttp.ClientSession, name: str, scientific: str | None, *, within: int | None = None
+) -> Taxon | None:
     """The iNaturalist species (or subspecies) called `name`; `scientific`, when known, is tried first. None when there is
-    no exact match: a near match would play the wrong animal."""
+    no exact match: a near match would play the wrong animal. `within` keeps the search inside one branch of the tree of life
+    (1 is every animal): "Merlin" is a falcon, and also a name some people give the wild carrot."""
     attempts = ([(scientific, True)] if scientific else []) + [(name, False)]
     for query, is_scientific in attempts:
-        status, data = await get_json(session, f"{INAT_API}/taxa", {"q": query, "per_page": 10, "is_active": "true", "locale": "en"})
+        params: dict[str, Any] = {"q": query, "per_page": 10, "is_active": "true", "locale": "en"}
+        if within is not None:
+            params["taxon_id"] = within
+        status, data = await get_json(session, f"{INAT_API}/taxa", params)
         results = data.get("results") if isinstance(data, dict) else None
         if status != 200 or not isinstance(results, list):
             raise Unavailable

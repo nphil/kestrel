@@ -1,6 +1,8 @@
 import { readDetections } from "./detections.ts";
 import { pathOf, stableUrl } from "./urls.ts";
 import { keptRecording } from "./keep.ts";
+import type { KindChoice } from "./highlights.ts";
+import type { SpeciesPeriod } from "./period.ts";
 import type { Camera, ClipChoice, ClipDeleteResult, ClipStorage, ClipTotals, Health, HomeAssistant, KeptRecording, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
 
 export function callWS<T>(hass: HomeAssistant, type: string, fields: Record<string, unknown> = {}): Promise<T> {
@@ -16,10 +18,15 @@ export const api = {
   confirm: (hass: HomeAssistant, visitId: string, alsoHeard = false) => callWS<unknown>(hass, "kestrel/visit/confirm", { visit_id: visitId, ...(alsoHeard ? { also_heard: true } : {}) }),
   undo: (hass: HomeAssistant, visitId: string) => callWS<unknown>(hass, "kestrel/visit/undo", { visit_id: visitId }),
   review: (hass: HomeAssistant) => callWS<VisitPage | Visit[]>(hass, "kestrel/review"),
-  species: (hass: HomeAssistant) => callWS<Species[] | { items: Species[] }>(hass, "kestrel/species"),
+  /** `period` narrows the list (and its counts) to a stretch of time; without one, or with "all", the answer is the whole list as it always was. */
+  species: (hass: HomeAssistant, period?: SpeciesPeriod) => callWS<Species[] | { items: Species[] }>(hass, "kestrel/species", period && period !== "all" ? { period } : {}),
   speciesDetail: (hass: HomeAssistant, name: string) => callWS<SpeciesDetail | Species>(hass, "kestrel/species/detail", { species: name }),
   // The server's raw answer: `referenceSounds()` makes it safe to use.
   speciesReference: (hass: HomeAssistant, species: string) => callWS<unknown>(hass, "kestrel/species/reference", { species }),
+  /** The weather and spectrogram of up to twenty recordings at once, by visit id; the raw answer: `readExtras()` makes it safe to use. */
+  recordings: (hass: HomeAssistant, visitIds: readonly string[]) => callWS<unknown>(hass, "kestrel/recordings", { visit_ids: visitIds }),
+  /** The newest visit, the species with the most visits and the one with the fewest, in a period; the raw answer: `readHighlights()` makes it safe to use. */
+  highlights: (hass: HomeAssistant, period: SpeciesPeriod, kinds: KindChoice) => callWS<unknown>(hass, "kestrel/highlights", { period, kind: kinds }),
   labels: (hass: HomeAssistant) => callWS<unknown>(hass, "kestrel/labels"),
   health: (hass: HomeAssistant) => callWS<Health>(hass, "kestrel/health"),
   settings: (hass: HomeAssistant) => callWS<Settings>(hass, "kestrel/settings/get"),
@@ -152,7 +159,7 @@ export function visitAudioOriginal(visit: { audioOriginal?: string | null }): st
   return mediaUrl(visit.audioOriginal ?? null);
 }
 
-export function speciesPhoto(species: Species): string | null {
+export function speciesPhoto(species: Pick<Species, "photo_url" | "photo" | "image">): string | null {
   return mediaUrl(species.photo_url ?? species.photo ?? species.image ?? null);
 }
 
@@ -162,13 +169,13 @@ export function speciesRecord(detail: unknown): Record<string, unknown> {
   return item.species && typeof item.species === "object" ? item.species as Record<string, unknown> : item;
 }
 
-export function speciesReferencePhoto(detail: unknown, species?: Species): string | null {
+export function speciesReferencePhoto(detail: unknown, species?: Pick<Species, "referenceImage">): string | null {
   const direct = speciesRecord(detail).referenceImage;
   return mediaUrl(typeof direct === "string" ? direct : species?.referenceImage ?? null);
 }
 
 /** The species' own photo if Kestrel has one, otherwise its reference photo; `isReference` says which. */
-export function speciesPicture(species: Species): { url: string | null; isReference: boolean } {
+export function speciesPicture(species: Pick<Species, "photo_url" | "photo" | "image" | "referenceImage">): { url: string | null; isReference: boolean } {
   const own = speciesPhoto(species);
   if (own) return { url: own, isReference: false };
   const reference = speciesReferencePhoto(null, species);

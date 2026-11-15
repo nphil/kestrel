@@ -19,7 +19,7 @@ async function openTile(fx, name) {
 
 /** Taps the first recording row (or clip) of the open species sheet; resolves once the visit page is up. */
 async function openVisitFromSheet(fx) {
-  const row = fx.page.locator("kestrel-species-sheet kestrel-lu-audio-list button.open:visible, kestrel-species-sheet kestrel-lu-media-rail button.item:visible").first();
+  const row = fx.page.locator("kestrel-species-sheet kestrel-recording-list button.open:visible, kestrel-species-sheet kestrel-lu-media-rail button.item:visible").first();
   await row.click({ timeout: 10000 });
   return fx.poll(async () => (await fx.nav()).path === "/kestrel/visit" && (await fx.panel.view()) === "visit", { timeout: 6000 });
 }

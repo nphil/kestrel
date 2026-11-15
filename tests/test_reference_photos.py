@@ -188,6 +188,19 @@ class ChainTests(PhotoTestCase):
         [lookup] = self.calls(photos.COMMONS_API)
         self.assertEqual(lookup["params"]["titles"], "File:Carolina wren (14391).jpg")
 
+    async def test_a_wikipedia_page_with_an_apostrophe_in_its_name_is_linked_with_the_apostrophe_as_percent_27(self) -> None:
+        self.hass.data[DOMAIN]["birdnet_species_map"] = {"cooper's hawk": "Astur cooperii"}
+        self.route_taxon("Astur cooperii", "Cooper's Hawk", None)
+        self.session.route("GET", wiki("Astur_cooperii"), FakeResponse(200, summary(
+            title="Cooper's hawk", content_urls={"desktop": {"page": "https://en.wikipedia.org/wiki/Cooper's_hawk"}},
+        )))
+        self.session.route("GET", photos.COMMONS_API, FakeResponse(200, COMMONS))
+        service = self.service()
+        entry = await service.async_resolve("Cooper's Hawk")
+        self.assertEqual(entry.photo.source, "wikipedia")
+        self.assertEqual((await service.async_info("Cooper's Hawk"))["page"], "https://en.wikipedia.org/wiki/Cooper%27s_hawk")
+        self.assertEqual(photos.Photo.from_json(entry.photo.to_json()), entry.photo, "and what is kept is read back in full")
+
     async def test_a_photo_iNaturalist_moderators_flagged_or_whose_file_is_gone_is_passed_over(self) -> None:
         for given, files in ((inat_photo(flags=[{"flag": "copyright"}]), {}), (inat_photo(), {"large": None, "medium": None})):
             self.hass.data[DOMAIN]["reference_photos"] = None

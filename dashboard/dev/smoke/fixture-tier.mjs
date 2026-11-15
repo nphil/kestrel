@@ -82,7 +82,7 @@ await runSmoke("fixture-tier", async (fx) => {
   const listRows = await fx.poll(async () => {
     const found = await fx.ev((deep) => {
       const sheet = deep(window.__panelRoot(), "kestrel-species-sheet")[0]?.shadowRoot;
-      const list = sheet?.querySelector("kestrel-lu-audio-list");
+      const list = sheet?.querySelector("kestrel-recording-list");
       return list ? [...list.shadowRoot.querySelectorAll(".row, li")].map((el) => ({ text: (el.textContent ?? "").replace(/\s+/g, " ").trim(), mark: (el.querySelector(".mark")?.textContent ?? "").trim() })) : [];
     });
     return found.length ? found : null;
@@ -94,7 +94,7 @@ await runSmoke("fixture-tier", async (fx) => {
   await fx.check("(5) the 62% of the Check recording is shown", (listRows ?? []).some((row) => row.text.includes("62%")), JSON.stringify((listRows ?? []).slice(0, 3).map((row) => row.text)));
   await fx.page.evaluate(() => {
     const sheet = window.__deep(window.__panelRoot(), "kestrel-species-sheet")[0]?.shadowRoot;
-    sheet?.querySelector("kestrel-lu-audio-list")?.scrollIntoView({ block: "start" });
+    sheet?.querySelector("kestrel-recording-list")?.scrollIntoView({ block: "start" });
   });
   await fx.settle(500);
   await fx.check("(5) the page does not scroll sideways", (await fx.page.evaluate(() => document.documentElement.scrollWidth - innerWidth)) <= 0);

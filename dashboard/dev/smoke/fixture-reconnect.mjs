@@ -26,7 +26,7 @@ const inspect = (fx) => fx.ev((deep, media) => {
   const linkOf = (img) => { const host = img.getRootNode().host; return host?.localName === "kestrel-live-picture" ? host.getAttribute("src") || host.src || "" : img.currentSrc || img.src; };
   const imgs = deep(root, "img").filter((img) => linkOf(img).includes(media) && seen(img)).map((img) => ({ epoch: epochOf(linkOf(img)), ok: img.complete && img.naturalWidth > 0, src: linkOf(img) }));
   const failed = deep(root, ".fallback").filter((el) => seen(el) && /image|picture/i.test((el.getRootNode().host?.localName) ?? "")).length;
-  const rows = deep(root, "kestrel-lu-audio-list").flatMap((list) => (list.rows ?? []).flatMap((row) => mediaStrings(row))).map(epochOf);
+  const rows = deep(root, "kestrel-recording-list").flatMap((list) => (list.rows ?? []).flatMap((row) => mediaStrings(row))).map(epochOf);
   const players = deep(root, "kestrel-lu-audio-player").flatMap((player) => [player.src, player.original].filter((v) => typeof v === "string" && v.includes(media))).map(epochOf);
   const videoEls = deep(root, "video");
   const videos = videoEls.map((video) => video.currentSrc || video.src || "").filter((src) => src.includes(media)).map(epochOf);
@@ -41,7 +41,7 @@ const inspect = (fx) => fx.ev((deep, media) => {
   const stateKinds = states.filter((el) => !isStrip(el)).map((el) => el.getAttribute("kind") ?? "");
   const reconnecting = states.some(isStrip) || deep(root, "*").some((el) => window.__shown(el) && [...el.childNodes].some((n) => n.nodeType === 3 && /reconnect/i.test(n.textContent ?? "")));
   const count = (selector) => deep(root, selector).filter((el) => window.__shown(el)).length;
-  return { imgUrls: imgs.map((img) => img.src), rowUrls: deep(root, "kestrel-lu-audio-list").flatMap((list) => (list.rows ?? []).flatMap((row) => mediaStrings(row))), imgs, failed, rows, players, videos, livePics, stateKinds, reconnecting, tiles: count("button.species-tile"), cameras: count("article.camera-tile"), view: root.querySelector("kestrel-lu-view-stack")?.current ?? null };
+  return { imgUrls: imgs.map((img) => img.src), rowUrls: deep(root, "kestrel-recording-list").flatMap((list) => (list.rows ?? []).flatMap((row) => mediaStrings(row))), imgs, failed, rows, players, videos, livePics, stateKinds, reconnecting, tiles: count("button.species-tile"), cameras: count("article.camera-tile"), view: root.querySelector("kestrel-lu-view-stack")?.current ?? null };
 }, MEDIA_PATH);
 
 const state_show = (fx, state) => state.show?.(fx);

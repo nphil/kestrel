@@ -2,6 +2,7 @@
 // Tiny static server for the Kestrel fixture page (no Home Assistant needed).
 //   node dev/serve.mjs [port]      default 8765, 127.0.0.1 only; open http://127.0.0.1:8765/kestrel/live
 //   import { startServer } from "./serve.mjs"; const { url, close } = await startServer({ port: 0 });
+//     options: `localDir` (where `<visit id>.mp4` recordings are looked for), `routes(request, response, url)` (answers first; return true when it did)
 // What it serves:
 //   /dev/**                         files of dashboard/dev (build the harness first: node dev/build.mjs), never cached
 //   /api/kestrel/media/<kind>/<id>  stands in for the integration's signed media route: needs `?authSig=` and refuses any other
@@ -11,6 +12,8 @@
 //                                   a recording of your own at fixtures/local/<visit id>.mp4 comes before all of those: see "Real data" in the README).
 //                                   `reference-info/<species slug>` is JSON, not a file: who took a reference photo (see PHOTO_INFO: two credits, 204, 500).
 //                                   It cannot know the harness's signing epoch: a test's request interceptor does (dev/smoke/lib).
+//                                   `birdnet_spectrogram/<id>` is fixtures/spectrogram.png (514x257, like BirdNET-Go's) after a short wait, as it is drawn when asked;
+//                                   an id that starts with "blank-" is a recording BirdNET-Go could not draw: 204.
 //   anything else without a file extension (/kestrel/live, /lovelace/0 ...)  dev/index.html, the single-page fallback.
 import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
@@ -20,14 +23,16 @@ import { fileURLToPath } from "node:url";
 const devDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(devDir, "..");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".map": "application/json", ".json": "application/json", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".webmanifest": "application/manifest+json" };
-const MEDIA_FILE = { audio: "call.mp3", "audio-original": "call.mp3", species_sound: "call.mp3" };
+const MEDIA_FILE = { audio: "call.mp3", "audio-original": "call.mp3", species_sound: "call.mp3", birdnet_spectrogram: "spectrogram.png" };
+/** How long BirdNET-Go takes to draw a spectrogram the first time it is asked for it (the real one needs about a second). */
+const SPECTROGRAM_DRAW_MS = 600;
 const ALLOWED_PARAMS = new Set(["authSig", "width", "height"]);
 /** The clips of the fixture visits that show a picture of another shape than the generic 640x360 one (see dev/harness.ts). */
 const CLIPS = new Map([["fixture-visit-4x3", "clip-4x3.mp4"], ["fixture-visit-3x4", "clip-3x4.mp4"]]);
 
-/** The clip answered for a visit: its own recording in the git-ignored fixtures/local/ when there is one, else the fixture made for it, else the generic one. */
-function clipFile(id) {
-  const own = join(devDir, "fixtures", "local", `${id}.mp4`);
+/** The clip answered for a visit: its own recording in `localDir` (default: the git-ignored fixtures/local/) when there is one, else the fixture made for it, else the generic one. */
+function clipFile(id, localDir) {
+  const own = join(localDir, `${id}.mp4`);
   return /^[\w-]+$/.test(id) && existsSync(own) ? own : join(devDir, "fixtures", CLIPS.get(id) ?? "clip.mp4");
 }
 
@@ -66,9 +71,11 @@ function deny(response, status, message) {
   response.writeHead(status, { ...HEADERS, "Content-Type": "text/plain; charset=utf-8" }).end(message);
 }
 
-function handle(request, response) {
-  if (request.method !== "GET" && request.method !== "HEAD") return deny(response, 405, "GET only");
+function handle(request, response, options) {
   const url = new URL(request.url ?? "/", "http://localhost");
+  // A tool that serves its own pages next to the fixture page (tools/kestrel_bench) answers first: `true` means it did.
+  if (options.routes?.(request, response, url)) return;
+  if (request.method !== "GET" && request.method !== "HEAD") return deny(response, 405, "GET only");
   let path;
   try { path = decodeURIComponent(url.pathname); } catch { return deny(response, 400, "bad path"); }
 
@@ -81,7 +88,12 @@ function handle(request, response) {
       if (typeof info === "number") return response.writeHead(info, HEADERS).end();
       return response.writeHead(200, { ...HEADERS, "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(info));
     }
-    return sendFile(request, response, media[1] === "clip" ? clipFile(media[2]) : join(devDir, "fixtures", MEDIA_FILE[media[1]] ?? "placeholder.svg"));
+    if (media[1] === "birdnet_spectrogram") {
+      if (media[2].startsWith("blank-")) return response.writeHead(204, HEADERS).end();
+      setTimeout(() => sendFile(request, response, join(devDir, "fixtures", MEDIA_FILE.birdnet_spectrogram)), SPECTROGRAM_DRAW_MS);
+      return;
+    }
+    return sendFile(request, response, media[1] === "clip" ? clipFile(media[2], options.localDir) : join(devDir, "fixtures", MEDIA_FILE[media[1]] ?? "placeholder.svg"));
   }
   if (path.startsWith("/api/")) return deny(response, 404, "not found");
 
@@ -96,8 +108,9 @@ function handle(request, response) {
 }
 
 /** Starts the server on 127.0.0.1; `port: 0` picks a free one. */
-export function startServer({ port = 0 } = {}) {
-  const server = createServer(handle);
+export function startServer({ port = 0, localDir, routes } = {}) {
+  const options = { localDir: localDir ?? join(devDir, "fixtures", "local"), routes };
+  const server = createServer((request, response) => handle(request, response, options));
   return new Promise((resolveStart, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => {

@@ -2,6 +2,8 @@ import "../src/main.ts";
 import { mountHa, themeFromQuery, type DockedSidebar, type MiniHa } from "./ha/mount.ts";
 import { PANEL_PREFIX, haNavigate } from "./ha/panel.ts";
 import { THEME_NAMES } from "./ha/theme.ts";
+import { detailAnswer, highlightsAnswer, recordingsAnswer, speciesAnswer, type WildlifeFixtures } from "./wildlife-fixtures.ts";
+import "./cards-page.ts";
 import type { Camera, DetectionBox, DetectionFrame, Health, ModelCall, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, Visit, VisitDetections } from "../src/types.ts";
 
 const now = Date.now();
@@ -161,6 +163,37 @@ async function adopt(message: Record<string, unknown>): Promise<void> {
   const own = await ownVisit(id);
   if (own) generatedVisits.push(own);
 }
+
+// ---- the bench: fake wildlife on demand (tools/kestrel_bench) ----------------------------------------------------------------------------------------
+// With `?bench=1` this page also shows what the bench's own little plugin holds. The bench serves it as `dev/fixtures/local/bench.json` (`{ visits, species }`, as the plugin's routes answer
+// them) and it is read again before every answer, so a visit the bench just made is in the very next list. Its visits join the generated ones, so they open and can be corrected like the others.
+const benchIds = new Set<string>();
+let benchSpecies: Species[] = [];
+/** A visit of the bench's plugin as this page shows it: its clip and recording are the harness's own media routes (the bench writes `<visit id>.mp4`). */
+const benchVisit = (item: Visit): Visit => ({
+  ...item,
+  clip: item.clip?.state === "ready" ? { ...item.clip, url: media("clip", item.id) } : item.clip,
+  ...(item.kind === "heard" && item.audio ? { audio: media("audio", item.id), audioOriginal: media("audio-original", item.id), audioInfo: { state: "ready", segment: { start: 3.2, end: 8.1 }, cleaned: true, method: "gate" } } : {}),
+} as Visit);
+async function refreshBench(): Promise<void> {
+  if (setting("bench") !== "1") return;
+  try {
+    const response = await fetch("/dev/fixtures/local/bench.json", { cache: "no-store" });
+    if (!response.ok) return;
+    const state = ownMedia(await response.json()) as { visits: Visit[]; species: Array<Species & { first: number; last: number }> };
+    const fresh = new Map(state.visits.map((item) => [item.id, benchVisit(item)]));
+    for (let at = generatedVisits.length - 1; at >= 0; at -= 1) {
+      const id = generatedVisits[at].id;
+      if (!benchIds.has(id)) continue;
+      const next = fresh.get(id);
+      if (!next) { generatedVisits.splice(at, 1); benchIds.delete(id); }
+      else if (generatedVisits[at].status === next.status) generatedVisits[at] = next; // one a person has corrected on this page stays as they left it
+      fresh.delete(id);
+    }
+    for (const [id, item] of fresh) { generatedVisits.push(item); benchIds.add(id); }
+    benchSpecies = state.species.map((item) => ({ ...item, first: iso(item.first), last: iso(item.last) }));
+  } catch { /* no bench running: the page shows its fixtures only */ }
+}
 const health: Health = { detector: { name: "EVA Wildlife", provider: "ONNX", avgMs: 38, checksToday: 124 }, gpu: { usedMiB: 3900, totalMiB: 23040, util: 22 }, cameras: [{ id: 88, checksToday: 80, emptyChecksToday: 11, visitsToday: 4 }, { id: 103, checksToday: 26, emptyChecksToday: 5, visitsToday: 2 }, { id: 104, checksToday: 18, emptyChecksToday: 2, visitsToday: 1 }], storage: { dbMB: 41.4, mediaMB: 98.2, budgetMB: 300 }, birdnet: { online: true, lastHeardAt: new Date(now - 11 * 60_000).toISOString() }, corrections: { total: 18, sinceRetrain: 4 } };
 
 // ---- reference recordings: what `kestrel/species/reference` answers (Xeno-canto, or iNaturalist when there is no key) ------------------------------
@@ -174,7 +207,7 @@ const REFERENCE_CLIPS: Record<string, ReferenceClip[]> = {
   "Spring Peeper": [iNaturalist(1944677, "Clip 1", "frogwatcher", 18), iNaturalist(2210054, "Clip 2", "pondside_notes", 24), iNaturalist(1180932, "Clip 3", "marsh_ears", 9)], // several iNaturalist clips are "Clip 1".."Clip 3" ...
   "Common Raccoon": [iNaturalist(3302188, "Recording", "backyard_nights", 12)], // ... a lone one is "Recording" (the server's labels)
 };
-const SCIENTIFIC: Record<string, string> = { "Northern Cardinal": "Cardinalis cardinalis", "Carolina Wren": "Thryothorus ludovicianus", "Great Horned Owl": "Bubo virginianus", "Spring Peeper": "Pseudacris crucifer", "Common Raccoon": "Procyon lotor", "House Mouse": "Mus musculus" };
+const SCIENTIFIC: Record<string, string> = { "Northern Cardinal": "Cardinalis cardinalis", "Carolina Wren": "Thryothorus ludovicianus", "Great Horned Owl": "Bubo virginianus", "Spring Peeper": "Pseudacris crucifer", "Common Raccoon": "Procyon lotor", "House Mouse": "Mus musculus", "Blue Jay": "Cyanocitta cristata", "Eastern Gray Squirrel": "Sciurus carolinensis", "Eastern Screech-Owl": "Megascops asio", "Dark-eyed Junco": "Junco hyemalis", "American Robin": "Turdus migratorius" };
 /** Great Horned Owl is "unavailable" the first time it is asked (the server was busy) and answers after a retry. Species without clips (House Mouse) are a stable "none". */
 let owlAsked = 0;
 function referenceAnswer(name: string): ReferenceSounds {
@@ -192,7 +225,7 @@ function referenceAnswer(name: string): ReferenceSounds {
 // in sessionStorage for this tab, and are removed from the address, so the panel's own addresses stay exactly /kestrel/<view>[?s=|?v=] and a
 // reload keeps the theme and the signing epoch (the server did not restart because the page did).
 const SETTINGS_KEY = "kestrel-harness";
-const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep"];
+const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep", "bench", "quiet", "cards", "fail"];
 const settings0: Record<string, string> = (() => {
   try { return JSON.parse(window.sessionStorage.getItem(SETTINGS_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
 })();
@@ -221,6 +254,12 @@ function signed<T>(value: T): T {
   if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, signed(item)])) as T;
   return value;
 }
+
+// ---- the wildlife features (dev/wildlife-fixtures.ts): periods, a species' facts, highlights, the weather and spectrogram of recordings ----------------
+// Harness settings: `quiet=1` is a day nothing has come yet ("Today" is empty), `fail=period,highlights,recordings` makes those questions fail, `cards=1` shows the two Kestrel cards at /kestrel/cards.
+const wildlife = (): WildlifeFixtures => ({ visits: [visit, ...generatedVisits], storied: new Set(species.map((item) => item.species)), scientific: (name) => SCIENTIFIC[name] ?? null, quiet: setting("quiet") === "1" });
+const fails = (what: string): boolean => (setting("fail") ?? "").split(",").includes(what);
+const speciesList = (): Species[] => [...benchSpecies, ...species.filter((item) => !benchSpecies.some((own) => own.species === item.species))];
 
 function answer(message: Record<string, unknown>): unknown {
   const type = String(message.type ?? "");
@@ -257,9 +296,20 @@ function answer(message: Record<string, unknown>): unknown {
       if (previousVisit) visit = previousVisit;
       previousVisit = null;
       result = { ok: true };
-    } else if (type === "kestrel/review") result = { items: [...(visit.status === "auto" ? [visit] : []), ...tieredVisits.filter((item) => item.tier === "check")] };
-    else if (type === "kestrel/species") result = species;
-    else if (type === "kestrel/species/detail") result = species.find((item) => item.species === message.species) ?? species[0];
+    } else if (type === "kestrel/review") result = { items: [...(visit.status === "auto" ? [visit] : []), ...tieredVisits.filter((item) => item.tier === "check"), ...generatedVisits.filter((item) => benchIds.has(item.id) && item.tier === "check")] };
+    else if (type === "kestrel/species") {
+      if (fails("period") && message.period && message.period !== "all") throw new Error("Kestrel could not count that period");
+      result = speciesAnswer(speciesList(), message.period, wildlife());
+    }
+    else if (type === "kestrel/species/detail") result = detailAnswer(benchSpecies.find((item) => item.species === message.species) ?? species.find((item) => item.species === message.species) ?? species[0], wildlife());
+    else if (type === "kestrel/highlights") {
+      if (fails("highlights")) throw new Error("Kestrel could not look that up");
+      result = highlightsAnswer(speciesList(), message.period, message.kind, wildlife());
+    }
+    else if (type === "kestrel/recordings") {
+      if (fails("recordings")) throw new Error("Kestrel could not look that up");
+      result = recordingsAnswer(message.visit_ids, media);
+    }
     else if (type === "kestrel/species/reference") result = referenceAnswer(String(message.species ?? ""));
     else if (type === "kestrel/labels") result = species.map((item) => item.species).concat(["House Finch", "Blue Jay", "Common Raccoon"]);
     else if (type === "kestrel/health") result = health;
@@ -305,7 +355,7 @@ function answer(message: Record<string, unknown>): unknown {
   return result;
 }
 
-const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/clips/storage", "kestrel/clips/delete"];
+const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/highlights", "kestrel/recordings", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/clips/storage", "kestrel/clips/delete"];
 let ha: MiniHa;
 let readyTimer: number | undefined;
 
@@ -406,7 +456,7 @@ window.__emit = pushEvent;
 if (location.pathname === "/" || location.pathname === "/dev/" || location.pathname === "/dev/index.html") history.replaceState(history.state, "", `${PANEL_PREFIX}/live${location.search}${location.hash}`);
 
 const calls: Array<{ type: string; message: Record<string, unknown>; at: number; epoch: number; answeredAt: number | null }> = [];
-ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, message, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0)); await adopt(message); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement("kestrel-panel") });
+ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, message, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0)); await refreshBench(); await adopt(message); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement(setting("cards") === "1" ? "kestrel-cards-page" : "kestrel-panel") });
 if (setting("admin") === "0") ha.mock.update({ user: { is_admin: false, name: "Guest" } });
 
 let restartTimer: number | undefined;

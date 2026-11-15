@@ -280,6 +280,79 @@ function newYorkDayBounds(at: number): { day: string; start: number; end: number
     };
 }
 
+// ---- Periods, seasons and per-day counts for the species figures. Like the day counters above, all of it is New York time. ----
+
+export type SpeciesPeriod = 'today' | 'week' | 'month' | 'all';
+// Which visits a highlight looks at: only those seen on a camera, only those heard, or both.
+export type HighlightKind = 'seen' | 'heard' | 'both';
+export type Season = 'winter' | 'spring' | 'summer' | 'autumn';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+// How many whole New York days a period reaches back, today included.
+const PERIOD_DAYS = { today: 1, week: 7, month: 30 } as const;
+// A species is "new" (to the home, or to the season) for this long after its first visit.
+const NEW_WINDOW_MS = 7 * DAY_MS;
+// A species seen this recently before a season began was already around when it began, so the season did not bring it.
+const SEASON_CARRYOVER_MS = 30 * DAY_MS;
+// The species sheet charts this many days of counts.
+const PER_DAY_COUNT = 30;
+// The visits the species list counts: named animals, minus the heard calls that do not count yet (COUNTS_SQL).
+const SPECIES_ROWS_SQL = `status NOT IN ('not_animal','unknown') AND species NOT IN ('Unidentified animal','unknown') AND ${COUNTS_SQL}`;
+
+interface SpeciesRow { species: string; grp: VisitGroup; kind: VisitKind; started_at: number; camera_id: string }
+interface HighlightRow { id: string; species: string; grp: VisitGroup; kind: VisitKind; started_at: number }
+
+// What one of a period's highlights says: a species, how often it came in the period (`count`) and ever (`total`), and the visit that
+// stands for it (`at`, `visitId`, `kind`: the species' newest visit in the period).
+export interface Highlight {
+    species: string; grp: VisitGroup; kind: VisitKind; count: number; total: number; at: number; visitId: string; hasPhoto: boolean;
+}
+export interface Highlights { period: SpeciesPeriod; kind: HighlightKind; latest: Highlight | null; top: Highlight | null; rare: Highlight | null }
+
+// What the species sheet shows beyond a species' list entry. The description comes from Wikipedia and is filled in by the Home
+// Assistant integration, the only part of Kestrel that talks to the internet; the plugin leaves both description fields null.
+export interface SpeciesInsights {
+    perDay: number[]; perDayFrom: string;
+    firstAt: number | null; lastAt: number | null;
+    bestScore: number | null; bestVisitId: string | null;
+    newThisSeason: boolean; newToHome: boolean; season: Season;
+    description: null; descriptionSource: null;
+}
+
+export function parseSpeciesPeriod(value: string | null | undefined): SpeciesPeriod {
+    if (value === null || value === undefined || value === '') return 'all';
+    if (value === 'today' || value === 'week' || value === 'month' || value === 'all') return value;
+    throw Object.assign(new Error('period must be today, week, month or all'), { status: 400 });
+}
+
+export function parseHighlightKind(value: string | null | undefined): HighlightKind {
+    if (value === null || value === undefined || value === '') return 'both';
+    if (value === 'seen' || value === 'heard' || value === 'both') return value;
+    throw Object.assign(new Error('kind must be seen, heard or both'), { status: 400 });
+}
+
+// The first moment (ms) of a period, counted in whole New York days back from `now`; null for 'all', which has no start.
+export function periodStart(period: SpeciesPeriod, now: number): number | null {
+    if (period === 'all') return null;
+    const { year, month, day } = newYorkParts(now);
+    return newYorkMidnight(year, month, day - (PERIOD_DAYS[period] - 1));
+}
+
+// The meteorological season `at` falls in (December-February winter, March-May spring, June-August summer, September-November
+// autumn) and the New York midnight it began.
+export function seasonOf(at: number): { season: Season; start: number } {
+    const { year, month } = newYorkParts(at);
+    const season: Season = month === 12 || month <= 2 ? 'winter' : month <= 5 ? 'spring' : month <= 8 ? 'summer' : 'autumn';
+    const startMonth = { winter: 12, spring: 3, summer: 6, autumn: 9 }[season];
+    return { season, start: newYorkMidnight(season === 'winter' && month <= 2 ? year - 1 : year, startMonth, 1) };
+}
+
+// The `count` New York calendar days ending with the one `at` falls in, oldest first, as YYYY-MM-DD.
+function recentDayKeys(at: number, count: number): string[] {
+    const { year, month, day } = newYorkParts(at);
+    return Array.from({ length: count }, (_, i) => new Date(Date.UTC(year, month - 1, day - (count - 1 - i))).toISOString().slice(0, 10));
+}
+
 export class KestrelStore {
     readonly db: DatabaseSync;
     private readonly dbPath: string;
@@ -1104,15 +1177,18 @@ export class KestrelStore {
         }
     }
 
-    speciesList(): unknown[] {
-        const rows = this.db.prepare(`SELECT * FROM visits WHERE status NOT IN ('not_animal','unknown') AND species NOT IN ('Unidentified animal','unknown') AND ${COUNTS_SQL} ORDER BY started_at`).all() as unknown as RawVisit[];
-        const now = Date.now();
+    // The species list for a period: every species with a counted visit in it (all of them for 'all'). periodCount, periodSeen and
+    // periodHeard count the visits inside the period; every other figure on an entry (first, last, count30d, hours...) stays all-time.
+    speciesList(period: SpeciesPeriod = 'all', now = Date.now()): unknown[] {
+        const rows = this.db.prepare(`SELECT species, grp, kind, started_at, camera_id FROM visits WHERE ${SPECIES_ROWS_SQL} ORDER BY started_at`).all() as unknown as SpeciesRow[];
+        const since = periodStart(period, now);
         const yearStart = new Date(new Date(now).getFullYear(), 0, 1).getTime();
         const species = new Map<string, {
             species: string; grp: VisitGroup; seen: boolean; heard: boolean; first: number; last: number;
             count30d: number; hasPhoto: boolean; cameras: Record<string, number>; hours: number[]; newThisYear: boolean;
             seenCount30d: number; heardCount30d: number;
             lastSeenAt: number | null; lastHeardAt: number | null; lastSeenCamera: string | null; lastHeardCamera: string | null;
+            periodCount: number; periodSeen: number; periodHeard: number;
         }>();
         const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
         for (const row of rows) {
@@ -1120,13 +1196,18 @@ export class KestrelStore {
             if (!item) {
                 item = { species: row.species, grp: row.grp, seen: false, heard: false, first: row.started_at, last: row.started_at,
                     count30d: 0, hasPhoto: false, cameras: {}, hours: Array(24).fill(0) as number[], newThisYear: row.started_at >= yearStart,
-                    seenCount30d: 0, heardCount30d: 0, lastSeenAt: null, lastHeardAt: null, lastSeenCamera: null, lastHeardCamera: null };
+                    seenCount30d: 0, heardCount30d: 0, lastSeenAt: null, lastHeardAt: null, lastSeenCamera: null, lastHeardCamera: null,
+                    periodCount: 0, periodSeen: 0, periodHeard: 0 };
                 species.set(row.species, item);
             }
             item.seen ||= row.kind === 'seen';
             item.heard ||= row.kind === 'heard';
             item.first = Math.min(item.first, row.started_at);
             item.last = Math.max(item.last, row.started_at);
+            if (since === null || row.started_at >= since) {
+                item.periodCount++;
+                if (row.kind === 'seen') item.periodSeen++; else item.periodHeard++;
+            }
             const recent = row.started_at >= thirtyDaysAgo;
             if (recent) item.count30d++;
             if (row.kind === 'seen') {
@@ -1144,7 +1225,77 @@ export class KestrelStore {
             const item = species.get(row.species);
             if (item) item.hasPhoto = true;
         }
-        return [...species.values()].sort((a, b) => b.last - a.last);
+        return [...species.values()].filter(item => item.periodCount > 0).sort((a, b) => b.last - a.last);
+    }
+
+    // The species list answer: its entries plus the period they cover and when it began (ms; null for 'all').
+    speciesIndex(period: SpeciesPeriod = 'all', now = Date.now()): { items: unknown[]; period: SpeciesPeriod; since: number | null } {
+        return { items: this.speciesList(period, now), period, since: periodStart(period, now) };
+    }
+
+    // What the species sheet adds to one species' list entry, from its counted visits: visits per New York day for the last 30 days, its
+    // first visit ever (a purged call still counts) and last, its surest identification, and whether it is new to the home or to the season.
+    speciesInsights(species: string, now = Date.now()): SpeciesInsights {
+        const rows = `${SPECIES_ROWS_SQL} AND species=?`;
+        const span = this.db.prepare(`SELECT MIN(started_at) AS first, MAX(started_at) AS last FROM visits WHERE ${rows}`).get(species) as { first: number | null; last: number | null };
+        const purged = this.db.prepare('SELECT first_at FROM known_species WHERE species=?').get(species) as { first_at: number } | undefined;
+        const firsts = [span.first, purged?.first_at].filter((at): at is number => typeof at === 'number');
+        const firstAt = firsts.length ? Math.min(...firsts) : null;
+        const best = this.db.prepare(`SELECT id, score FROM visits WHERE ${rows} AND score IS NOT NULL ORDER BY score DESC, started_at DESC LIMIT 1`).get(species) as { id: string; score: number } | undefined;
+
+        const days = recentDayKeys(now, PER_DAY_COUNT);
+        const dayIndex = new Map(days.map((day, index) => [day, index]));
+        const perDay = Array<number>(PER_DAY_COUNT).fill(0);
+        const { year, month, day } = newYorkParts(now);
+        const recent = this.db.prepare(`SELECT started_at FROM visits WHERE ${rows} AND started_at>=?`)
+            .all(species, newYorkMidnight(year, month, day - (PER_DAY_COUNT - 1))) as { started_at: number }[];
+        for (const { started_at } of recent) {
+            const index = dayIndex.get(newYorkDayKey(started_at));
+            if (index !== undefined) perDay[index]++;
+        }
+
+        const { season, start } = seasonOf(now);
+        const inSeason = this.db.prepare(`SELECT MIN(started_at) AS first FROM visits WHERE ${rows} AND started_at>=?`).get(species, start) as { first: number | null };
+        const alreadyAround = !!this.db.prepare(`SELECT 1 FROM visits WHERE ${rows} AND started_at>=? AND started_at<? LIMIT 1`).get(species, start - SEASON_CARRYOVER_MS, start);
+        return {
+            perDay, perDayFrom: days[0], firstAt, lastAt: span.last,
+            bestScore: best?.score ?? null, bestVisitId: best?.id ?? null,
+            newThisSeason: inSeason.first !== null && now - inSeason.first <= NEW_WINDOW_MS && !alreadyAround,
+            newToHome: firstAt !== null && now - firstAt <= NEW_WINDOW_MS,
+            season, description: null, descriptionSource: null,
+        };
+    }
+
+    // The period's latest, most frequent and least frequent species among the visits of `kind` (both kinds by default), the kind chosen
+    // before anything is ranked. Each is shown by that species' newest visit in the period; `count` is its visits in the period and `total`
+    // its visits ever (same kind). Ties go to the species seen newest; among the least frequent, to the one fewest visits ever.
+    highlights(period: SpeciesPeriod = 'all', kind: HighlightKind = 'both', now = Date.now()): Highlights {
+        const since = periodStart(period, now);
+        const kindSql = kind === 'both' ? '' : ' AND kind=?';
+        const kindArgs = kind === 'both' ? [] : [kind];
+        const rows = this.db.prepare(`SELECT id, species, grp, kind, started_at FROM visits WHERE ${SPECIES_ROWS_SQL}${kindSql} AND started_at>=? ORDER BY started_at DESC, rowid DESC`)
+            .all(...kindArgs, since ?? Number.MIN_SAFE_INTEGER) as unknown as HighlightRow[];
+        const inPeriod = new Map<string, { newest: HighlightRow; count: number; total: number }>();
+        for (const row of rows) {
+            const entry = inPeriod.get(row.species);
+            if (entry) entry.count++;
+            else inPeriod.set(row.species, { newest: row, count: 1, total: 0 });
+        }
+        if (!inPeriod.size) return { period, kind, latest: null, top: null, rare: null };
+        const totals = this.db.prepare(`SELECT species, COUNT(*) AS n FROM visits WHERE ${SPECIES_ROWS_SQL}${kindSql} GROUP BY species`).all(...kindArgs) as { species: string; n: number }[];
+        for (const { species, n } of totals) {
+            const entry = inPeriod.get(species);
+            if (entry) entry.total = n;
+        }
+        const photos = new Set((this.db.prepare('SELECT species FROM species_best').all() as { species: string }[]).map(row => row.species));
+        const highlight = ({ newest, count, total }: { newest: HighlightRow; count: number; total: number }): Highlight => ({
+            species: newest.species, grp: newest.grp, kind: newest.kind, count, total, at: newest.started_at, visitId: newest.id, hasPhoto: photos.has(newest.species),
+        });
+        // The entries come newest visit first and sorting is stable, so any tie not broken below goes to the species seen newest.
+        const entries = [...inPeriod.values()];
+        const top = [...entries].sort((a, b) => b.count - a.count)[0];
+        const rare = [...entries].sort((a, b) => a.count - b.count || a.total - b.total)[0];
+        return { period, kind, latest: highlight(entries[0]), top: highlight(top), rare: highlight(rare) };
     }
 
     matchingVisits(cameraId: string, species: string, startedAt: number): RawVisit[] {

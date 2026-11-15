@@ -6,6 +6,9 @@
  *   <ha-card>                    surface = `--ha-card-background` / `--card-background-color`, `backdrop-filter: var(--ha-card-backdrop-filter)`,
  *                                shadow, border and radius from the `--ha-card-*` variables. In glass themes the backdrop filter is real, so
  *                                a `position: fixed` element inside a card is positioned against the card, as it is in Home Assistant.
+ *   <ha-form .data .schema .computeLabel>  the form a card editor hands its settings to: a dropdown, a switch or a number box per field (`select`, `boolean` and
+ *                                `number` selectors), each labelled by `computeLabel`, and `value-changed` with the whole data. Home Assistant's own form looks different;
+ *                                this one only proves the editor writes the right settings.
  * Icon artwork comes from dev/mdi-subset.ts; an unknown name draws a dashed box and warns once. */
 import { LitElement, css, html, nothing, svg, type PropertyValues, type TemplateResult } from "lit";
 import { MDI_PATHS } from "./mdi-subset.ts";
@@ -99,5 +102,39 @@ export class HaCard extends LitElement {
       line-height: var(--ha-line-height-expanded);
       letter-spacing: -0.012em;
     }
+  `;
+}
+
+interface FormField { name: string; selector: Record<string, { options?: Array<{ value: string; label: string }>; min?: number; max?: number; step?: number }> }
+
+export class HaForm extends LitElement {
+  static properties = { hass: { attribute: false }, data: { attribute: false }, schema: { attribute: false }, computeLabel: { attribute: false } };
+  declare data: Record<string, unknown> | undefined;
+  declare schema: readonly FormField[] | undefined;
+  declare computeLabel: ((field: FormField) => string) | undefined;
+
+  private _set(name: string, value: unknown): void {
+    this.dispatchEvent(new CustomEvent("value-changed", { detail: { value: { ...this.data, [name]: value } }, bubbles: true, composed: true }));
+  }
+
+  private _field(field: FormField): TemplateResult | typeof nothing {
+    const label = this.computeLabel?.(field) ?? field.name;
+    const value = this.data?.[field.name];
+    const { selector } = field;
+    if (selector.boolean) return html`<label><span>${label}</span><input type="checkbox" name=${field.name} .checked=${value === true} @change=${(event: Event) => this._set(field.name, (event.target as HTMLInputElement).checked)} /></label>`;
+    if (selector.select) return html`<label><span>${label}</span><select name=${field.name} @change=${(event: Event) => this._set(field.name, (event.target as HTMLSelectElement).value)}>${(selector.select.options ?? []).map((option) => html`<option value=${option.value} ?selected=${option.value === value}>${option.label}</option>`)}</select></label>`;
+    if (selector.number) return html`<label><span>${label}</span><input type="number" name=${field.name} min=${selector.number.min ?? nothing} max=${selector.number.max ?? nothing} step=${selector.number.step ?? nothing} .value=${String(value ?? "")} @change=${(event: Event) => this._set(field.name, Number((event.target as HTMLInputElement).value))} /></label>`;
+    return nothing;
+  }
+
+  protected render(): TemplateResult {
+    return html`${(this.schema ?? []).map((field) => this._field(field))}`;
+  }
+
+  static styles = css`
+    :host { display: grid; gap: var(--ha-space-3, 12px); }
+    label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--primary-text-color); }
+    select, input[type="number"] { font: inherit; color: inherit; background: var(--card-background-color, transparent); border: 1px solid var(--divider-color, #888); border-radius: 8px; padding: 6px 8px; min-height: 40px; box-sizing: border-box; }
+    input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--primary-color); }
   `;
 }

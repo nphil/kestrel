@@ -48,7 +48,7 @@ async function openSpeciesInViewport(fx) {
 }
 
 async function openVisitRow(fx, index) {
-  const rows = fx.page.locator("kestrel-species-sheet kestrel-lu-audio-list button.open:visible, kestrel-species-sheet kestrel-lu-media-rail button.item:visible");
+  const rows = fx.page.locator("kestrel-species-sheet kestrel-recording-list button.open:visible, kestrel-species-sheet kestrel-lu-media-rail button.item:visible");
   await fx.poll(async () => (await rows.count()) > index, { timeout: 8000 });
   await rows.nth(index).click({ timeout: 8000 });
   return fx.poll(async () => (await fx.nav()).path === "/kestrel/visit" && (await fx.panel.view()) === "visit", { timeout: 6000 });

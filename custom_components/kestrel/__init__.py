@@ -38,6 +38,7 @@ from .coordinator import KestrelCoordinator
 from .media import async_register_media_view
 from .reference_photos import ReferencePhotos
 from .reference_sounds import ReferenceSounds
+from .species_descriptions import SpeciesDescriptions
 from .websocket_api import async_setup_websocket_api
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,6 +95,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     photos = ReferencePhotos(hass)
     await photos.async_load()
     domain_data["reference_photos"] = photos
+    descriptions = SpeciesDescriptions(hass)
+    await descriptions.async_load()
+    domain_data["species_descriptions"] = descriptions
 
     module_url = domain_data.get("frontend_module_url")
     if module_url and not domain_data.get("panel_registered"):
@@ -118,6 +122,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
         await audio.async_stop()
         await reference.async_stop()
         await photos.async_stop()
+        await descriptions.async_stop()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_on_shutdown))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -138,6 +143,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
     photos = hass.data.get(DOMAIN, {}).pop("reference_photos", None)
     if photos is not None:
         await photos.async_stop()
+    descriptions = hass.data.get(DOMAIN, {}).pop("species_descriptions", None)
+    if descriptions is not None:
+        await descriptions.async_stop()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         domain_data = hass.data.get(DOMAIN, {})
@@ -149,10 +157,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> None:
-    """Forget the announced-visit memory, the reference sounds and the reference photos when the config entry is deleted."""
+    """Forget the announced-visit memory, the reference sounds, the reference photos and the species descriptions when the config entry is deleted."""
     await AnnouncedVisits(hass, entry.entry_id).async_remove()
     await ReferenceSounds(hass).async_remove()
     await ReferencePhotos(hass).async_remove()
+    await SpeciesDescriptions(hass).async_remove()
 
 
 async def async_remove_config_entry_device(

@@ -10,7 +10,7 @@ import { isConfidentAlignment, isPlausibleOffset, measureAlignment } from './ali
 import { ChangeGate } from './changes';
 import { CLIP_STORE_DIR, ClipKeeper, cutClip, decodeGrayFrames, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts, videoDurationMs } from './clipfiles';
 import { ClipResolver, backfillClips, backfillSince, nvrClipStart, nvrClipWindow, pollPendingClips, type ClipVisit, type FoundClip, type NvrCut } from './clips';
-import { HeardIngest, modelOf, occurrenceOf } from './heard';
+import { HeardIngest, heardCallOf, readBirdnetMessage } from './heard';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
 import { LIVE_CAPTURE_DEADLINE_MS, LIVE_CAPTURE_TIMEOUT_MS, LivePictureCache, etagMatches, type LivePicture } from './live';
@@ -19,10 +19,10 @@ import { captureDetection, captureLivePicture, classifyCrop, embedCrop, ensureMe
 import { commonnessFor } from './seasonal';
 import { SEASONAL_PRIOR } from './seasonal-prior';
 import { KeyedQueue, SameMomentTracker, UNIDENTIFIED_ANIMAL, decideSeenCommit, findEventsRecorderClip, mergeSeenDetection, normalizedTime } from './seen';
-import { ALIGN_MIN_SAMPLES, KestrelStore, type ClipSource, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
+import { ALIGN_MIN_SAMPLES, KestrelStore, parseHighlightKind, parseSpeciesPeriod, type ClipSource, type EventItem, type EventsResponse, type PurgeResult, type Visit, type VisitGroup, type VisitKind, type VisitStatus } from './store';
 import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
-import { GENUS_CLASS, SPECIES_CLASS } from './taxonomy';
+import { GENUS_CLASS, SPECIES_CLASS, type TaxonomicClass } from './taxonomy';
 import { TrackRecorder, detectionOffsetMs, normalizeBoxes, visitPayload } from './track';
 
 const CAMERA_SETTING = 'cameras';
@@ -101,51 +101,6 @@ function systemDeviceValue<T>(id: string, property: string): T | undefined {
     return sdk.systemManager.getSystemState()[id]?.[property]?.value as T | undefined;
 }
 
-// BirdNET-Go publishes Date ("2024-01-15") and Time ("14:30:00") as separate local-wall-clock
-// strings plus an optional IANA `timezone`, not a single combined timestamp. This install's
-// BirdNET-Go and Home Assistant both run on America/New_York, so that is the fallback when
-// `timezone` is absent from a message.
-const DEFAULT_BIRDNET_TIME_ZONE = 'America/New_York';
-
-function zonedDateTimeToUtcMillis(dateStr: string, timeStr: string, timeZone: string): number | undefined {
-    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
-    const timeMatch = /^(\d{2}):(\d{2}):(\d{2})/.exec(timeStr);
-    if (!dateMatch || !timeMatch) return undefined;
-    const [, year, month, day] = dateMatch;
-    const [, hour, minute, second] = timeMatch;
-    // Guess the UTC instant is the wall-clock numbers taken literally, then see how that
-    // guess renders back in `timeZone`; the gap is the zone's offset at that instant
-    // (DST-aware), so subtracting it corrects the guess to the true UTC instant.
-    const guess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
-    let formatter: Intl.DateTimeFormat;
-    try {
-        formatter = new Intl.DateTimeFormat('en-US', {
-            timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
-        });
-    } catch {
-        return guess; // Unrecognized IANA zone name: treat the wall-clock numbers as UTC rather than fail outright.
-    }
-    const parts = Object.fromEntries(formatter.formatToParts(guess).map(part => [part.type, part.value]));
-    const renderedAsUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
-    return guess - (renderedAsUtc - guess);
-}
-
-function parseBirdnetTimestamp(message: BrokerMessage): number | undefined {
-    const dateValue = message.Date ?? message.date;
-    const timeValue = message.Time ?? message.time;
-    if (typeof dateValue === 'string' && typeof timeValue === 'string') {
-        const zoneValue = message.timezone;
-        const zone = typeof zoneValue === 'string' && zoneValue.trim() ? zoneValue.trim() : DEFAULT_BIRDNET_TIME_ZONE;
-        const zoned = zonedDateTimeToUtcMillis(dateValue, timeValue, zone);
-        if (zoned !== undefined) return zoned;
-    }
-    // Fallback for a payload shaped with a single combined timestamp field instead.
-    const rawTime = message.timestamp ?? message.Timestamp ?? message.dateTime ?? message.DateTime;
-    const parsedTime = typeof rawTime === 'string' ? Date.parse(rawTime) : asNumber(rawTime);
-    return parsedTime !== undefined && Number.isFinite(parsedTime) ? normalizedTime(parsedTime) : undefined;
-}
-
 function groupForSpecies(species: string, kind: VisitKind): VisitGroup {
     const name = species.toLowerCase();
     if (kind === 'seen') {
@@ -163,20 +118,10 @@ function groupForSpecies(species: string, kind: VisitKind): VisitGroup {
     return kind === 'heard' ? 'bird' : 'unknown';
 }
 
-// Resolves grp for a heard (audio) detection from BirdNET-Go's ScientificName: exact species
-// match -> genus match -> default 'bird' (Perch's output is overwhelmingly birds). Returns
-// 'drop' for Insecta -- BirdNET-Go's insect calls are too unreliable to keep as a visit.
-function resolveHeardGroup(scientificName: string | undefined): VisitGroup | 'drop' {
-    const normalized = scientificName?.toLowerCase().trim();
-    if (!normalized) return 'bird';
-    const cls = SPECIES_CLASS.get(normalized) ?? GENUS_CLASS.get(normalized.split(' ')[0]);
-    switch (cls) {
-        case 'Mammalia': return 'mammal';
-        case 'Amphibia':
-        case 'Reptilia': return 'other';
-        case 'Insecta': return 'drop';
-        default: return 'bird';
-    }
+// The taxonomic class of a heard detection's scientific name (lowercased): exact species match, then genus match. A name that is in
+// neither is taken to be a bird (Perch's output is overwhelmingly birds); heard.ts turns the class into a group.
+function heardClassOf(scientific: string): TaxonomicClass | undefined {
+    return SPECIES_CLASS.get(scientific) ?? GENUS_CLASS.get(scientific.split(' ')[0]);
 }
 
 // One-time-migration-only: the specific non-bird common names already verified (2026-09-28,
@@ -813,28 +758,18 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         } catch {
             return;
         }
-        // Real shape is BirdNET-Go's MQTTEventDTO (internal/mqtt/dto.go): flat, mostly
-        // PascalCase, Date+Time as separate local-wall-clock strings. The lowercase/camelCase
-        // fallbacks below are tolerance for a differently-shaped publisher on the same topic,
-        // not anything BirdNET-Go itself sends.
-        const speciesValue = message.CommonName ?? message.commonName ?? message.species ?? message.Species;
-        if (typeof speciesValue !== 'string' || !speciesValue.trim()) return;
-        const startedAt = parseBirdnetTimestamp(message) ?? Date.now();
+        // Reads BirdNET-Go's MQTTEventDTO (heard.ts): the same code the Kestrel bench (tools/kestrel_bench) feeds its sandbox with.
+        const reading = readBirdnetMessage(message, heardClassOf, Date.now());
+        if (!reading) return;
         // A real, parseable BirdNET-Go detection was received on the topic -- mark it heard even if the
         // source doesn't map to a watched camera below, so health.birdnet reflects real broker traffic.
-        this.db.setSetting('birdnetLastHeardAt', String(startedAt));
-        const model = modelOf(message);
-        this.heard?.noteModel(model.key, model.rank, Date.now());
-        const sourceValue = message.sourceName ?? message.SourceName ?? message.source ?? message.Source ?? message.camera ?? message.Camera;
-        const cameraId = this.cameraForBirdnetSource(String(sourceValue ?? ''));
+        this.db.setSetting('birdnetLastHeardAt', String(reading.at));
+        this.heard?.noteModel(reading.model.key, reading.model.rank, Date.now());
+        const cameraId = this.cameraForBirdnetSource(reading.source);
         if (!cameraId) return;
         const camera = this.cameras.get(cameraId);
         if (!camera) return;
-        const confidence = asNumber(message.Confidence ?? message.confidence ?? message.score ?? message.Score);
-        const score = confidence === undefined ? null : confidence > 1 ? confidence / 100 : confidence;
-        const species = speciesValue.trim();
-        const scientificValue = message.ScientificName ?? message.scientificName ?? message.scientific_name;
-        const grp = resolveHeardGroup(typeof scientificValue === 'string' ? scientificValue : undefined);
+        const { grp } = reading;
         // Perch (BirdNET-Go's multi-taxa audio model) also emits insect calls, which are too
         // unreliable to keep as a visit -- drop silently (no visit, no event, no notification),
         // but keep a visible daily count so an unexpected flood of these is noticeable in health.
@@ -842,17 +777,9 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             this.db.recordBirdnetIgnored();
             return;
         }
-        // BirdNET-Go's own reference to its detection and clip -- Kestrel never fetches or stores the audio itself;
-        // the HA integration reaches BirdNET-Go directly for it.
-        const detectionId = asNumber(message.detectionId ?? message.DetectionID ?? message.detection_id) ?? null;
-        const clipValue = message.ClipName ?? message.clipName ?? message.clip_name;
         // The call waits a few seconds for the other model's opinion before it becomes a visit (heard.ts). A bird that
         // keeps calling inside the cooldown is more evidence for the visit it has, not a new row per detection.
-        this.heard?.receive({
-            cameraId, at: startedAt, receivedAt: Date.now(), species, scientific: typeof scientificValue === 'string' && scientificValue.trim() ? scientificValue.trim() : null,
-            grp, score, occurrence: occurrenceOf(message), model: model.key, modelRank: model.rank, modelLabel: model.label,
-            detectionId, clip: typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null,
-        });
+        this.heard?.receive(heardCallOf(reading, grp, cameraId, Date.now()));
     }
 
     private cameraForBirdnetSource(source: string): string | undefined {
@@ -1273,7 +1200,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const species = this.db.speciesList().find(item => (item as { species: string }).species === name);
         if (!species) return undefined;
         const visits = this.db.listVisits({ species: name, limit: 50 });
-        return { ...species as object, visits: visits.items, next: visits.next };
+        return { ...species as object, ...this.db.speciesInsights(name), visits: visits.items, next: visits.next };
     }
 
     private async correctionsExport(): Promise<Record<string, unknown>> {
@@ -1396,7 +1323,10 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 jsonReply(response, 200, await this.waitForEvents(after, timeout)); return;
             }
             if (method === 'GET' && route === 'review') { jsonReply(response, 200, { items: this.db.listReview() }); return; }
-            if (method === 'GET' && route === 'species') { jsonReply(response, 200, { items: this.db.speciesList() }); return; }
+            if (method === 'GET' && route === 'species') { jsonReply(response, 200, this.db.speciesIndex(parseSpeciesPeriod(url.searchParams.get('period')))); return; }
+            if (method === 'GET' && route === 'highlights') {
+                jsonReply(response, 200, this.db.highlights(parseSpeciesPeriod(url.searchParams.get('period')), parseHighlightKind(url.searchParams.get('kind')))); return;
+            }
             if (method === 'GET' && route.startsWith('species/')) {
                 const detail = await this.speciesDetail(route.slice('species/'.length));
                 jsonReply(response, detail ? 200 : 404, detail ?? { error: 'Species not found' }); return;

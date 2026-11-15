@@ -1,4 +1,4 @@
-"""Authenticated streaming media proxy for Kestrel plugin files, BirdNET-Go audio, bird-call previews and reference sounds and photos."""
+"""Authenticated streaming media proxy for Kestrel plugin files, BirdNET-Go audio and spectrograms, bird-call previews and reference sounds and photos."""
 
 from __future__ import annotations
 
@@ -93,6 +93,22 @@ class KestrelMediaView(HomeAssistantView):
                 previews.preview_url(media_id),
                 {**previews.headers, **headers},
                 aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+            )
+
+        if kind == "birdnet_spectrogram":
+            # The picture of a recording's sound, drawn by BirdNET-Go from the saved clip (514 x 257 pixels, no axes, so its full width is
+            # the whole recording). A recording it cannot draw (no clip, not drawn yet) is decoration that is not there, "no content"
+            # rather than an error, as for a reference photo. The picture of a recording never changes.
+            if _detection_number(media_id) is None:
+                return web.Response(status=404, text="Media not found")
+            return await self._stream(
+                request,
+                async_get_clientsession(self._hass),
+                f"{BIRDNET_GO_INTERNAL_URL}/api/v2/spectrogram/{media_id}?size=md&raw=true",
+                headers,
+                aiohttp.ClientTimeout(total=None, connect=10, sock_read=30),
+                cache_control="private, max-age=2592000",
+                optional=True,
             )
 
         if kind in ("species_ref", "species_ref_info"):

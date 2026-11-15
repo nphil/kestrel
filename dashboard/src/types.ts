@@ -133,6 +133,8 @@ export interface Species {
   cameras: Record<string, number>;
   hours: number[];
   newThisYear: boolean;
+  /** Latin name ("Thryothorus ludovicianus"); null or absent while Home Assistant does not know it yet. */
+  scientific?: string | null;
   /** Per-kind evidence, 30-day counts and latest times. Optional until the plugin sends them. */
   seenCount30d?: number;
   heardCount30d?: number;
@@ -145,6 +147,10 @@ export interface Species {
   photo_url?: string | null;
   referenceImage?: string | null;
   referenceImageInfoUrl?: string | null;
+  /** The window the list was asked for (`kestrel/species` with `period`): visits in it, and how many of those were seen on camera and heard. */
+  periodCount?: number;
+  periodSeen?: number;
+  periodHeard?: number;
 }
 
 /** Who took a species' reference photo and under which licence (`referenceImageInfoUrl`). Any part may be "", `page` is an https link or "". */

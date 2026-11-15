@@ -60,7 +60,7 @@ for (const size of sizes) {
     await shot('wildlife');
     // a species sheet with recordings
     const tapped = await page.evaluate(`(() => { ${HELPERS} const t = [...view('wildlife').querySelectorAll('button.species-tile')].find((x) => x.getAttribute('aria-label').startsWith('Blue Jay.')); if (!t) return false; t.click(); return true; })()`);
-    await page.waitForFunction(`(() => { ${HELPERS} const s = sheet(); return Boolean(s && s.hasAttribute('open') && s.querySelector('kestrel-lu-audio-list, kestrel-lu-media-rail')); })()`, null, { timeout: 15000 }).catch(() => undefined);
+    await page.waitForFunction(`(() => { ${HELPERS} const s = sheet(); return Boolean(s && s.hasAttribute('open') && s.querySelector('kestrel-recording-list, kestrel-lu-media-rail')); })()`, null, { timeout: 15000 }).catch(() => undefined);
     await page.waitForTimeout(2500);
     const sheetOpen = await page.evaluate(`(() => { ${HELPERS} return Boolean(sheet()?.hasAttribute('open')); })()`);
     await shot('sheet');
