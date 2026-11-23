@@ -1219,10 +1219,10 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     }
 
     private async speciesDetail(name: string): Promise<Record<string, unknown> | undefined> {
-        const species = this.db.speciesList().find(item => (item as { species: string }).species === name);
+        const species = this.db.speciesEntry(name);
         if (!species) return undefined;
         const visits = this.db.listVisits({ species: name, limit: 50 });
-        return { ...species as object, ...this.db.speciesInsights(name), visits: visits.items, next: visits.next };
+        return { ...species, ...this.db.speciesInsights(name), visits: visits.items, next: visits.next };
     }
 
     private async correctionsExport(): Promise<Record<string, unknown>> {

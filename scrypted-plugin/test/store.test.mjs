@@ -845,3 +845,33 @@ test('the clips still to be looked at: seen visits with a ready clip that starts
         assert.deepEqual(store.listUnaligned(since, 1).map(row => row.id), ['newest']);
     });
 });
+
+test('a species sheet asks for one species: its entry is exactly the list\'s entry for it (found by the species index), and a species with no counted visit has none', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-entry-test-'));
+    const store = new KestrelStore(join(directory, 'kestrel.sqlite'));
+    try {
+        const now = Date.now();
+        const day = 24 * 60 * 60 * 1000;
+        store.saveVisit(makeVisit('a1', 'Raccoon', 0.9, now - 40 * day));
+        store.saveVisit(makeVisit('a2', 'Raccoon', 0.8, now - 2 * day, '99'));
+        store.saveVisit(makeHeardVisit('h1', 'Blue Jay', now - 3 * day));
+        store.saveVisit(makeHeardVisit('h2', 'Blue Jay', now - 1 * day));
+        store.saveVisit(makeHeardVisit('h3', 'Carolina Wren', now - 5_000));
+        store.saveVisit({ ...makeVisit('n1', 'Cat', 0.9, now - 1_000), status: 'not_animal' });
+        store.considerSpeciesBest(store.getVisit('a1'), 'media/snap/a1.jpg', 'media/crop/a1.jpg');
+
+        const list = store.speciesList('all', now);
+        assert.deepEqual(list.map(item => item.species).sort(), ['Blue Jay', 'Carolina Wren', 'Raccoon']);
+        for (const entry of list) assert.deepEqual(store.speciesEntry(entry.species, now), entry, entry.species);
+        assert.equal(store.speciesEntry('Raccoon', now).hasPhoto, true);
+        assert.equal(store.speciesEntry('Blue Jay', now).hasPhoto, false);
+        assert.equal(store.speciesEntry('Cat', now), undefined, 'a visit marked "not an animal" is not a species');
+        assert.equal(store.speciesEntry('Nobody', now), undefined);
+
+        const plan = store.db.prepare('EXPLAIN QUERY PLAN SELECT species, started_at FROM visits WHERE species=? ORDER BY started_at').all('Blue Jay').map(row => row.detail).join(' ');
+        assert.match(plan, /visits_species_started/, 'one species\' visits are found by index, not by reading every visit');
+    } finally {
+        store.close();
+        await rm(directory, { recursive: true, force: true });
+    }
+});

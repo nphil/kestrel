@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -166,10 +167,12 @@ async def _async_api_call(
                 on_result(result)
             except Exception:
                 _LOGGER.warning("Kestrel after-request hook failed", exc_info=True)
+        # Both lookups are for the same answer and ask different services: they run side by side, so the slower one sets the wait, not their sum.
+        lookups = [birdnet_availability.async_confirm_audio(hass, result)]
         previews = hass.data.get(DOMAIN, {}).get("audio")
         if previews is not None:
-            await previews.async_prefetch(result)
-        await birdnet_availability.async_confirm_audio(hass, result)
+            lookups.append(previews.async_prefetch(result))
+        await asyncio.gather(*lookups)
         result = _sign_media_paths(hass, result, connection.refresh_token_id)
         if postprocess is not None:
             result = postprocess(result)

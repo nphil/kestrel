@@ -309,6 +309,53 @@ const SPECIES_ROWS_SQL = `status NOT IN ('not_animal','unknown') AND species NOT
 interface SpeciesRow { species: string; grp: VisitGroup; kind: VisitKind; started_at: number; camera_id: string }
 interface HighlightRow { id: string; species: string; grp: VisitGroup; kind: VisitKind; started_at: number }
 
+// What the species list says about one species (see KestrelStore.speciesList).
+interface SpeciesEntry {
+    species: string; grp: VisitGroup; seen: boolean; heard: boolean; first: number; last: number;
+    count30d: number; hasPhoto: boolean; cameras: Record<string, number>; hours: number[]; newThisYear: boolean;
+    seenCount30d: number; heardCount30d: number;
+    lastSeenAt: number | null; lastHeardAt: number | null; lastSeenCamera: string | null; lastHeardCamera: string | null;
+    periodCount: number; periodSeen: number; periodHeard: number;
+}
+
+// Adds counted visits (oldest first) up into one entry per species; `photos` names the species that have a best picture.
+function tallySpecies(rows: SpeciesRow[], period: SpeciesPeriod, now: number, photos: ReadonlySet<string>): SpeciesEntry[] {
+    const since = periodStart(period, now);
+    const yearStart = new Date(new Date(now).getFullYear(), 0, 1).getTime();
+    const species = new Map<string, SpeciesEntry>();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    for (const row of rows) {
+        let item = species.get(row.species);
+        if (!item) {
+            item = { species: row.species, grp: row.grp, seen: false, heard: false, first: row.started_at, last: row.started_at,
+                count30d: 0, hasPhoto: photos.has(row.species), cameras: {}, hours: Array(24).fill(0) as number[], newThisYear: row.started_at >= yearStart,
+                seenCount30d: 0, heardCount30d: 0, lastSeenAt: null, lastHeardAt: null, lastSeenCamera: null, lastHeardCamera: null,
+                periodCount: 0, periodSeen: 0, periodHeard: 0 };
+            species.set(row.species, item);
+        }
+        item.seen ||= row.kind === 'seen';
+        item.heard ||= row.kind === 'heard';
+        item.first = Math.min(item.first, row.started_at);
+        item.last = Math.max(item.last, row.started_at);
+        if (since === null || row.started_at >= since) {
+            item.periodCount++;
+            if (row.kind === 'seen') item.periodSeen++; else item.periodHeard++;
+        }
+        const recent = row.started_at >= thirtyDaysAgo;
+        if (recent) item.count30d++;
+        if (row.kind === 'seen') {
+            if (recent) item.seenCount30d++;
+            if (item.lastSeenAt === null || row.started_at >= item.lastSeenAt) { item.lastSeenAt = row.started_at; item.lastSeenCamera = row.camera_id; }
+        } else {
+            if (recent) item.heardCount30d++;
+            if (item.lastHeardAt === null || row.started_at >= item.lastHeardAt) { item.lastHeardAt = row.started_at; item.lastHeardCamera = row.camera_id; }
+        }
+        item.cameras[row.camera_id] = (item.cameras[row.camera_id] ?? 0) + 1;
+        item.hours[new Date(row.started_at).getHours()]++;
+    }
+    return [...species.values()];
+}
+
 // What one of a period's highlights says: a species, how often it came in the period (`count`) and ever (`total`), and the visit that
 // stands for it (`at`, `visitId`, `kind`: the species' newest visit in the period).
 export interface Highlight {
@@ -408,6 +455,7 @@ export class KestrelStore {
             );
             CREATE INDEX IF NOT EXISTS visits_started_at ON visits(started_at DESC);
             CREATE INDEX IF NOT EXISTS visits_camera_species_started ON visits(camera_id, species, started_at DESC);
+            CREATE INDEX IF NOT EXISTS visits_species_started ON visits(species, started_at DESC);
             CREATE INDEX IF NOT EXISTS visits_clip_state ON visits(clip_state, started_at);
             CREATE INDEX IF NOT EXISTS visits_review ON visits(review_flag, started_at DESC);
             CREATE TABLE IF NOT EXISTS camera_daily_stats (
@@ -1191,51 +1239,16 @@ export class KestrelStore {
     // periodHeard count the visits inside the period; every other figure on an entry (first, last, count30d, hours...) stays all-time.
     speciesList(period: SpeciesPeriod = 'all', now = Date.now()): unknown[] {
         const rows = this.db.prepare(`SELECT species, grp, kind, started_at, camera_id FROM visits WHERE ${SPECIES_ROWS_SQL} ORDER BY started_at`).all() as unknown as SpeciesRow[];
-        const since = periodStart(period, now);
-        const yearStart = new Date(new Date(now).getFullYear(), 0, 1).getTime();
-        const species = new Map<string, {
-            species: string; grp: VisitGroup; seen: boolean; heard: boolean; first: number; last: number;
-            count30d: number; hasPhoto: boolean; cameras: Record<string, number>; hours: number[]; newThisYear: boolean;
-            seenCount30d: number; heardCount30d: number;
-            lastSeenAt: number | null; lastHeardAt: number | null; lastSeenCamera: string | null; lastHeardCamera: string | null;
-            periodCount: number; periodSeen: number; periodHeard: number;
-        }>();
-        const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
-        for (const row of rows) {
-            let item = species.get(row.species);
-            if (!item) {
-                item = { species: row.species, grp: row.grp, seen: false, heard: false, first: row.started_at, last: row.started_at,
-                    count30d: 0, hasPhoto: false, cameras: {}, hours: Array(24).fill(0) as number[], newThisYear: row.started_at >= yearStart,
-                    seenCount30d: 0, heardCount30d: 0, lastSeenAt: null, lastHeardAt: null, lastSeenCamera: null, lastHeardCamera: null,
-                    periodCount: 0, periodSeen: 0, periodHeard: 0 };
-                species.set(row.species, item);
-            }
-            item.seen ||= row.kind === 'seen';
-            item.heard ||= row.kind === 'heard';
-            item.first = Math.min(item.first, row.started_at);
-            item.last = Math.max(item.last, row.started_at);
-            if (since === null || row.started_at >= since) {
-                item.periodCount++;
-                if (row.kind === 'seen') item.periodSeen++; else item.periodHeard++;
-            }
-            const recent = row.started_at >= thirtyDaysAgo;
-            if (recent) item.count30d++;
-            if (row.kind === 'seen') {
-                if (recent) item.seenCount30d++;
-                if (item.lastSeenAt === null || row.started_at >= item.lastSeenAt) { item.lastSeenAt = row.started_at; item.lastSeenCamera = row.camera_id; }
-            } else {
-                if (recent) item.heardCount30d++;
-                if (item.lastHeardAt === null || row.started_at >= item.lastHeardAt) { item.lastHeardAt = row.started_at; item.lastHeardCamera = row.camera_id; }
-            }
-            item.cameras[row.camera_id] = (item.cameras[row.camera_id] ?? 0) + 1;
-            item.hours[new Date(row.started_at).getHours()]++;
-        }
-        const bestRows = this.db.prepare('SELECT species FROM species_best').all() as { species: string }[];
-        for (const row of bestRows) {
-            const item = species.get(row.species);
-            if (item) item.hasPhoto = true;
-        }
-        return [...species.values()].filter(item => item.periodCount > 0).sort((a, b) => b.last - a.last);
+        const photos = new Set((this.db.prepare('SELECT species FROM species_best').all() as { species: string }[]).map(row => row.species));
+        return tallySpecies(rows, period, now, photos).filter(item => item.periodCount > 0).sort((a, b) => b.last - a.last);
+    }
+
+    // One species' entry of the all-time list, added up from that species' own visits (the species index finds them) instead of from every
+    // visit there is: all a species sheet needs, so opening one does not cost as much as the whole list. Undefined when no counted visit names it.
+    speciesEntry(species: string, now = Date.now()): SpeciesEntry | undefined {
+        const rows = this.db.prepare(`SELECT species, grp, kind, started_at, camera_id FROM visits WHERE ${SPECIES_ROWS_SQL} AND species=? ORDER BY started_at`).all(species) as unknown as SpeciesRow[];
+        const photos = new Set(this.db.prepare('SELECT 1 FROM species_best WHERE species=?').get(species) ? [species] : []);
+        return tallySpecies(rows, 'all', now, photos)[0];
     }
 
     // The species list answer: its entries plus the period they cover and when it began (ms; null for 'all').

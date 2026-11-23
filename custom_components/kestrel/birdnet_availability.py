@@ -62,6 +62,8 @@ _LOGGER = logging.getLogger(__name__)
 _AUDIO_NEGATIVE_TTL = timedelta(minutes=BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES)
 _AUDIO_CACHE = "birdnet_audio_availability"
 _AUDIO_KIND = "birdnet_audio_check"  # names the checks running and the slots they share (see start_or_join)
+# When (event-loop time) the check running for a recording began, so that no request waits for it for longer than _AUDIO_CHECK_WAIT_S in all.
+_AUDIO_STARTED = "birdnet_audio_check_started"
 # How long a request waits for the checks of the recordings it shows. A page of 50 recordings answers in well under a second (the cached ones
 # not at all); this is only for a BirdNET-Go that is slow, and the checks it did not finish go on without the request (see async_confirm_audio).
 _AUDIO_CHECK_WAIT_S = 1.5
@@ -176,8 +178,10 @@ def _start_audio_check(hass: HomeAssistant, media_id: str) -> asyncio.Future[Non
 async def async_confirm_audio(hass: HomeAssistant, payload: object) -> None:
     """Look up, once and in parallel, every recording in `payload` whose existence is not cached yet.
 
-    Waits at most _AUDIO_CHECK_WAIT_S. A recording that has not answered by then stays unknown (and so gets no link this time), but its
-    check is NOT dropped: it carries on in the background and writes its verdict into the cache, so the next request finds it there.
+    No request waits for a recording's check for longer than _AUDIO_CHECK_WAIT_S after that check BEGAN: the request that starts it waits that long at
+    most, and a request that comes while it is still running waits for what is left of it (nothing, once it has run that long), so one slow recording
+    does not hold up every request. A recording that has not answered stays unknown (and so gets no link this time), but its check is NOT dropped: it
+    carries on in the background and writes its verdict into the cache, so the next request finds it there.
     """
     ids: dict[str, None] = {}  # media ids
     _recording_ids(payload, ids)
@@ -191,7 +195,16 @@ async def async_confirm_audio(hass: HomeAssistant, payload: object) -> None:
     ]
     if not unknown:
         return
-    _, slow = await asyncio.wait([_start_audio_check(hass, media_id) for media_id in unknown], timeout=_AUDIO_CHECK_WAIT_S)
+    started: dict[str, float] = hass.data.setdefault(DOMAIN, {}).setdefault(_AUDIO_STARTED, {})
+    now_loop = asyncio.get_running_loop().time()
+    checks = []
+    for media_id in unknown:
+        started.setdefault(media_id, now_loop)  # a check that is already running keeps the moment it began
+        checks.append(_start_audio_check(hass, media_id))
+    wait = max(started[media_id] + _AUDIO_CHECK_WAIT_S - now_loop for media_id in unknown)
+    if wait <= 0:
+        return
+    _, slow = await asyncio.wait(checks, timeout=wait)
     if slow:
         _LOGGER.debug("Kestrel BirdNET-Go: %d recording checks still running after %ss, left to finish in the background", len(slow), _AUDIO_CHECK_WAIT_S)
 
@@ -221,6 +234,8 @@ async def _async_run_check(hass: HomeAssistant, media_id: str) -> None:
     except Exception:  # a check that breaks is "no verdict yet", like a network failure; it must not take anything else down
         _LOGGER.warning("Kestrel BirdNET-Go check of recording %s failed", media_id, exc_info=True)
         return
+    finally:
+        hass.data.setdefault(DOMAIN, {}).setdefault(_AUDIO_STARTED, {}).pop(media_id, None)
     if available is not None:
         hass.data.setdefault(DOMAIN, {}).setdefault(_AUDIO_CACHE, {})[media_id] = (available, dt_util.utcnow())
 
