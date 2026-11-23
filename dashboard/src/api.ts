@@ -2,9 +2,10 @@ import { readDetections } from "./detections.ts";
 import { pathOf, stableUrl } from "./urls.ts";
 import { Lru } from "./lru.ts";
 import { keptRecording } from "./keep.ts";
+import { recordingRetention } from "./retention.ts";
 import type { KindChoice } from "./highlights.ts";
 import type { SpeciesPeriod } from "./period.ts";
-import type { Camera, ClipChoice, ClipDeleteResult, ClipStorage, ClipTotals, Health, HomeAssistant, KeptRecording, KestrelCardConfig, PhotoCredit, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
+import type { Camera, ClipChoice, ClipDeleteResult, ClipStorage, ClipTotals, Health, HomeAssistant, KeptRecording, KestrelCardConfig, PhotoCredit, RangeFilter, RecordingRetention, ReferenceClip, ReferenceSounds, RetentionChoice, Settings, Species, SpeciesDetail, Visit, VisitPage, VisitQuery } from "./types.ts";
 
 export function callWS<T>(hass: HomeAssistant, type: string, fields: Record<string, unknown> = {}): Promise<T> {
   return hass.callWS<T>({ type, ...fields });
@@ -36,7 +37,11 @@ export const api = {
   setSettings: (hass: HomeAssistant, settings: Settings) => callWS<Settings>(hass, "kestrel/settings/set", { settings }),
   rangeFilter: (hass: HomeAssistant) => callWS<RangeFilter>(hass, "kestrel/range_filter/get"),
   setRangeFilter: (hass: HomeAssistant, threshold: number) => callWS<RangeFilter>(hass, "kestrel/range_filter/set", { threshold }),
-  /** Whether the recording of a visit (a heard visit, or a sighting with a call linked) is kept: exempt from BirdNET-Go's 30-day clean-up. */
+  /** How long BirdNET-Go keeps its bird recordings, how full their storage is, and how many recordings are kept for good. */
+  retention: async (hass: HomeAssistant): Promise<RecordingRetention> => recordingRetention(await callWS<unknown>(hass, "kestrel/recording_retention/get")),
+  /** Administrators only. Changes only how long BirdNET-Go keeps its recordings. */
+  setRetention: async (hass: HomeAssistant, keep: RetentionChoice): Promise<RecordingRetention> => recordingRetention(await callWS<unknown>(hass, "kestrel/recording_retention/set", { keep })),
+  /** Whether the recording of a visit (a heard visit, or a sighting with a call linked) is kept: exempt from BirdNET-Go's clean-up of old recordings. */
   recordingKept: async (hass: HomeAssistant, visitId: string): Promise<KeptRecording> => keptRecording(await callWS<unknown>(hass, "kestrel/recording/keep/get", { visit_id: visitId })),
   /** Administrators only. */
   keepRecording: async (hass: HomeAssistant, visitId: string, keep: boolean): Promise<KeptRecording> => keptRecording(await callWS<unknown>(hass, "kestrel/recording/keep/set", { visit_id: visitId, keep })),

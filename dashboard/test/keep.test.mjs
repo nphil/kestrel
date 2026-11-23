@@ -2,7 +2,7 @@
 // Node runs the TypeScript files as they are:  cd dashboard && npm test
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { KEEP_AFTER_DAYS, keepCaption, keptRecording } from "../src/keep.ts";
+import { keepCaption, keptRecording } from "../src/keep.ts";
 
 test("a plain answer is read as it is", () => {
   assert.deepEqual(keptRecording({ keepable: true, kept: true, canChange: true }), { keepable: true, kept: true, canChange: true });
@@ -20,9 +20,8 @@ test("a recording that cannot be kept is never shown as kept", () => {
 });
 
 test("the line under the control says what keeping does, in plain words", () => {
-  assert.equal(KEEP_AFTER_DAYS, 30);
-  assert.equal(keepCaption({ keepable: true, kept: false, canChange: true }, false), "Kept recordings are not deleted after 30 days");
-  assert.equal(keepCaption({ keepable: true, kept: true, canChange: true }, false), "Kept recordings are not deleted after 30 days");
+  assert.equal(keepCaption({ keepable: true, kept: false, canChange: true }, false), "Kept recordings are never deleted automatically");
+  assert.equal(keepCaption({ keepable: true, kept: true, canChange: true }, false), "Kept recordings are never deleted automatically");
 });
 
 test("somebody who cannot change it is told who can, and a failure says so", () => {

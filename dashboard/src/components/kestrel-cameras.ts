@@ -1410,7 +1410,7 @@ export class KestrelCameras extends LitElement {
         </div>
         ${pending ? html`<div class="clip-progress"><div class="progress-label"><span>Saving clip…</span><span>${Math.round(progress)}%</span></div><div class="progress-track" role="progressbar" aria-label="Clip processing" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(progress)}><span style=${`width:${progress}%`}></span></div><p class="caption">${this._clipOverdue() ? "Taking longer than usual. Kestrel waits up to 5 minutes for the camera's recording." : "The recording is still being finalized. This view updates when it's ready."}</p></div>` : nothing}
         ${visit.clip?.state === "none" && visit.kind !== "heard" ? html`<p class="media-note">No clip was saved for this visit.</p>` : nothing}
-        ${visit.clip?.state === "deleted" ? html`<p class="media-note">${visit.clip.deletedBy === "user" ? "This clip was deleted." : "This clip is no longer available."}</p>` : nothing}
+        ${visit.clip?.state === "deleted" ? html`<p class="media-note">${visit.clip.deletedBy === "user" ? "This clip was deleted." : visit.clip.deletedBy === "retention" ? "This clip was removed after 90 days because the visit was never confirmed." : "This clip is no longer available."}</p>` : nothing}
         ${visit.clip?.state === "ready" && this._hass?.user?.is_admin
           ? this._clipAsk
             ? html`<div class="clip-delete"><kestrel-clip-confirm .count=${1} .bytes=${null} ?busy=${this._clipDeleting} .error=${this._clipError} @confirm=${() => this._deleteClip()} @cancel=${() => { if (!this._clipDeleting) { this._clipAsk = false; this._clipError = ""; } }}></kestrel-clip-confirm></div>`
@@ -1465,7 +1465,7 @@ export class KestrelCameras extends LitElement {
     return html`<kestrel-reference-sound compact .hass=${this._hass} .species=${species}></kestrel-reference-sound>`;
   }
 
-  /** "Keep recording" under a recording of a heard call, for the visit that owns the recording: BirdNET-Go deletes sounds after 30 days unless they are kept. */
+  /** "Keep recording" under a recording of a heard call, for the visit that owns the recording: BirdNET-Go removes old sounds unless they are kept. */
   private _renderKeep(visitId: string) {
     return html`<kestrel-keep-recording .hass=${this._hass} .visitId=${visitId}></kestrel-keep-recording>`;
   }

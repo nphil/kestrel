@@ -10,6 +10,10 @@ export type VisitStatus = 'auto' | 'learned' | 'corrected' | 'confirmed' | 'not_
 export type ClipState = 'pending' | 'ready' | 'none' | 'deleted';
 // Where a ready clip came from: the Events Recorder plugin's own clip, or a clip Kestrel cut from the NVR's continuous recording.
 export type ClipSource = 'events' | 'nvr';
+// Who deleted a clip on purpose: `user` through clips/delete, `retention` in the nightly removal of the clips of visits nobody confirmed.
+export type ClipDeletedBy = 'user' | 'retention';
+// Visits nobody has confirmed: they still carry the model's own guess (a person's confirm or correction ends that).
+const UNCONFIRMED_SQL = "status IN ('auto','learned')";
 
 // How sure Kestrel is about a heard call (heard.ts): Likely may be announced and counts toward the species list,
 // Possible is kept quietly (stored and listed, not counted), Check goes to the review queue.
@@ -31,9 +35,9 @@ export interface Visit {
     score: number | null;
     snapshot: string | null;
     crop: string | null;
-    // `source` is present on a ready clip (older rows have no source recorded and are all Events Recorder clips); `deletedBy: 'user'` marks a
-    // clip a person deleted through clips/delete, as opposed to one that went missing or was pruned.
-    clip: { state: ClipState; expectedReadyAt: number | null; url?: string; source?: ClipSource; deletedBy?: 'user' };
+    // `source` is present on a ready clip (older rows have no source recorded and are all Events Recorder clips); `deletedBy` marks a clip
+    // deleted on purpose (by a person through clips/delete, or by the nightly retention of unconfirmed clips), as opposed to one that went missing or was pruned.
+    clip: { state: ClipState; expectedReadyAt: number | null; url?: string; source?: ClipSource; deletedBy?: ClipDeletedBy };
     heard: { visitId: string; species: string; hasAudio: boolean; birdnetDetectionId: number | null; birdnetClip: string | null } | null;
     audio: { birdnetDetectionId: number | null; birdnetClip: string | null } | null;
     suggestions: { species: string; why: 'model' | 'heard' | 'usual' }[];
@@ -75,7 +79,7 @@ export interface VisitMeta {
     // Whether the clip file is Kestrel's own copy (in the clip store) rather than another plugin's file, and its size.
     clipKept?: boolean;
     clipBytes?: number | null;
-    clipDeletedBy?: 'user' | null;
+    clipDeletedBy?: ClipDeletedBy | null;
     audioFile?: string | null;
     birdnetDetectionId?: number | null;
     birdnetClip?: string | null;
@@ -177,7 +181,7 @@ interface RawVisit {
     clip_aligned_at: number | null;
     clip_kept: number;
     clip_bytes: number | null;
-    clip_deleted_by: 'user' | null;
+    clip_deleted_by: ClipDeletedBy | null;
     audio_file: string | null;
     birdnet_detection_id: number | null;
     birdnet_clip: string | null;
@@ -557,7 +561,7 @@ export class KestrelStore {
         if (!visitColumns.has('tier')) this.db.exec('ALTER TABLE visits ADD COLUMN tier TEXT');
         this.db.exec('CREATE INDEX IF NOT EXISTS visits_tier ON visits(tier, started_at DESC)');
         // One-time migration: where a ready clip came from (NULL = recorded before this existed = Events Recorder), whether the file is
-        // Kestrel's own copy in the clip store (`clip_kept`, with its size) and who deleted a deleted clip ('user' for clips/delete).
+        // Kestrel's own copy in the clip store (`clip_kept`, with its size) and who deleted a deleted clip ('user' for clips/delete, 'retention' for the nightly removal of clips nobody confirmed).
         if (!visitColumns.has('clip_source')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_source TEXT');
         if (!visitColumns.has('clip_kept')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_kept INTEGER NOT NULL DEFAULT 0');
         if (!visitColumns.has('clip_bytes')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_bytes INTEGER');
@@ -644,7 +648,7 @@ export class KestrelStore {
         const clipAlignedAt = value('clipAlignedAt', prior?.clip_aligned_at) as number | null;
         const clipKept = has('clipKept') ? Number(!!meta.clipKept) : Number(prior?.clip_kept ?? 0);
         const clipBytes = value('clipBytes', prior?.clip_bytes) as number | null;
-        const clipDeletedBy = value('clipDeletedBy', prior?.clip_deleted_by) as 'user' | null;
+        const clipDeletedBy = value('clipDeletedBy', prior?.clip_deleted_by) as ClipDeletedBy | null;
         const audioFile = value('audioFile', prior?.audio_file) as string | null;
         const birdnetDetectionId = value('birdnetDetectionId', prior?.birdnet_detection_id) as number | null;
         const birdnetClip = value('birdnetClip', prior?.birdnet_clip) as string | null;
@@ -1049,9 +1053,9 @@ export class KestrelStore {
 
     // Sets what a visit's clip is. A ready clip says where it came from (`source`), the wall-clock moment its first frame was recorded
     // (`startAt`, null when that cannot be told) and whether the file is Kestrel's own copy (`kept`, with its size); every other state
-    // clears all of that. `deletedBy` records a deletion a person asked for. A deleted clip has nothing left to draw the detection boxes
-    // on, so its track goes with it.
-    setClip(id: string, state: ClipState, file: string | null, details: { source?: ClipSource; startAt?: number | null; kept?: boolean; bytes?: number | null; deletedBy?: 'user' } = {}): void {
+    // clears all of that. `deletedBy` records who deleted the clip on purpose (a person, or the retention of unconfirmed clips). A deleted
+    // clip has nothing left to draw the detection boxes on, so its track goes with it.
+    setClip(id: string, state: ClipState, file: string | null, details: { source?: ClipSource; startAt?: number | null; kept?: boolean; bytes?: number | null; deletedBy?: ClipDeletedBy } = {}): void {
         const row = this.getRawVisit(id);
         if (!row) return;
         const visit = this.decodeVisit(row);
@@ -1170,8 +1174,8 @@ export class KestrelStore {
         const row = this.db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(clip_bytes),0) AS bytes, MIN(started_at) AS oldest,
             COALESCE(SUM(CASE WHEN status IN ('not_animal','unknown') THEN 1 ELSE 0 END),0) AS na_n,
             COALESCE(SUM(CASE WHEN status IN ('not_animal','unknown') THEN clip_bytes ELSE 0 END),0) AS na_bytes,
-            COALESCE(SUM(CASE WHEN status IN ('auto','learned') THEN 1 ELSE 0 END),0) AS uc_n,
-            COALESCE(SUM(CASE WHEN status IN ('auto','learned') THEN clip_bytes ELSE 0 END),0) AS uc_bytes
+            COALESCE(SUM(CASE WHEN ${UNCONFIRMED_SQL} THEN 1 ELSE 0 END),0) AS uc_n,
+            COALESCE(SUM(CASE WHEN ${UNCONFIRMED_SQL} THEN clip_bytes ELSE 0 END),0) AS uc_bytes
             FROM visits WHERE clip_state='ready' AND clip_kept=1${olderThan === undefined ? '' : ' AND started_at<?'}`)
             .get(...(olderThan === undefined ? [] : [olderThan])) as { n: number; bytes: number; oldest: number | null; na_n: number; na_bytes: number; uc_n: number; uc_bytes: number };
         return {
@@ -1192,6 +1196,12 @@ export class KestrelStore {
 
     clipsStartedBefore(olderThan: number): RawVisit[] {
         return this.db.prepare("SELECT * FROM visits WHERE clip_state='ready' AND started_at<? ORDER BY started_at").all(olderThan) as unknown as RawVisit[];
+    }
+
+    // Kestrel's own copies of the clips of visits nobody has confirmed that started before `cutoff`: what the nightly retention deletes.
+    // The same visits and clips as the `unconfirmed` figure of clipStorage.
+    clipsUnconfirmedBefore(cutoff: number): RawVisit[] {
+        return this.db.prepare(`SELECT * FROM visits WHERE clip_state='ready' AND clip_kept=1 AND ${UNCONFIRMED_SQL} AND started_at<? ORDER BY started_at`).all(cutoff) as unknown as RawVisit[];
     }
 
     clipsMarkedNotAnimal(): RawVisit[] {
@@ -1489,7 +1499,7 @@ export class KestrelStore {
                 const path = directory + '/' + entry.name;
                 if (entry.isDirectory()) await walk(path);
                 else if (entry.isFile()) {
-                    // Kestrel's own kept clips are exempt from the budget: not counted, and never deleted here (only clips/delete removes them).
+                    // Kestrel's own kept clips are exempt from the budget: not counted, and never deleted here (only a clip delete removes them: see ClipKeeper).
                     if (this.db.prepare('SELECT 1 FROM visits WHERE clip_kept=1 AND clip_file=? LIMIT 1').get(path)) continue;
                     const info = await fs.stat(path).catch(() => undefined);
                     if (!info) continue;

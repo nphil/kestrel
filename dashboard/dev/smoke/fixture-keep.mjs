@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// "Keep recording": a heard recording that BirdNET-Go's 30-day clean-up must leave alone, on the visit page.
+// "Keep recording": a heard recording that BirdNET-Go's clean-up of old recordings must leave alone, on the visit page.
 //   taskset -c 0-4,8-12 nice -n 15 node dev/smoke/fixture-keep.mjs [--size 390x844] [--theme flat-light]
 // Needs `node dev/build.mjs` first. Screenshots go to /tmp/kestrel-keep (OUT=... changes it). The fixture server answers
 // `kestrel/recording/keep/get` and `/set` (dev/harness.ts); `admin=0`, `keep=none` and `keep=fail` are its settings.
@@ -11,7 +11,7 @@
 process.env.OUT ??= "/tmp/kestrel-keep";
 const { runSmoke } = await import("./lib/fixture.mjs");
 
-const CAPTION = "Kept recordings are not deleted after 30 days";
+const CAPTION = "Kept recordings are never deleted automatically";
 
 /** What the nth `<kestrel-keep-recording>` shows, read in the page. */
 const read = (deep, index) => {

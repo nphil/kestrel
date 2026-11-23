@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import type { GrayFrames } from './align';
-import type { ClipSource, KestrelStore, Visit } from './store';
+import type { ClipDeletedBy, ClipSource, KestrelStore, Visit } from './store';
 
 // On the big NVR disk, not the small plugin volume. One folder per camera, one file per visit.
 export const CLIP_STORE_DIR = '/NVR/kestrel/clips';
@@ -291,7 +291,11 @@ export interface KeeperOptions {
     now?: () => number;
 }
 
-export type ClipDeleteRequest = { visitIds: string[] } | { olderThan: number } | { reason: 'notAnimal' };
+// How long Kestrel keeps the clip of a visit nobody has confirmed (status auto or learned): the nightly maintenance deletes it once the visit is older.
+export const UNCONFIRMED_CLIP_DAYS = 90;
+
+// What a delete removes: the first three are what `POST clips/delete` carries; `unconfirmedBefore` is the nightly retention (expireUnconfirmed).
+export type ClipDeleteRequest = { visitIds: string[] } | { olderThan: number } | { reason: 'notAnimal' } | { unconfirmedBefore: number };
 export interface ClipDeleteResult { deleted: number; freedBytes: number }
 
 const MAX_DELETE_IDS = 1_000;
@@ -329,8 +333,8 @@ export function parseClipDelete(body: Record<string, unknown>, now: number): Cli
 }
 
 // Looks after the clips of visits. The Events Recorder prunes its clips (20 GB per camera) and the NVR deletes its footage after
-// its retention, so every clip that becomes ready gets a copy of its own in Kestrel's clip store, which only a person's delete
-// request removes (it is outside the plugin's media budget).
+// its retention, so every clip that becomes ready gets a copy of its own in Kestrel's clip store, which only a delete (a person's request,
+// or the nightly removal of clips nobody confirmed) takes anything out of (it is outside the plugin's media budget).
 export class ClipKeeper {
     private readonly ports: KeeperPorts;
     private readonly checkBatch: number;
@@ -421,14 +425,16 @@ export class ClipKeeper {
         }
     }
 
-    // Deletes clips on a person's request: the file (only ever one inside the clip store; another plugin's file is left alone), then the
-    // visit's clip becomes 'deleted' by 'user'. The visit, its photos and everything else stay. A clip whose file cannot be removed is
-    // left as it was. Visits without a ready clip are not counted.
+    // Deletes clips: the file (only ever one inside the clip store; another plugin's file is left alone), then the visit's clip becomes
+    // 'deleted' (by 'user', or by 'retention' in the nightly removal of unconfirmed clips). The visit, its photos and everything else
+    // stay. A clip whose file cannot be removed is left as it was. Visits without a ready clip are not counted.
     async remove(request: ClipDeleteRequest): Promise<ClipDeleteResult> {
         const { store, root } = this.ports;
         const rows = 'visitIds' in request ? store.clipsByIds(request.visitIds)
             : 'olderThan' in request ? store.clipsStartedBefore(request.olderThan)
+            : 'unconfirmedBefore' in request ? store.clipsUnconfirmedBefore(request.unconfirmedBefore)
             : store.clipsMarkedNotAnimal();
+        const deletedBy: ClipDeletedBy = 'unconfirmedBefore' in request ? 'retention' : 'user';
         let deleted = 0;
         let freedBytes = 0;
         for (const row of rows) {
@@ -442,12 +448,19 @@ export class ClipKeeper {
                 }
                 freedBytes += size;
             }
-            store.setClip(row.id, 'deleted', null, { deletedBy: 'user' });
+            store.setClip(row.id, 'deleted', null, { deletedBy });
             const visit = store.getVisit(row.id);
             if (visit) this.ports.announce(visit);
             deleted++;
         }
         return { deleted, freedBytes };
+    }
+
+    // The nightly clean-out: Kestrel's own clips of visits nobody has confirmed (status auto or learned) that started more than
+    // UNCONFIRMED_CLIP_DAYS ago are deleted, exactly like a delete on request but by 'retention'. Confirming or correcting a visit keeps
+    // its clip. A deleted clip is not selected again, so running this twice does nothing more.
+    expireUnconfirmed(): Promise<ClipDeleteResult> {
+        return this.remove({ unconfirmedBefore: this.now() - UNCONFIRMED_CLIP_DAYS * 86_400_000 });
     }
 
     private async copy(visitId: string, cameraId: string, file: string): Promise<{ file: string; bytes: number } | undefined> {

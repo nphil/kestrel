@@ -1,8 +1,10 @@
 import { BASE_CSS, type LuCloseDetail } from "lucent-ha";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { api } from "../api.ts";
+import { birdnetFailure } from "../format.ts";
 import type { HomeAssistant, RangeFilter } from "../types.ts";
 import "./kestrel-clip-storage.ts";
+import "./kestrel-recording-retention.ts";
 
 /** The named steps of BirdNET-Go's local species filter. `threshold` is how likely a species has to be here, at this time of year. */
 const STEPS = [
@@ -18,16 +20,8 @@ const RECHECKS = 5;
 
 const percent = (threshold: number): string => `${Math.round(threshold * 1000) / 10}%`;
 
-/** What went wrong, in words for the person who pressed the button. */
-function failure(error: unknown): string {
-  const fallback = "Kestrel couldn't reach BirdNET-Go.";
-  if (typeof error !== "object" || error === null) return fallback;
-  if ("code" in error && error.code === "unauthorized") return "Only a Home Assistant administrator can change this.";
-  const message = "message" in error && typeof error.message === "string" ? error.message.trim() : "";
-  return message ? (/[.!?]$/.test(message) ? message : `${message}.`) : fallback;
-}
-
-/** Kestrel's settings: how strict BirdNET-Go's local species filter is (with how many species it lets through), and the saved camera clips (`kestrel-clip-storage`).
+/** Kestrel's settings: how strict BirdNET-Go's local species filter is (with how many species it lets through), how long its bird recordings are kept
+ * (`kestrel-recording-retention`), and the saved camera clips (`kestrel-clip-storage`).
  * Kestrel glue over the toolkit's sheet and segmented control. `open` shows it; fires `close` ({ reason }) after the exit motion. */
 export class KestrelSettingsSheet extends LitElement {
   static properties = {
@@ -94,7 +88,7 @@ export class KestrelSettingsSheet extends LitElement {
       this._filter = filter;
       this._recheckWhileRebuilding(filter, 0);
     } catch (error) {
-      if (generation === this._generation) this._loadError = failure(error);
+      if (generation === this._generation) this._loadError = birdnetFailure(error);
     } finally {
       if (generation === this._generation) this._loading = false;
     }
@@ -136,7 +130,7 @@ export class KestrelSettingsSheet extends LitElement {
       this._filter = saved;
       this._recheckWhileRebuilding(saved, 0);
     } catch (error) {
-      if (generation === this._generation) this._saveError = failure(error);
+      if (generation === this._generation) this._saveError = birdnetFailure(error);
     } finally {
       if (generation === this._generation) this._saving = null;
     }
@@ -183,19 +177,24 @@ export class KestrelSettingsSheet extends LitElement {
     .note { margin-top: var(--lu-space-3); color: var(--lu-ink-3); font-size: var(--lu-type-caption); }
     .problem { display: flex; align-items: flex-start; gap: var(--lu-space-2); margin-top: var(--lu-space-3); color: var(--lu-danger); font-size: var(--lu-type-label); }
     .problem ha-icon { flex: none; --mdc-icon-size: 20px; }
-    .clips { margin-top: var(--lu-space-6); padding-top: var(--lu-space-5); border-top: 1px solid var(--lu-edge); }
+    .recordings, .clips { margin-top: var(--lu-space-6); padding-top: var(--lu-space-5); border-top: 1px solid var(--lu-edge); }
   `];
 
   render() {
-    return html`<kestrel-lu-sheet .open=${this.open} .history=${this.history} engine="native" layer="settings" heading="Settings" subheading="Listening and saved clips" @lu-close=${this._onClose}>
+    return html`<kestrel-lu-sheet .open=${this.open} .history=${this.history} engine="native" layer="settings" heading="Settings" subheading="Listening, bird recordings and saved clips" @lu-close=${this._onClose}>
       <section>
         <h3>Local species filter</h3>
         <p class="intro">BirdNET-Go only reports a sound if that species is likely near you at this time of year. A stricter filter means fewer wrong guesses, but rarer visitors are more likely to be missed.</p>
         ${this._renderBody()}
       </section>
+      <section class="recordings">
+        <h3>Bird recordings</h3>
+        <p class="intro">BirdNET-Go saves a short recording of each bird it hears. Here you choose how long they are kept.</p>
+        <kestrel-recording-retention .hass=${this.hass} .active=${this.open}></kestrel-recording-retention>
+      </section>
       <section class="clips">
         <h3>Saved clips</h3>
-        <p class="intro">Kestrel keeps its own copy of the video from each camera visit. Deleting clips frees space. Photos, species and visits are always kept.</p>
+        <p class="intro">Kestrel keeps its own copy of the video from each camera visit. Clips from visits nobody has confirmed are removed after 90 days: confirm a visit to keep its clip. Deleting clips yourself frees space sooner. Photos, species and visits are always kept.</p>
         <kestrel-clip-storage .hass=${this.hass} .active=${this.open}></kestrel-clip-storage>
       </section>
     </kestrel-lu-sheet>`;

@@ -92,3 +92,12 @@ export function clamp(value: number, min: number, max: number): number {
 export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
+
+/** What went wrong with something BirdNET-Go was asked to do, in words for the person who changed a setting. */
+export function birdnetFailure(error: unknown): string {
+  const fallback = "Kestrel couldn't reach BirdNET-Go.";
+  if (typeof error !== "object" || error === null) return fallback;
+  if ("code" in error && error.code === "unauthorized") return "Only a Home Assistant administrator can change this.";
+  const message = "message" in error && typeof error.message === "string" ? error.message.trim() : "";
+  return message ? (/[.!?]$/.test(message) ? message : `${message}.`) : fallback;
+}

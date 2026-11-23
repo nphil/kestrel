@@ -6,7 +6,7 @@ import type { HomeAssistant, KeptRecording } from "../types.ts";
 
 type Phase = "loading" | "ready" | "none" | "unavailable";
 
-/** "Keep recording" on a recording of a heard call: BirdNET-Go deletes sounds after 30 days, and a kept one is skipped by that clean-up.
+/** "Keep recording" on a recording of a heard call: BirdNET-Go removes old recordings, and a kept one is skipped by that clean-up.
  * `visit-id` is the visit whose recording it is (a heard visit, or the heard visit linked to a sighting). Nothing is asked until `hass` and the
  * visit are both there. A recording BirdNET-Go has nothing to lock for (no saved sound) draws nothing at all. Only an administrator can change it;
  * everyone else sees the state, disabled. A change shows at once and is put back, with a message, when BirdNET-Go does not take it. */

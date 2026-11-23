@@ -4,7 +4,7 @@ import { PANEL_PREFIX, haNavigate } from "./ha/panel.ts";
 import { THEME_NAMES } from "./ha/theme.ts";
 import { detailAnswer, highlightsAnswer, recordingsAnswer, speciesAnswer, type WildlifeFixtures } from "./wildlife-fixtures.ts";
 import "./cards-page.ts";
-import type { Camera, DetectionBox, DetectionFrame, Health, ModelCall, RangeFilter, ReferenceClip, ReferenceSounds, Settings, Species, Visit, VisitDetections } from "../src/types.ts";
+import type { Camera, DetectionBox, DetectionFrame, Health, ModelCall, RangeFilter, RecordingRetention, ReferenceClip, ReferenceSounds, RetentionChoice, Settings, Species, Visit, VisitDetections } from "../src/types.ts";
 
 const now = Date.now();
 /** Unsigned media path, the shape of the integration's route (`/api/kestrel/media/<kind>/<id>`). The fake server signs it per response (see `signed`). */
@@ -228,7 +228,7 @@ function referenceAnswer(name: string): ReferenceSounds {
 // in sessionStorage for this tab, and are removed from the address, so the panel's own addresses stay exactly /kestrel/<view>[?s=|?v=] and a
 // reload keeps the theme and the signing epoch (the server did not restart because the page did).
 const SETTINGS_KEY = "kestrel-harness";
-const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep", "bench", "quiet", "cards", "fail", "about", "spectrogram"];
+const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep", "bench", "quiet", "cards", "fail", "about", "spectrogram", "recordings", "retentionfail"];
 const settings0: Record<string, string> = (() => {
   try { return JSON.parse(window.sessionStorage.getItem(SETTINGS_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
 })();
@@ -263,6 +263,14 @@ function signed<T>(value: T): T {
 // `spectrogram=trouble` makes the recordings' pictures go wrong in turn (not ready the first time, a failing server, slow to draw, never drawn: see recordingsAnswer).
 const wildlife = (): WildlifeFixtures => ({ visits: [visit, ...generatedVisits], storied: new Set(species.map((item) => item.species)), scientific: (name) => SCIENTIFIC[name] ?? null, quiet: setting("quiet") === "1" });
 const fails = (what: string): boolean => (setting("fail") ?? "").split(",").includes(what);
+// Bird recordings (`kestrel/recording_retention/get` and `/set`): a 30 GB share holding 4.2 GB, kept for 30 days, 12 recordings kept for good. Harness setting `recordings=` picks where it starts:
+// `60`, `90`, `space` (until space runs low), `off` (nothing is removed), `other` (a rule Kestrel doesn't offer), `full` (92% full), `unknown` (the space can't be read), `fail` (BirdNET-Go doesn't answer).
+// `retentionfail=1` makes a change fail and `admin=0` is a non-administrator. A time limit is refused while the storage is 90% full, as the integration does.
+const startRecordings = setting("recordings");
+let retention: RecordingRetention = {
+  keep: (["60", "90", "space", "off", "other"] as const).find((choice) => choice === startRecordings) ?? "30", days: 30, spacePercent: 85, guardPercent: 90, kept: 12, minClips: 10, checkMinutes: 15,
+  storage: startRecordings === "unknown" ? null : { usedBytes: startRecordings === "full" ? 27_600_000_000 : 4_200_000_000, totalBytes: 30_000_000_000 }, canChange: setting("admin") !== "0",
+};
 // The sheet's answer never waits for Wikipedia (as on the server): the first time a species is opened it says `descriptionPending` and the words come from
 // `kestrel/species/description` about two seconds later, which is when the loading state in the About block shows. After that the words are "kept" and come with
 // the sheet at once. `about=now` skips the waiting (the words are always there at once); `fail=description` makes the late answer fail.
@@ -350,6 +358,18 @@ function answer(message: Record<string, unknown>): unknown {
       }
       result = { keepable: setting("keep") !== "none", kept: keptRecordings.has(id), canChange: admin };
     }
+    else if (type === "kestrel/recording_retention/get" || type === "kestrel/recording_retention/set") {
+      if (startRecordings === "fail") throw new Error("Kestrel couldn't reach BirdNET-Go");
+      if (type === "kestrel/recording_retention/set") {
+        if (!retention.canChange) throw Object.assign(new Error("Only a Home Assistant administrator can change this"), { code: "unauthorized" });
+        if (setting("retentionfail") === "1") throw new Error("BirdNET-Go did not keep the change");
+        const keep = message.keep as RetentionChoice;
+        const full = retention.storage ? Math.floor(100 * retention.storage.usedBytes / retention.storage.totalBytes) : 0;
+        if (keep !== "space" && full >= retention.guardPercent) throw Object.assign(new Error(`The recording storage is ${full}% full, so a time limit can't be set right now. Choose Until space runs low first, then a time limit once there is room`), { code: "invalid_format" });
+        retention = { ...retention, keep, days: keep === "space" ? retention.days : Number(keep) };
+      }
+      result = retention;
+    }
     else if (type === "kestrel/clips/storage" || type === "kestrel/clips/delete") {
       if (setting("clipfail") === "1") throw new Error("Kestrel's camera recorder isn't answering");
       const admin = setting("admin") !== "0";
@@ -374,7 +394,7 @@ function answer(message: Record<string, unknown>): unknown {
   return result;
 }
 
-const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/description", "kestrel/species/reference", "kestrel/highlights", "kestrel/recordings", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/clips/storage", "kestrel/clips/delete"];
+const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/description", "kestrel/species/reference", "kestrel/highlights", "kestrel/recordings", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/recording_retention/get", "kestrel/recording_retention/set", "kestrel/clips/storage", "kestrel/clips/delete"];
 let ha: MiniHa;
 let readyTimer: number | undefined;
 

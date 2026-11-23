@@ -83,7 +83,7 @@ export interface Visit {
   score: number;
   snapshot?: string | null;
   crop?: string | null;
-  clip: { state: ClipState; expectedReadyAt?: string | number | null; url?: string | null; media?: string | null; /** `"user"` when somebody deleted it from Kestrel (as opposed to the file having gone missing). */ deletedBy?: string | null };
+  clip: { state: ClipState; expectedReadyAt?: string | number | null; url?: string | null; media?: string | null; /** `"user"` when somebody deleted it from Kestrel, `"retention"` when Kestrel removed it after 90 days because the visit was never confirmed (both as opposed to the file having gone missing). */ deletedBy?: string | null };
   heard?: { visitId: string; species: string; hasAudio: boolean; audio_url?: string | null; audio?: string | null; audioOriginal?: string | null; audioInfo?: AudioInfo | null } | null;
   suggestions: VisitSuggestion[];
   firstEver: boolean;
@@ -195,6 +195,34 @@ export interface KeptRecording {
   /** BirdNET-Go has a saved recording for it that can be locked. False hides the control: nothing can be kept. */
   keepable: boolean;
   kept: boolean;
+  /** Only a Home Assistant administrator can change it. */
+  canChange: boolean;
+}
+
+/** How Kestrel offers to keep BirdNET-Go's bird recordings: for that many days, or (`"space"`) until the disk they are saved to runs low on room. */
+export type RetentionChoice = "30" | "60" | "90" | "space";
+
+/** The disk BirdNET-Go saves its recordings to. */
+export interface RetentionStorage { usedBytes: number; totalBytes: number }
+
+/** How long BirdNET-Go keeps its recordings and how full their disk is (`kestrel/recording_retention/get` and `/set`). */
+export interface RecordingRetention {
+  /** How BirdNET-Go is set now. `"off"`: it removes nothing. `"other"`: a rule set in BirdNET-Go that Kestrel does not offer, such as 45 days. */
+  keep: RetentionChoice | "off" | "other";
+  /** The age at which BirdNET-Go removes a recording, when it goes by age and the age is a whole number of days. */
+  days: number | null;
+  /** Going by space: how full the disk may get, in percent, before the oldest recordings are removed. */
+  spacePercent: number;
+  /** From this fullness, in percent, Kestrel switches a time limit to "until space runs low" by itself, and refuses to set one. */
+  guardPercent: number;
+  /** Null when neither Home Assistant nor BirdNET-Go could say. */
+  storage: RetentionStorage | null;
+  /** Recordings that are kept for good, which no clean-up removes. Null when BirdNET-Go could not say. */
+  kept: number | null;
+  /** BirdNET-Go always leaves at least this many recordings of each species. */
+  minClips: number | null;
+  /** BirdNET-Go tidies up this often. */
+  checkMinutes: number | null;
   /** Only a Home Assistant administrator can change it. */
   canChange: boolean;
 }

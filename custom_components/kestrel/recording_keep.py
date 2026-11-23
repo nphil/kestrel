@@ -1,6 +1,6 @@
 """Keeping a heard recording: BirdNET-Go's "lock" on its detection.
 
-BirdNET-Go deletes a recording's audio file once it is older than its retention age (30 days here). Its
+BirdNET-Go deletes a recording's audio file once it is older than its retention age (or, when it goes by space, once the disk fills up). Its
 clean-up skips the file of every LOCKED detection (diskmanager, `isEligibleForAgeDeletion` and the usage policy
 both ask for the set of locked clip names first), so "keep this recording" is exactly "lock this detection":
 

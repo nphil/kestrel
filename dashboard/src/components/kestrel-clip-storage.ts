@@ -169,7 +169,7 @@ export class KestrelClipStorage extends LitElement {
 
   private _renderSummary(storage: ClipStorage) {
     // The AI check-up shows a "Wildlife storage" meter of a few hundred MB next to this section's gigabytes, which reads like a broken limit: they are different places.
-    const where = html`<p class="where">Kept clips are stored on the NAS, separate from the working space shown as Wildlife storage in the AI check-up. They stay until you delete them.</p>`;
+    const where = html`<p class="where">Kept clips are stored on the NAS, separate from the working space shown as Wildlife storage in the AI check-up. They stay until you delete them, except clips from visits nobody has confirmed: those are removed after 90 days.</p>`;
     if (storage.count === 0) return html`<p class="empty">No clips are saved right now.</p>${where}`;
     const oldest = storage.oldestAt === null ? "" : ` · oldest ${monthYear(storage.oldestAt)}`;
     return html`<p class="summary" role="status"><strong>${storage.count}</strong> <span>${storage.count === 1 ? "clip" : "clips"} · ${formatBytes(storage.bytes)}${oldest}</span></p>${where}`;

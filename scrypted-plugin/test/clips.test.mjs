@@ -939,6 +939,87 @@ test('delete "not an animal": visits marked not an animal or can\'t tell lose th
     });
 });
 
+// --- Clips of visits nobody confirmed are removed after 90 days --------------------------------------------------------------------------
+
+const RETAIN_NOW = 1_800_000_000_000;
+const RETAIN_DAY = 24 * 60 * 60 * 1000;
+
+test('retention: Kestrel\'s copy of the clip of a visit nobody confirmed is deleted once the visit is more than 90 days old, exactly like a delete on request but by "retention"', async () => {
+    await withKeeper(async context => {
+        const { store, keeper, announced, root } = context;
+        await seedKept(context, [
+            { id: 'old-auto', at: RETAIN_NOW - 91 * RETAIN_DAY, status: 'auto', size: 10 },
+            { id: 'old-learned', at: RETAIN_NOW - 300 * RETAIN_DAY, status: 'learned', size: 20 },
+            { id: 'recent', at: RETAIN_NOW - 10 * RETAIN_DAY, status: 'auto', size: 40 },
+        ]);
+        announced.length = 0;
+        assert.deepEqual(await keeper.expireUnconfirmed(), { deleted: 2, freedBytes: 30 });
+        for (const id of ['old-auto', 'old-learned']) {
+            const stored = store.getVisit(id);
+            assert.deepEqual(stored.clip, { state: 'deleted', expectedReadyAt: null, deletedBy: 'retention' });
+            assert.equal(stored.species, 'Virginia Opossum', 'the visit itself is kept');
+            assert.equal(stored.snapshot, `media/snap/${id}.jpg`, 'and its photos');
+            assert.equal(store.getRawVisit(id).clip_file, null);
+        }
+        assert.equal(store.getVisit('recent').clip.state, 'ready');
+        assert.deepEqual(announced.map(v => v.id).sort(), ['old-auto', 'old-learned'], 'one visit_updated per visit');
+        assert.ok(announced.every(v => v.clip.deletedBy === 'retention'));
+        assert.deepEqual(await readdir(join(root, '88')), ['recent.mp4'], 'only the files of the deleted clips are gone');
+    }, { now: () => RETAIN_NOW });
+});
+
+test('retention: the cut-off is 90 days to the millisecond, and a visit that is confirmed, corrected, not an animal or can\'t tell keeps its clip however old', async () => {
+    await withKeeper(async context => {
+        const { store, keeper } = context;
+        const ancient = RETAIN_NOW - 500 * RETAIN_DAY;
+        const specs = [
+            { id: 'just-over', at: RETAIN_NOW - 90 * RETAIN_DAY - 1, status: 'auto', size: 1 },
+            { id: 'exactly-90', at: RETAIN_NOW - 90 * RETAIN_DAY, status: 'auto', size: 2 },
+            { id: 'just-under', at: RETAIN_NOW - 90 * RETAIN_DAY + 1, status: 'learned', size: 4 },
+            { id: 'confirmed', at: ancient, status: 'confirmed', size: 8 },
+            { id: 'corrected', at: ancient, status: 'corrected', size: 16 },
+            { id: 'not-animal', at: ancient, status: 'not_animal', size: 32 },
+            { id: 'cant-tell', at: ancient, status: 'unknown', size: 64 },
+        ];
+        await seedKept(context, specs);
+        assert.deepEqual(await keeper.expireUnconfirmed(), { deleted: 1, freedBytes: 1 });
+        assert.deepEqual(specs.map(spec => store.getVisit(spec.id).clip.state), ['deleted', 'ready', 'ready', 'ready', 'ready', 'ready', 'ready']);
+    }, { now: () => RETAIN_NOW });
+});
+
+test('retention only deletes Kestrel\'s own copies: a clip that is still another plugin\'s file is left alone', async () => {
+    await withKeeper(async context => {
+        const { store, keeper, eventsClip } = context;
+        store.saveVisit(visit('foreign', RETAIN_NOW - 120 * RETAIN_DAY));
+        const foreign = await eventsClip('f', 700);
+        store.setClip('foreign', 'ready', foreign, { source: 'events' });
+        assert.deepEqual(await keeper.expireUnconfirmed(), { deleted: 0, freedBytes: 0 });
+        assert.equal(store.getVisit('foreign').clip.state, 'ready');
+        assert.equal((await stat(foreign)).size, 700, 'the Events Recorder\'s own file is untouched');
+    }, { now: () => RETAIN_NOW });
+});
+
+test('retention can run again and again, a visit confirmed in the meantime keeps its clip, and the Settings figure for unconfirmed clips counts exactly what it takes', async () => {
+    await withKeeper(async context => {
+        const { store, keeper, announced } = context;
+        const at = RETAIN_NOW - 100 * RETAIN_DAY;
+        await seedKept(context, [{ id: 'a', at, size: 5 }, { id: 'b', at, size: 6 }, { id: 'c', at, size: 7 }]);
+        const cutoff = RETAIN_NOW - 90 * RETAIN_DAY;
+        assert.deepEqual(store.clipStorage(cutoff).byReason.unconfirmed, { count: 3, bytes: 18 });
+        assert.deepEqual(store.clipsUnconfirmedBefore(cutoff).map(row => row.id).sort(), ['a', 'b', 'c']);
+        store.saveVisit({ ...store.getVisit('b'), status: 'confirmed' }); // a person confirms 'b' before the night's run
+        assert.deepEqual(store.clipStorage(cutoff).byReason.unconfirmed, { count: 2, bytes: 12 });
+        announced.length = 0;
+        assert.deepEqual(await keeper.expireUnconfirmed(), { deleted: 2, freedBytes: 12 });
+        assert.deepEqual(['a', 'b', 'c'].map(id => store.getVisit(id).clip.state), ['deleted', 'ready', 'deleted']);
+        assert.equal(store.getVisit('b').status, 'confirmed');
+        assert.equal(announced.length, 2);
+        assert.deepEqual(await keeper.expireUnconfirmed(), { deleted: 0, freedBytes: 0 }, 'a second run has nothing left to do');
+        assert.equal(announced.length, 2, 'and announces nothing');
+        assert.deepEqual(store.clipStorage().byReason.unconfirmed, { count: 0, bytes: 0 });
+    }, { now: () => RETAIN_NOW });
+});
+
 test('delete never removes a file that is not Kestrel\'s own, and leaves a clip alone when its file cannot be removed', async () => {
     await withKeeper(async context => {
         const { store, keeper, root, warnings, eventsClip } = context;

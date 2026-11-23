@@ -9,7 +9,7 @@ import { ScryptedDeviceBase, ScryptedInterface, ScryptedMimeTypes } from '@scryp
 import mqtt, { type MqttClient } from 'mqtt';
 import { isConfidentAlignment, isPlausibleOffset, measureAlignment } from './align';
 import { ChangeGate } from './changes';
-import { CLIP_STORE_DIR, ClipKeeper, cutClip, decodeGrayFrames, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts, videoDurationMs } from './clipfiles';
+import { CLIP_STORE_DIR, ClipKeeper, cutClip, decodeGrayFrames, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts, UNCONFIRMED_CLIP_DAYS, videoDurationMs } from './clipfiles';
 import { ClipResolver, backfillClips, backfillSince, nvrClipStart, nvrClipWindow, pollPendingClips, type ClipVisit, type FoundClip, type NvrCut } from './clips';
 import { GpuProbe, RollingAverage } from './healthprobes';
 import { HeardIngest, heardCallOf, readBirdnetMessage } from './heard';
@@ -1432,6 +1432,9 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 this.console.error(`Kestrel nightly storage maintenance failed: ${String(error)}`);
             }
             await removeStalePartials(CLIP_STORE_DIR, Date.now()).catch(error => this.console.warn(`Could not clean the clip store: ${String(error)}`));
+            await this.keeper.expireUnconfirmed().then(
+                expired => { if (expired.deleted) this.console.log(`Kestrel removed ${expired.deleted} clip(s) of visits nobody confirmed in ${UNCONFIRMED_CLIP_DAYS} days, freeing ${expired.freedBytes} bytes.`); },
+                error => this.console.warn(`Could not remove the old clips of unconfirmed visits: ${String(error)}`));
             await this.recoverMissingClips('daily');
             await this.alignUnaligned();
             if (!this.released) this.scheduleMaintenance();

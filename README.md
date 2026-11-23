@@ -34,6 +34,9 @@ for those.
   3 months, 6 months or a year, or those from visits marked *Not an animal* / *Can't tell*.
   Every delete first says how many clips go and how much space that frees, and that photos
   and visits are kept; only the video is removed.
+  Clips from visits nobody has confirmed (the label is still the model's own guess) are removed
+  on their own after 90 days, by the 03:30 nightly maintenance: confirm or correct a visit to
+  keep its clip. Only the video goes; the visit and its photos stay, and the visit page says why.
 - **Wildlife** — your life list: every species seen or heard, best photo (or a
   labelled reference photo with its photographer and licence), first/last seen,
   which cameras, what time of day, new-this-year badges, and the recorded call for
@@ -120,9 +123,10 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
 4. **Optional: hearing** — install the BirdNET-Go app, enable the Perch v2 model,
    add the camera streams by name, and point its MQTT at your broker (topic
    `birdnet`, HA discovery off); map stream names to cameras in the plugin settings.
-   Set the app's `BIRDSONGS_FOLDER` option to `/media/birdnet-go/clips` (create the
-   folder first): Home Assistant's backups include app folders but not `/media`, so
-   30 days of recordings would otherwise grow every nightly backup by several GB.
+   Set the app's `BIRDSONGS_FOLDER` option to a folder under `/media` (create it first; a
+   NAS share with a size limit, mounted at `/media/BirdCalls`, works well): Home
+   Assistant's backups include app folders but not `/media`, so the recordings would
+   otherwise grow every nightly backup by several GB.
    Perch hears more than birds: mammals and frogs are kept (event types `mammal` /
    `other`), insects are ignored.
    **Bird-call previews** (optional): run the `kestrel-audio` service on a machine
@@ -143,8 +147,23 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    how strict that is (Loose 1%, Balanced 3%, Strict 5%, Very strict 10%). Kestrel
    changes only BirdNET-Go's range-filter threshold and keeps its other settings;
    BirdNET-Go then rebuilds its species list, which takes a few seconds.
-   **Keep this recording**: BirdNET-Go deletes recordings older than its retention age
-   (30 days by default). A heard visit's page has a *Keep recording* button (a Home
+   **Bird recordings**: Settings also shows how full the folder BirdNET-Go saves its
+   recordings to is (read where Home Assistant can see it, so a share with a size limit
+   counts against that limit; otherwise from BirdNET-Go's own disk list) and how many
+   recordings are kept for good, and lets a Home Assistant administrator choose how long
+   they are kept: 30, 60 or 90 days, or *Until space runs low* (the oldest go once the
+   folder is 85% full). BirdNET-Go removes the oldest first and never a kept recording,
+   and Kestrel changes only its retention policy and age or percentage. BirdNET-Go cannot
+   combine a time limit with a space limit, so every 15 minutes Kestrel checks the folder:
+   at 90% full it switches a time limit to *Until space runs low* and raises a Home
+   Assistant notification, and it refuses a time limit while the folder is that full.
+   A change that could remove recordings asks first. There is no *Clean up now* (BirdNET-Go
+   has no such call; it tidies up by itself every 15 minutes) and no recordings count
+   (BirdNET-Go keeps its detection rows when it removes a recording, so only scanning the
+   folder could count them). BirdNET-Go's clean-up leaves the spectrogram pictures alone
+   (its `keepSpectrograms` setting).
+   **Keep this recording**: BirdNET-Go removes recordings by the rule chosen under
+   *Bird recordings* above. A heard visit's page has a *Keep recording* button (a Home
    Assistant administrator can press it; everyone else sees whether it is on). It
    locks that detection in BirdNET-Go, and BirdNET-Go's clean-up skips locked
    detections, so the sound stays for good; pressing it again lets the normal
@@ -211,7 +230,7 @@ clip itself from Scrypted NVR's continuous recording (5 s before the visit to 10
 once a day, as long as the NVR still has the footage (its "Video Retention (Days)", 3 by default), so
 an outage of the Events Recorder is recovered rather than lost. Every clip is also copied into
 Kestrel's own store on the NVR disk (`/NVR/kestrel/clips/<camera>/<visit>.mp4`), which neither the
-Events Recorder's pruning nor the NVR's retention touches. The Events Recorder's published 0.0.52
+Events Recorder's pruning nor the NVR's retention touches (only a delete does: yours, or the nightly removal, after 90 days, of clips from visits nobody confirmed). The Events Recorder's published 0.0.52
 (2026-10-05) does not load in Scrypted, and when it does run it saves a snapshot for every detection
 update. `python3 tools/patch_events_recorder.py` downloads that release, fixes both and redeploys it;
 re-run it if Scrypted reinstalls 0.0.52, and retire it once upstream ships a release that loads.

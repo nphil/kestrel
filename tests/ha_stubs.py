@@ -21,6 +21,7 @@ import voluptuous as vol
 
 INTEGRATION = Path(__file__).resolve().parents[1] / "custom_components" / "kestrel"
 DISK: dict[str, object] = {}  # stands in for Home Assistant's .storage directory
+NOTIFICATIONS: list[dict] = []  # what the integration put in Home Assistant's notification list
 
 
 def _module(name: str, **attrs: object) -> types.ModuleType:
@@ -222,6 +223,10 @@ class KestrelApiError(Exception):
         self.code = "invalid_auth" if status == 401 else "not_found" if status == 404 else "api_error"
 
 
+def _notify(hass: HomeAssistant, message: str, title: str | None = None, notification_id: str | None = None) -> None:
+    NOTIFICATIONS.append({"message": message, "title": title, "notification_id": notification_id})
+
+
 def async_dispatcher_connect(hass: HomeAssistant, signal: str, target: object) -> object:
     listeners = hass.data.setdefault("dispatcher", {}).setdefault(signal, [])
     listeners.append(target)
@@ -304,7 +309,8 @@ def _install_stubs() -> None:
         TextSelectorConfig=_TextSelectorConfig,
         TextSelectorType=_TextSelectorType,
     )
-    _module("homeassistant.components")
+    components = _module("homeassistant.components")
+    components.persistent_notification = _module("homeassistant.components.persistent_notification", async_create=_notify)
     _module("homeassistant.components.event", EventEntity=EventEntity)
     _module(
         "homeassistant.components.websocket_api",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import logging
 
@@ -13,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
 from .announced import AnnouncedVisits
@@ -38,6 +40,7 @@ from .const import (
 )
 from .coordinator import KestrelCoordinator
 from .media import async_register_media_view
+from .recording_retention import GUARD_INTERVAL, async_guard
 from .reference_photos import ReferencePhotos
 from .reference_sounds import ReferenceSounds
 from .species_descriptions import SpeciesDescriptions
@@ -134,6 +137,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
         await models.async_stop()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_on_shutdown))
+
+    async def guard_recordings(now: datetime) -> None:
+        await async_guard(hass)
+
+    entry.async_on_unload(async_track_time_interval(hass, guard_recordings, GUARD_INTERVAL))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator.async_start()
     return True

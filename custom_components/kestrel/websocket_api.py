@@ -16,7 +16,7 @@ from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from . import birdnet_availability, birdnet_review, range_filter, recording_extras, recording_keep, species_descriptions
+from . import birdnet_availability, birdnet_review, range_filter, recording_extras, recording_keep, recording_retention, species_descriptions
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS, SIGNAL_EVENTS
 from .coordinator import KestrelCoordinator
@@ -562,6 +562,50 @@ async def ws_range_filter_set(
     connection.send_result(msg["id"], {**state, "canChange": True})
 
 
+@websocket_api.websocket_command({vol.Required("type"): "kestrel/recording_retention/get"})
+@websocket_api.async_response
+async def ws_recording_retention_get(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """How long BirdNET-Go keeps its recordings, how full their folder is, how many are kept for good. Anyone signed in may look."""
+    try:
+        state = await recording_retention.async_read(hass)
+    except KestrelApiError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Kestrel could not read how BirdNET-Go keeps its recordings")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], {**state, "canChange": bool(connection.user.is_admin)})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "kestrel/recording_retention/set", vol.Required("keep"): vol.In(recording_retention.KEEP_CHOICES)}
+)
+@websocket_api.async_response
+async def ws_recording_retention_set(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Change how long BirdNET-Go keeps its recordings (30, 60 or 90 days, or until space runs low). Administrators only: it deletes recordings."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Only a Home Assistant administrator can change this")
+        return
+    try:
+        state = await recording_retention.async_set_keep(hass, msg["keep"])
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_format", str(err))
+        return
+    except KestrelApiError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Kestrel could not change how BirdNET-Go keeps its recordings")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(msg["id"], {**state, "canChange": True})
+
+
 async def _async_keep_target(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> int | None | bool:
@@ -730,6 +774,8 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         ws_clips_delete,
         ws_range_filter_get,
         ws_range_filter_set,
+        ws_recording_retention_get,
+        ws_recording_retention_set,
         ws_recording_keep_get,
         ws_recording_keep_set,
         ws_recordings,
