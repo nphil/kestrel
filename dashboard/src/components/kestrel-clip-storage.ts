@@ -168,9 +168,11 @@ export class KestrelClipStorage extends LitElement {
   }
 
   private _renderSummary(storage: ClipStorage) {
-    if (storage.count === 0) return html`<p class="empty">No clips are saved right now.</p>`;
+    // The AI check-up shows a "Wildlife storage" meter of a few hundred MB next to this section's gigabytes, which reads like a broken limit: they are different places.
+    const where = html`<p class="where">Kept clips are stored on the NAS, separate from the working space shown as Wildlife storage in the AI check-up. They stay until you delete them.</p>`;
+    if (storage.count === 0) return html`<p class="empty">No clips are saved right now.</p>${where}`;
     const oldest = storage.oldestAt === null ? "" : ` · oldest ${monthYear(storage.oldestAt)}`;
-    return html`<p class="summary" role="status"><strong>${storage.count}</strong> <span>${storage.count === 1 ? "clip" : "clips"} · ${formatBytes(storage.bytes)}${oldest}</span></p>`;
+    return html`<p class="summary" role="status"><strong>${storage.count}</strong> <span>${storage.count === 1 ? "clip" : "clips"} · ${formatBytes(storage.bytes)}${oldest}</span></p>${where}`;
   }
 
   private _renderActions(storage: ClipStorage) {
@@ -221,10 +223,11 @@ export class KestrelClipStorage extends LitElement {
   static styles = [BASE_CSS, css`
     :host { display: block; }
     p { margin: 0; }
-    .summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--lu-space-2) var(--lu-space-3); margin-bottom: var(--lu-space-4); }
+    .summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--lu-space-2) var(--lu-space-3); margin-bottom: var(--lu-space-2); }
     .summary strong { font-size: var(--lu-type-display); font-weight: 350; font-variant-numeric: tabular-nums; line-height: 1; }
     .summary span, .empty { color: var(--lu-ink-2); font-size: var(--lu-type-label); }
-    .empty { margin-bottom: var(--lu-space-4); }
+    .empty { margin-bottom: var(--lu-space-2); }
+    .where { margin-bottom: var(--lu-space-4); color: var(--lu-ink-2); font-size: var(--lu-type-caption); line-height: 1.4; }
     .action { display: flex; align-items: center; justify-content: space-between; gap: var(--lu-space-3); padding: var(--lu-space-3) 0; border-top: 1px solid var(--lu-edge); }
     .copy { display: grid; gap: var(--lu-space-1); min-width: 0; }
     .copy strong { font-size: var(--lu-type-label); font-weight: 600; overflow-wrap: anywhere; }

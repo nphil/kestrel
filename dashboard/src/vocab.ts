@@ -35,6 +35,19 @@ function modelName(call: { model?: string; label?: string } | undefined): string
   return (typeof call.model === "string" && names[call.model]) || (typeof call.label === "string" ? call.label.trim() : "");
 }
 
+/** True when two different listening models named this visit's species: the "Both models agreed" chip. A model that named another bird does not count, and neither does one model twice. */
+export function modelsAgreed(visit: Partial<Pick<Visit, "kind" | "species" | "models">>): boolean {
+  if (visit.kind !== undefined && visit.kind !== "heard") return false;
+  const species = typeof visit.species === "string" ? visit.species.trim().toLowerCase() : "";
+  if (!species || !Array.isArray(visit.models)) return false;
+  const found = new Set<string>();
+  for (const call of visit.models) {
+    if (!call || typeof call !== "object" || call.role === "other" || call.model === "other" || typeof call.model !== "string" || !call.model) continue;
+    if (typeof call.species === "string" && call.species.trim().toLowerCase() === species) found.add(call.model);
+  }
+  return found.size >= 2;
+}
+
 /** One plain sentence (two at most) on why a heard visit got its tier, for the review list and the visit page. "" when there is nothing to say. */
 export function tierWhyLine(visit: TierFields): string {
   if (visit.status !== undefined && visit.status !== "auto") return "";
@@ -61,6 +74,8 @@ export function tierWhyLine(visit: TierFields): string {
       sentences.push(`An unusual bird for this time of year${once ? ", heard only once" : ""}.`);
     } else if (reason === "strong") {
       sentences.push("A clear call.");
+    } else if (reason === "birdnet_unlikely") {
+      sentences.push("BirdNET-Go thinks this may not be a real call.");
     } else if (reason === "repeated" && times) {
       sentences.push(`Heard ${times} times within a few minutes.`);
     }

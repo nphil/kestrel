@@ -8,10 +8,13 @@ A visit with a BirdNET-Go recording (a heard visit, or a sighting that has a cal
     fields when it has no weather for that time (no weather source set up): that is "no weather", not an error.
   * **The spectrogram** (a picture of the sound, time across and pitch up). BirdNET-Go draws it from the saved recording; the
     browser gets a signed link to Kestrel's own proxy (media.py, kind `birdnet_spectrogram`), never BirdNET-Go's address. It is
-    offered only for a recording known to exist (the same check the audio link goes through), since there is nothing to draw
-    otherwise. Whether BirdNET-Go has drawn it yet is up to the proxy, which answers "no content" until it can.
+    offered unless the recording is KNOWN to be missing (the same check the audio link goes through): a check that is merely slow
+    must not hold the page up. Whether BirdNET-Go can give the picture yet is up to the proxy, which answers "no content" until it
+    can; the panel shows that as a quiet "Picture not ready" and asks again later.
 
-Both are decoration: BirdNET-Go not answering just means a visit has no extras this time, and it is asked again next time.
+Both are decoration, so the answer is quick: it waits WAIT_S at most for BirdNET-Go. A lookup that is not done by then is not dropped:
+it carries on in the background and is remembered, so the next ask finds it. BirdNET-Go not answering at all just means a visit has
+no weather this time, and it is asked again next time.
 Weather is remembered in memory (a detection's weather does not change; a "no weather" is asked again after a few minutes).
 """
 
@@ -22,6 +25,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -34,10 +38,11 @@ from .recording_keep import detection_id_for_visit
 _LOGGER = logging.getLogger(__name__)
 
 _CACHE = "recording_weather"
+_KIND = "recording_weather_lookup"  # names the lookups running and the slots they share (see birdnet_availability.start_or_join)
 FOUND_TTL_S = 30 * 86400
 NONE_TTL_S = 600  # BirdNET-Go may fetch the weather of that hour a little later
 MAX_CACHED = 500
-WAIT_S = 6.0  # the panel does not wait longer than this for decoration
+WAIT_S = 2.0  # the panel does not wait longer than this for decoration; a slower lookup carries on without it and is there next time
 PARALLEL = 8
 
 _DAY_NIGHT = re.compile(r"_(?:day|night|polartwilight)$")
@@ -132,54 +137,62 @@ def _now() -> float:
     return time.monotonic()
 
 
-async def _async_sky(hass: HomeAssistant, detection_id: int) -> Sky | None:
+def _remembered(hass: HomeAssistant, detection_id: int) -> tuple[bool, Sky | None]:
+    """(known, weather): whether the weather of a detection is remembered and still fresh, and what it is (None: BirdNET-Go has none)."""
+    cache: dict[int, tuple[float, Sky | None]] = hass.data.setdefault(DOMAIN, {}).setdefault(_CACHE, {})
+    cached = cache.get(detection_id)
+    if cached is not None and _now() - cached[0] < (FOUND_TTL_S if cached[1] is not None else NONE_TTL_S):
+        return True, cached[1]
+    return False, None
+
+
+async def _async_sky(hass: HomeAssistant, detection_id: int) -> None:
+    """Ask BirdNET-Go for the weather of one detection and remember what it says. Not being able to ask at all is not remembered."""
     cache: dict[int, tuple[float, Sky | None]] = hass.data.setdefault(DOMAIN, {}).setdefault(_CACHE, {})
     now = _now()
-    cached = cache.get(detection_id)
-    if cached is not None and now - cached[0] < (FOUND_TTL_S if cached[1] is not None else NONE_TTL_S):
-        return cached[1]
     try:
         sky = sky_of(await birdnet_api.async_request(hass, "GET", f"/weather/detection/{detection_id}"))
     except KestrelApiError as err:
         if err.status != 404:  # it could not be asked: no verdict, ask again next time
             _LOGGER.debug("Kestrel could not get the weather of detection %s: %s", detection_id, err)
-            return None
+            return
         sky = None  # BirdNET-Go no longer has that detection
     cache[detection_id] = (now, sky)
     for stale in sorted(cache, key=lambda key: cache[key][0])[: max(0, len(cache) - MAX_CACHED)]:
         del cache[stale]
-    return sky
+
+
+async def _wait_for_skies(hass: HomeAssistant, numbers: list[int]) -> None:
+    """Start (or join) the lookup of every weather not remembered yet, and wait for them, at most WAIT_S. They are not cancelled when the wait ends."""
+    lookups = [
+        birdnet_availability.start_or_join(hass, _KIND, number, partial(_async_sky, hass, number), parallel=PARALLEL)
+        for number in numbers
+        if not _remembered(hass, number)[0]
+    ]
+    if lookups:
+        await asyncio.wait(lookups, timeout=WAIT_S)
 
 
 async def async_extras(hass: HomeAssistant, visits: dict[str, Any]) -> dict[str, Extras]:
     """The extras of each visit (`visits`: visit id -> the visit as the plugin sent it); every id gets an answer. Waits at most
-    WAIT_S for BirdNET-Go; what did not answer in time is left out this time."""
+    WAIT_S for BirdNET-Go; what did not answer in time is left out this time, while its lookup carries on in the background and is
+    remembered for the next ask."""
     detections = {visit_id: detection_id_for_visit(visit) for visit_id, visit in visits.items()}
     recorded = [visit for visit_id, visit in visits.items() if detections[visit_id] is not None]
     wanted = list(dict.fromkeys(number for number in detections.values() if number is not None))
-    limit = asyncio.Semaphore(PARALLEL)
-    skies: dict[int, Sky | None] = {}
-
-    async def ask(number: int) -> None:
-        async with limit:
-            skies[number] = await _async_sky(hass, number)
-
-    try:  # the recordings are confirmed (a picture is only offered for one that exists) while the weather is asked
-        await asyncio.wait_for(
-            asyncio.gather(
-                birdnet_availability.async_confirm_audio(hass, recorded), *(ask(number) for number in wanted), return_exceptions=True
-            ),
-            WAIT_S,
-        )
-    except TimeoutError:
-        _LOGGER.debug("Kestrel BirdNET-Go lookups for recordings still running after %ss", WAIT_S)
+    # the recordings are confirmed while the weather is asked, so the two waits overlap
+    await asyncio.gather(
+        birdnet_availability.async_confirm_audio(hass, recorded), _wait_for_skies(hass, wanted), return_exceptions=True
+    )
     fahrenheit = hass.config.units.temperature_unit == "\u00b0F"
     extras: dict[str, Extras] = {}
     for visit_id, number in detections.items():
         if number is None:
             extras[visit_id] = NO_EXTRAS
             continue
-        sky = skies.get(number)
-        has_recording = birdnet_availability.audio_available_now(hass, str(number)) is True
-        extras[visit_id] = Extras(sky.payload(fahrenheit) if sky is not None else None, number if has_recording else None)
+        _, sky = _remembered(hass, number)
+        # The picture is offered unless the recording is known to be missing. A recording whose check has not finished is offered it too:
+        # waiting for a slow BirdNET-Go here would hold up the weather and the page, and the proxy says "not ready" until the picture can be given.
+        missing = birdnet_availability.audio_available_now(hass, str(number)) is False
+        extras[visit_id] = Extras(sky.payload(fahrenheit) if sky is not None else None, None if missing else number)
     return extras

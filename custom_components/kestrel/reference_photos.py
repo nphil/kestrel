@@ -14,6 +14,11 @@ was unreachable is asked again after an hour. A fallback photo is downloaded the
 `.storage/kestrel_reference_photos` (bounded, least recently shown goes first) and served from there, with Range and ETag,
 by the signed media route `species_ref`; who took it, and under which licence, is `species_ref_info`. The link names a
 species, never an address: only the hosts the sources serve photos from are ever fetched.
+
+A lookup never holds the panel up for long. Each source has its own time (a slow one counts as unreachable for that lookup),
+BirdNET-Go's retries run alongside the other sources instead of in front of them, and a whole lookup is cut off after
+`LOOKUP_TIMEOUT_S`. A request for a picture or its credit waits for a lookup only `PHOTO_WAIT_S`: after that the answer is "no
+picture right now" while the lookup goes on and its result is kept for the next ask.
 """
 
 from __future__ import annotations
@@ -66,9 +71,13 @@ RECHECK_S = 3600  # an answer made while a better source was out of reach is ask
 FAILURE_BACKOFF_S = 60  # after a lookup or a download failed, answer "no picture right now" at once for this long
 MAX_ENTRIES = 900
 MAX_LOOKUPS_AT_ONCE = 3
-LOOKUP_TIMEOUT_S = 40
+LOOKUP_TIMEOUT_S = 15  # one whole lookup, every source together; a slower one is "no picture right now" (asked again after a minute)
+SOURCE_TIMEOUT_S = 7  # what one source (iNaturalist, Wikipedia) may take; a slower one counts as unreachable for this lookup
 BIRDNET_TRIES = 3  # BirdNET-Go answers 202/503 while it is still fetching a species' picture for the first time
 BIRDNET_WAIT_S = 1.0
+BIRDNET_BUDGET_S = 4.0  # all of BirdNET-Go's tries together: its add-on can stall on a first fetch
+BIRDNET_GRACE_S = 1.0  # the other sources wait this long for BirdNET-Go's answer, then they are asked alongside it
+PHOTO_WAIT_S = 10.0  # a request for a picture or its credit waits this long for a lookup or a download; both go on without it
 MAX_PHOTO_BYTES = 6 * 1024 * 1024
 MIN_PHOTO_BYTES = 2048
 PHOTO_CACHE_BYTES = 48 * 1024 * 1024
@@ -406,9 +415,10 @@ class ReferencePhotos:
         entry = self._entries.get(name_key(name))
         return not (entry is not None and entry.photo is None and self._fresh(entry, _now()))
 
-    async def async_resolve(self, species: str) -> Entry | None:
+    async def async_resolve(self, species: str, wait: float | None = None) -> Entry | None:
         """What is known about this species' picture, looked up (once, however many ask) when it is not kept yet. None when
-        the sources could not be asked just now; that is not remembered."""
+        the sources could not be asked just now (not remembered), or when a lookup is still running after `wait` seconds: it
+        goes on, and its answer is kept for the next ask."""
         name = clean_name(species)
         if not name:
             return None
@@ -424,7 +434,10 @@ class ReferencePhotos:
             job = self._hass.async_create_background_task(self._search(name, key), f"kestrel reference photo lookup {key}")
             self._lookups[key] = job
             job.add_done_callback(lambda _: self._lookups.pop(key, None))
-        return await asyncio.shield(job)
+        try:
+            return await asyncio.wait_for(asyncio.shield(job), wait)
+        except TimeoutError:
+            return None
 
     @staticmethod
     def _fresh(entry: Entry, now: float) -> bool:
@@ -458,43 +471,79 @@ class ReferencePhotos:
         known = mapping.get(name.lower()) if isinstance(mapping, dict) else None
         scientific = known if isinstance(known, str) and known else None
         taxon: Taxon | None = None
-        asked = False  # iNaturalist has been asked who this is (taxon None then means: nobody)
+        asked = False  # iNaturalist has been asked who this is (taxon None then means: nobody, or it could not say)
         degraded = False  # a source that might have had a better answer could not be asked
         # 1. BirdNET-Go can only be asked by scientific name. For a name it does not list, iNaturalist says who it is.
         if scientific is None:
+            asked = True
             try:
-                taxon, asked = await inaturalist_taxon(session, name, None), True
+                taxon = await asyncio.wait_for(inaturalist_taxon(session, name, None), SOURCE_TIMEOUT_S)
                 scientific = taxon.scientific if taxon else None
-            except Unavailable:
+            except (Unavailable, TimeoutError):
                 degraded = True
-        if scientific:
-            verdict = await self._birdnet_has(scientific)
+        # 2. BirdNET-Go first. It is slow only for a species it is fetching for the first time, so when it does not answer at
+        # once, iNaturalist and then Wikipedia are asked alongside it instead of after it. Its picture still wins.
+        deciding = asyncio.ensure_future(self._birdnet_has(scientific)) if scientific else None
+        looking: asyncio.Future[tuple[Photo | None, str | None, bool]] | None = None
+        verdict: bool | None = False  # BirdNET-Go has the picture / has not / could not say (False too when it is never asked)
+        try:
+            if deciding is not None:
+                await asyncio.wait({deciding}, timeout=BIRDNET_GRACE_S)
+                if deciding.done():
+                    verdict, deciding = deciding.result(), None
+            if not verdict:
+                looking = asyncio.ensure_future(self._other_sources(session, name, scientific, taxon, asked))
+                if deciding is not None:
+                    verdict, deciding = await deciding, None
             if verdict:
                 return Entry(name, scientific, _now(), not degraded, Photo("birdnet-go", "", "", "", "", ""))
-            degraded = degraded or verdict is None
-        # 2. iNaturalist
-        photo: Photo | None = None
-        try:
-            if not asked:
-                taxon = await inaturalist_taxon(session, name, scientific)
-            if taxon is not None:
-                scientific = scientific or taxon.scientific
-                photo = await inaturalist_photo(session, taxon)
-        except Unavailable:
-            degraded = True
-        # 3. Wikipedia
-        if photo is None:
-            try:
-                photo = await wikipedia_photo(session, name, scientific)
-            except Unavailable:
-                degraded = True
+            photo, scientific, unreachable = await looking
+        finally:
+            for task in (deciding, looking):
+                if task is not None:
+                    task.cancel()
+        degraded = degraded or verdict is None or unreachable
         if photo is None and degraded:
             raise Unavailable
         return Entry(name, scientific, _now(), not degraded, photo)
 
+    async def _other_sources(
+        self, session: aiohttp.ClientSession, name: str, scientific: str | None, taxon: Taxon | None, asked: bool
+    ) -> tuple[Photo | None, str | None, bool]:
+        """iNaturalist's photo, else Wikipedia's, each within its own time: (photo, the scientific name as far as it is known,
+        whether a source could not be asked)."""
+        photo: Photo | None = None
+        unreachable = False
+        try:
+            photo, scientific = await asyncio.wait_for(self._inaturalist(session, name, scientific, taxon, asked), SOURCE_TIMEOUT_S)
+        except (Unavailable, TimeoutError):
+            unreachable = True
+        if photo is None:
+            try:
+                photo = await asyncio.wait_for(wikipedia_photo(session, name, scientific), SOURCE_TIMEOUT_S)
+            except (Unavailable, TimeoutError):
+                unreachable = True
+        return photo, scientific, unreachable
+
+    @staticmethod
+    async def _inaturalist(
+        session: aiohttp.ClientSession, name: str, scientific: str | None, taxon: Taxon | None, asked: bool
+    ) -> tuple[Photo | None, str | None]:
+        if not asked:
+            taxon = await inaturalist_taxon(session, name, scientific)
+        if taxon is None:
+            return None, scientific
+        return await inaturalist_photo(session, taxon), scientific or taxon.scientific
+
     async def _birdnet_has(self, scientific: str) -> bool | None:
-        """Whether BirdNET-Go has a picture of this species; None when it could not say. It answers 202/503 while it is still
-        fetching one for the first time, so a few tries are made."""
+        """Whether BirdNET-Go has a picture of this species; None when it could not say within `BIRDNET_BUDGET_S`."""
+        try:
+            return await asyncio.wait_for(self._birdnet_tries(scientific), BIRDNET_BUDGET_S)
+        except TimeoutError:
+            return None
+
+    async def _birdnet_tries(self, scientific: str) -> bool | None:
+        """BirdNET-Go answers 202/503 while it is still fetching a picture for the first time, so a few tries are made."""
         for attempt in range(BIRDNET_TRIES):
             status = await birdnet_availability.image_status(self._hass, scientific)
             if status in (200, 404):
@@ -531,8 +580,10 @@ class ReferencePhotos:
 
     async def async_image(self, species: str) -> Picture | None:
         """Where to get the species' picture: BirdNET-Go's address to stream, or a file here (fetched on first use). None when
-        no source has one or it cannot be had right now."""
-        entry = await self.async_resolve(species)
+        no source has one or it cannot be had right now; a lookup or fetch that takes longer than `PHOTO_WAIT_S` carries on
+        without the request, and the picture is there for the next one."""
+        deadline = asyncio.get_running_loop().time() + PHOTO_WAIT_S
+        entry = await self.async_resolve(species, PHOTO_WAIT_S)
         if entry is None or entry.photo is None:
             return None
         photo = entry.photo
@@ -548,7 +599,11 @@ class ReferencePhotos:
             job = self._hass.async_create_background_task(self._download(key, photo, path), f"kestrel reference photo {path.name}")
             self._downloads[path.name] = job
             job.add_done_callback(lambda _: self._downloads.pop(path.name, None))
-        return Picture(None, path, photo.mime) if await asyncio.shield(job) else None
+        try:
+            fetched = await asyncio.wait_for(asyncio.shield(job), max(0.0, deadline - asyncio.get_running_loop().time()))
+        except TimeoutError:
+            return None
+        return Picture(None, path, photo.mime) if fetched else None
 
     async def _download(self, key: str, photo: Photo, path: Path) -> bool:
         try:
@@ -573,15 +628,16 @@ class ReferencePhotos:
 
     async def async_info(self, species: str) -> dict[str, str] | None:
         """Who took the species' picture and under which licence (source, credit, licence, page), or None when that is not known."""
-        entry = await self.async_resolve(species)
+        entry = await self.async_resolve(species, PHOTO_WAIT_S)
         if entry is None or entry.photo is None:
             return None
         if entry.photo.source != "birdnet-go":
             return entry.photo.info()
         try:
-            status, data = await get_json(
-                async_get_clientsession(self._hass), f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/species-image/info", {"name": entry.scientific}
+            status, data = await asyncio.wait_for(
+                get_json(async_get_clientsession(self._hass), f"{BIRDNET_GO_INTERNAL_URL}/api/v2/media/species-image/info", {"name": entry.scientific}),
+                SOURCE_TIMEOUT_S,
             )
-        except Unavailable:
+        except (Unavailable, TimeoutError):
             return None
         return birdnet_info(data) if status == 200 else None

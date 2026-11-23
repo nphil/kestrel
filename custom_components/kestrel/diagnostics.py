@@ -23,11 +23,15 @@ async def async_get_config_entry_diagnostics(
     reference = hass.data.get(DOMAIN, {}).get("reference_sounds")
     photos = hass.data.get(DOMAIN, {}).get("reference_photos")
     descriptions = hass.data.get(DOMAIN, {}).get("species_descriptions")
+    reviews = hass.data.get(DOMAIN, {}).get("birdnet_reviews")
+    models = hass.data.get(DOMAIN, {}).get("birdnet_models")
     return {
         "audio_service": await audio.async_diagnostics() if audio is not None else {"configured": False},
         "reference_sounds": reference.diagnostics() if reference is not None else {"configured": False},
         "reference_photos": photos.diagnostics() if photos is not None else {"configured": False},
         "species_descriptions": descriptions.diagnostics() if descriptions is not None else {"configured": False},
+        "birdnet_reviews": reviews.diagnostics() if reviews is not None else {"configured": False},
+        "birdnet_models": models.diagnostics() if models is not None else {"configured": False},
         "entry": async_redact_data(entry.as_dict(), TO_REDACT),
         "connection": {
             "connected": coordinator.connected,

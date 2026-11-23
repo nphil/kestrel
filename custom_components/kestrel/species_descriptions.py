@@ -9,8 +9,9 @@ and the licence, for the panel to show under it.
 It is the Home Assistant host that asks Wikipedia, never the browser: the browser only ever receives the finished words.
 The answer is kept (Home Assistant's storage): 30 days when there is a description, 7 days when there is none. An answer that
 could not be had because Wikipedia (or iNaturalist, which names the mammals BirdNET-Go has no name for) was unreachable is
-never kept as "no description"; it is asked again after a minute. The sheet waits a few seconds for a new lookup and shows
-the page without a description if it is not back in time; the lookup finishes in the background and is there next time.
+never kept as "no description"; it is asked again after a minute. The species sheet never waits for Wikipedia: it opens at
+once, `describe_now` starts the lookup in the background, and a second, slower request (`async_describe`, waiting up to
+ASK_WAIT_S) fetches the words a moment later. The lookup is kept, so the next sheet has them at once.
 
 The scientific name found on the way is remembered with it, which is what `scientific_name` serves (the species list shows
 it), together with the names BirdNET-Go and the reference photos already know.
@@ -45,7 +46,7 @@ FAILURE_BACKOFF_S = 60  # after a lookup failed, answer "none right now" at once
 MAX_ENTRIES = 900
 MAX_LOOKUPS_AT_ONCE = 3
 LOOKUP_TIMEOUT_S = 40
-ASK_WAIT_S = 5.0  # how long a species sheet waits for a description that has to be looked up first
+ASK_WAIT_S = 25.0  # how long the late "description" request waits for a lookup that is still running (the lookup itself stops at LOOKUP_TIMEOUT_S)
 MAX_SENTENCES = 3
 MAX_CHARS = 480
 MIN_CHARS = 30
@@ -224,28 +225,55 @@ class SpeciesDescriptions:
 
     # ---- lookup ----
 
-    async def async_describe(self, species: str) -> Entry | None:
-        """What is known about this species, looked up (once, however many ask) when it is not kept yet. None when the answer
-        is not there in time (the lookup carries on and is kept) or Wikipedia could not be asked just now (not kept)."""
+    def describe_now(self, species: str) -> Entry | None:
+        """What is kept about this species right now, without waiting for anyone: the kept entry, or None. When it is not kept
+        (or has gone stale) the lookup is started in the background (once, however many ask), unless one failed a moment ago;
+        `pending` then says whether something is on its way."""
         name = clean_name(species)
         if not name:
             return None
         key = name_key(name)
-        now = _now()
         entry = self._entries.get(key)
-        if entry is not None and self._fresh(entry, now):
+        if entry is not None and self._fresh(entry, _now()):
             return entry
-        if self._failed_until.get(key, 0.0) > now:
+        self._start_lookup(name, key)
+        return None
+
+    def pending(self, species: str) -> bool:
+        """True while a lookup for this species is running, so an answer is still to come."""
+        job = self._lookups.get(name_key(clean_name(species)))
+        return job is not None and not job.done()
+
+    async def async_describe(self, species: str, wait: float | None = None) -> Entry | None:
+        """What is known about this species, looked up (once, however many ask) when it is not kept yet, waiting at most `wait`
+        seconds (ASK_WAIT_S when not given). None when the answer is not there in time (the lookup carries on and is kept) or
+        Wikipedia could not be asked just now (not kept)."""
+        name = clean_name(species)
+        if not name:
+            return None
+        key = name_key(name)
+        entry = self._entries.get(key)
+        if entry is not None and self._fresh(entry, _now()):
+            return entry
+        job = self._start_lookup(name, key)
+        if job is None:
+            return None
+        try:
+            return await asyncio.wait_for(asyncio.shield(job), ASK_WAIT_S if wait is None else wait)
+        except TimeoutError:
+            return None
+
+    def _start_lookup(self, name: str, key: str) -> asyncio.Future[Entry | None] | None:
+        """The lookup running for this species, started now when there is none; None while one that failed is being given a
+        minute's rest."""
+        if self._failed_until.get(key, 0.0) > _now():
             return None
         job = self._lookups.get(key)
         if job is None:
             job = self._hass.async_create_background_task(self._search(name, key), f"kestrel species description {key}")
             self._lookups[key] = job
             job.add_done_callback(lambda _: self._lookups.pop(key, None))
-        try:
-            return await asyncio.wait_for(asyncio.shield(job), ASK_WAIT_S)
-        except TimeoutError:
-            return None
+        return job
 
     @staticmethod
     def _fresh(entry: Entry, now: float) -> bool:

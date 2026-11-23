@@ -39,8 +39,9 @@ export function clipNameFor(scientificName, confidence, at, timeZone = BIRDNET_T
  *   occurrence  a number 0-1 or null: null leaves the field out, as BirdNET-Go does when it is 0
  *   detectionId BirdNET-Go's number for the detection (it sometimes announces 0 with a real clip name); undefined leaves the field out
  *   clipName    undefined makes the usual name; null leaves the field out
+ *   unlikely    true adds BirdNET-Go's `unlikely` tag (every hit looked like not a real call of the species); false leaves the field out, as BirdNET-Go does
  */
-export function birdnetMessage({ commonName, scientificName, confidence, at, source, model = "v3", style = "nested", occurrence = OCCURRENCE.common, detectionId, clipName, timeZone = BIRDNET_TIME_ZONE }) {
+export function birdnetMessage({ commonName, scientificName, confidence, at, source, model = "v3", style = "nested", occurrence = OCCURRENCE.common, detectionId, clipName, unlikely = false, timeZone = BIRDNET_TIME_ZONE }) {
   const { date, time } = wallClock(at, timeZone);
   const message = {
     CommonName: commonName,
@@ -61,6 +62,7 @@ export function birdnetMessage({ commonName, scientificName, confidence, at, sou
     else message.Model = { ...modelInfo.nested };
   }
   if (occurrence !== null && occurrence !== undefined) message.occurrence = occurrence;
+  if (unlikely) message.unlikely = true;
   return message;
 }
 

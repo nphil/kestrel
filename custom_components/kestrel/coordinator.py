@@ -49,6 +49,9 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._generation = 0
         self.announced = AnnouncedVisits(hass, entry.entry_id)
         self._announcements_ready = False
+        # True from the first failed attempt of an outage until the next good answer: the connection problem is
+        # logged once (a warning) when it starts, and once more (info) when it is over, not on every retry.
+        self._outage_logged = False
         self._camera_data: dict[str, dict[str, Any]] = {}
         self._camera_callbacks: set[CameraCallback] = set()
         self._poll_task: asyncio.Task[None] | None = None
@@ -205,6 +208,7 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 except (TypeError, ValueError) as err:
                     raise KestrelApiError("Kestrel returned an invalid event sequence") from err
                 was_connected = self.connected
+                self._note_connection_restored()
 
                 if response.get("resync"):
                     cameras = await self.client.async_get_cameras()
@@ -240,16 +244,34 @@ class KestrelCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self.connected:
                     self.connected = False
                     self._publish([])
-                _LOGGER.warning("Kestrel event connection failed: %s", err)
+                self._note_connection_failed(err)
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 30)
-            except Exception:  # Keep the diagnostic entity usable for unexpected plugin shapes.
+            except Exception as err:  # Keep the diagnostic entity usable for unexpected plugin shapes.
                 if self.connected:
                     self.connected = False
                     self._publish([])
-                _LOGGER.exception("Unexpected Kestrel event polling error")
+                self._note_connection_failed(err, unexpected=True)
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 30)
+
+    def _note_connection_failed(self, err: Exception, *, unexpected: bool = False) -> None:
+        """Log a failed attempt: loudly the first time in an outage, quietly while the retries go on."""
+        if self._outage_logged:
+            _LOGGER.debug("Kestrel event connection still down: %s", err, exc_info=unexpected)
+            return
+        self._outage_logged = True
+        if unexpected:
+            _LOGGER.error(
+                "Unexpected Kestrel event polling error (retrying quietly until it is back)", exc_info=err
+            )
+        else:
+            _LOGGER.warning("Kestrel event connection lost: %s (retrying quietly until it is back)", err)
+
+    def _note_connection_restored(self) -> None:
+        if self._outage_logged:
+            self._outage_logged = False
+            _LOGGER.info("Kestrel event connection restored")
 
     @callback
     def _publish(self, events: list[dict[str, Any]], *, resync: bool = False) -> None:

@@ -6,7 +6,7 @@
 //       Ctrl-C stops it and deletes its temp folder.
 //   ... bench.mjs search <letters>                      find a species (works without a running bench)
 //   ... bench.mjs hear <species> [--model v3|perch|disagree|v24|none] [--confidence 0.9] [--occurrence common|uncommon|rare|unknown]
-//                                [--camera 88|103|104|<name>] [--other <species>] [--style nested|flat]
+//                                [--camera 88|103|104|<name>] [--other <species>] [--style nested|flat] [--unlikely]
 //   ... bench.mjs see <species> [--camera 103] [--confidence 0.9] [--label-score 0.9|none] [--no-second]
 //   ... bench.mjs again | drop | reset | state          (these talk to a running bench: --url http://127.0.0.1:8770)
 // Add --json to any command for the raw answer.
@@ -23,7 +23,7 @@ function parse(argv) {
     const item = argv[at];
     if (!item.startsWith("--")) { positional.push(item); continue; }
     const [name, inline] = item.slice(2).split("=");
-    const bare = ["json", "no-build", "no-second"].includes(name);
+    const bare = ["json", "no-build", "no-second", "unlikely"].includes(name);
     flags[name] = bare ? true : inline ?? argv[++at];
   }
   return { positional, flags };
@@ -65,7 +65,7 @@ try {
   } else if (command === "hear" || command === "see") {
     if (!query) throw new Error(`Which animal? Example: bench.mjs ${command} cardinal`);
     const body = command === "hear"
-      ? { species: query, model: flags.model, confidence: number(flags.confidence), occurrence: flags.occurrence, camera: flags.camera, other: flags.other, style: flags.style }
+      ? { species: query, model: flags.model, confidence: number(flags.confidence), occurrence: flags.occurrence, camera: flags.camera, other: flags.other, style: flags.style, unlikely: flags.unlikely === true }
       : { species: query, camera: flags.camera, confidence: number(flags.confidence), labelScore: flags["label-score"] === "none" ? null : number(flags["label-score"]), second: flags["no-second"] ? false : undefined };
     const result = await remote(command, flags, body);
     print(flags.json ? result : result.text, flags.json);

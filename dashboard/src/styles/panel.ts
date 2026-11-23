@@ -111,7 +111,7 @@ export const PANEL_CSS = [BASE_CSS, SURFACE_CSS, HEARD_HERO_CSS, css`
   .card-head h3 { margin-bottom: var(--lu-space-1); font-size: var(--lu-type-body); font-weight: 620; }
   .card-head p { font-size: var(--lu-type-label); }
   .review-thumb { width: 56px; --lu-image-radius: var(--lu-radius-control); }
-  .review-why { margin: calc(-1 * var(--lu-space-2)) 0 var(--lu-space-2); padding-inline: calc(var(--lu-space-3) * 2 + 56px) var(--lu-space-3); color: var(--lu-ink-2); font-size: var(--lu-type-label); line-height: 1.35; }
+  .review-why { display: grid; justify-items: start; gap: var(--lu-space-1); margin: calc(-1 * var(--lu-space-2)) 0 var(--lu-space-2); padding-inline: calc(var(--lu-space-3) * 2 + 56px) var(--lu-space-3); color: var(--lu-ink-2); font-size: var(--lu-type-label); line-height: 1.35; }
   .simple-list { display: grid; margin: 0; padding: 0; list-style: none; }
   .simple-list li { display: flex; min-height: var(--lu-target); align-items: center; justify-content: space-between; gap: var(--lu-space-3); border-bottom: 1px solid var(--lu-edge); color: var(--lu-ink-2); font-size: var(--lu-type-label); }
   .simple-list li:last-child { border-bottom: 0; }

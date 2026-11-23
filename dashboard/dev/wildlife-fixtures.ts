@@ -171,12 +171,20 @@ const WEATHER = [
   { temp: 7, unit: "°C", conditions: "Windy", icon: "mdi:weather-windy" },
 ];
 
-/** `kestrel/recordings`: by the number a visit id ends in, every fifth has no weather, every sixth no spectrogram yet, and one in six a spectrogram BirdNET-Go cannot draw (the media route answers 204). */
-export function recordingsAnswer(ids: unknown, media: (kind: string, id: string) => string): { items: Record<string, { weather: unknown; spectrogram: string | null }> } {
+/** With `spectrogram=trouble` (dev/harness.ts) the pictures go wrong in turn, by the number a visit id ends in, modulo six: 0 is not ready the first time, 1 fails, 2 is slow to draw,
+ * 4 is never drawn. The word starts the picture's id, which tells the media route what to do (dev/serve.mjs); an empty one is an ordinary picture. The first four recordings with
+ * a picture hold one of each, so a short screen shows them all at once (a picture is asked for again only while it is on screen). */
+const TROUBLE = ["flaky", "err", "slow", "", "blank", ""];
+
+/** `kestrel/recordings`: by the number a visit id ends in, every fifth has no weather, every sixth no spectrogram yet, and one in six a spectrogram BirdNET-Go cannot draw (the media route answers 204).
+ * With `trouble` every recording has a picture, but they go wrong in turn: see TROUBLE. */
+export function recordingsAnswer(ids: unknown, media: (kind: string, id: string) => string, trouble = false): { items: Record<string, { weather: unknown; spectrogram: string | null }> } {
   const wanted = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string").slice(0, 20) : [];
   const entries = wanted.map((id) => {
     const n = Number(/(\d+)$/.exec(id)?.[1] ?? 0);
-    return [id, { weather: n % 5 === 4 ? null : WEATHER[n % WEATHER.length], spectrogram: n % 6 === 2 ? null : media("birdnet_spectrogram", n % 6 === 5 ? `blank-${id}` : id) }] as const;
+    const word = trouble ? TROUBLE[n % 6] : n % 6 === 5 ? "blank" : "";
+    const picture = !trouble && n % 6 === 2 ? null : media("birdnet_spectrogram", word ? `${word}-${id}` : id);
+    return [id, { weather: n % 5 === 4 ? null : WEATHER[n % WEATHER.length], spectrogram: picture }] as const;
   });
   return { items: Object.fromEntries(entries) };
 }

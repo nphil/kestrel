@@ -20,7 +20,7 @@ export const describeSpecies = (item) => ({ scientific: item.scientific, heardAs
 
 /** One action of the API: the sandbox call it makes, and what it is told in the body. */
 const ACTIONS = {
-  hear: (sandbox, body) => sandbox.hear({ species: body.species, model: body.model, confidence: body.confidence, occurrence: body.occurrence, camera: body.camera, style: body.style, other: body.other, detectionId: body.detectionId }),
+  hear: (sandbox, body) => sandbox.hear({ species: body.species, model: body.model, confidence: body.confidence, occurrence: body.occurrence, camera: body.camera, style: body.style, other: body.other, detectionId: body.detectionId, unlikely: body.unlikely === true }),
   see: (sandbox, body) => sandbox.see({ species: body.species, camera: body.camera, confidence: body.confidence, labelScore: body.labelScore, second: body.second }),
   again: (sandbox) => sandbox.again(),
   drop: (sandbox) => sandbox.drop(),

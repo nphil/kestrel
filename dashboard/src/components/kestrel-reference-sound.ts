@@ -4,14 +4,15 @@ import { keyed } from "lit/directives/keyed.js";
 import { api, referenceSounds } from "../api.ts";
 import type { HomeAssistant, ReferenceSounds } from "../types.ts";
 import { REFERENCE, referenceCredit, withArticle } from "../vocab.ts";
+import { Lru } from "../lru.ts";
 
 type Phase = "idle" | "loading" | "ready" | "none" | "unavailable";
 
 /** Answers seen this session, so reopening a species sheet shows its player at once instead of asking again. An answer is kept for 30 minutes
  * after it was last on screen, and never for more than 6 hours after the server gave it: its signed links last 12 hours (the panel keeps links
  * for 6, see urls.ts). Only answers that can be trusted again are kept: `ready` and `none`, never `unavailable`. */
-const CACHE = new Map<string, { answeredAt: number; seenAt: number; sounds: ReferenceSounds }>();
 const CACHE_MAX = 24;
+const CACHE = new Lru<string, { answeredAt: number; seenAt: number; sounds: ReferenceSounds }>(CACHE_MAX);
 const KEEP_MS = 30 * 60_000;
 const LINKS_MS = 6 * 3_600_000;
 
@@ -26,9 +27,7 @@ export function forgetReferenceCache(): void {
 
 function remember(name: string, sounds: ReferenceSounds): void {
   const now = Date.now();
-  CACHE.delete(name);
   CACHE.set(name, { answeredAt: now, seenAt: now, sounds });
-  while (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value as string);
 }
 
 function kept(name: string): ReferenceSounds | null {

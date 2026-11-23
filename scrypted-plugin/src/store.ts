@@ -14,7 +14,8 @@ export type ClipSource = 'events' | 'nvr';
 // How sure Kestrel is about a heard call (heard.ts): Likely may be announced and counts toward the species list,
 // Possible is kept quietly (stored and listed, not counted), Check goes to the review queue.
 export type Tier = 'likely' | 'possible' | 'check';
-export type TierWhy = 'strong' | 'repeated' | 'models_disagree' | 'second_opinion_only' | 'weak' | 'rare_here' | 'new_here';
+// `models_agree`: both BirdNET-Go models named this species. `birdnet_unlikely`: BirdNET-Go itself tagged the call as probably not a real call.
+export type TierWhy = 'strong' | 'repeated' | 'models_agree' | 'models_disagree' | 'second_opinion_only' | 'weak' | 'rare_here' | 'new_here' | 'birdnet_unlikely';
 // What one model said about a heard visit: `named` named the visit's species, `agree` said the same species,
 // `other` named a different one (the models disagree).
 export interface ModelCall { model: string; label: string; species: string; score: number | null; role: 'named' | 'agree' | 'other' }
@@ -49,6 +50,9 @@ export interface Visit {
     commonness?: number | null;
     // Other calls of the same species on the same microphone within five minutes of the first one.
     repeats?: number;
+    // BirdNET-Go's own verdict that no hit of this call looked like a real call of the species (its MQTT `unlikely` flag, kept the way BirdNET-Go
+    // merges it: true only while every call folded into the visit was tagged). Such a visit is never Likely (heard.ts).
+    unlikely?: boolean;
     models?: ModelCall[];
     // Seen visits: the wildlife classifier's confidence in the label (0-1); null/absent when unknown.
     labelScore?: number | null;
@@ -147,6 +151,8 @@ export interface HeardCallInput {
     modelLabel: string;
     detectionId: number | null;
     clip: string | null;
+    // BirdNET-Go's `unlikely` tag on this detection (see Visit.unlikely).
+    unlikely: boolean;
 }
 export interface HeardCallRow extends HeardCallInput { id: number; visitId: string | null }
 
@@ -203,6 +209,7 @@ interface RawHeardCall {
     model_label: string;
     detection_id: number | null;
     clip: string | null;
+    unlikely: number | null;
     visit_id: string | null;
 }
 
@@ -514,6 +521,9 @@ export class KestrelStore {
         // and when that was tried (`clip_aligned_at`, NULL = not yet: the clip is looked at once, and again only if it is replaced).
         if (!visitColumns.has('clip_offset_ms')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_offset_ms INTEGER');
         if (!visitColumns.has('clip_aligned_at')) this.db.exec('ALTER TABLE visits ADD COLUMN clip_aligned_at INTEGER');
+        // One-time migration: BirdNET-Go's `unlikely` tag on each heard call (0 = not tagged, which is also what every older call was).
+        const heardCallColumns = new Set((this.db.prepare('PRAGMA table_info(heard_calls)').all() as { name: string }[]).map(column => column.name));
+        if (!heardCallColumns.has('unlikely')) this.db.exec('ALTER TABLE heard_calls ADD COLUMN unlikely INTEGER NOT NULL DEFAULT 0');
         this.recordDetectorCheckStatement = this.db.prepare(`INSERT INTO camera_daily_stats(day,camera_id,checks,empty_checks) VALUES(?,?,1,?)
             ON CONFLICT(day,camera_id) DO UPDATE SET checks=checks+1,empty_checks=empty_checks+excluded.empty_checks`);
         this.recordBirdnetIgnoredStatement = this.db.prepare(`INSERT INTO birdnet_daily_stats(day,ignored) VALUES(?,1)
@@ -847,9 +857,9 @@ export class KestrelStore {
     recordHeardCall(call: HeardCallInput): number | undefined {
         if (this.db.prepare('SELECT 1 FROM heard_calls WHERE camera_id=? AND species=? AND model=? AND at=? LIMIT 1').get(call.cameraId, call.species, call.model, call.at))
             return undefined;
-        const result = this.db.prepare(`INSERT INTO heard_calls(camera_id,at,received_at,species,scientific,grp,score,occurrence,model,model_rank,model_label,detection_id,clip)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(call.cameraId, call.at, call.receivedAt, call.species, call.scientific, call.grp, call.score,
-            call.occurrence, call.model, call.modelRank, call.modelLabel, call.detectionId, call.clip);
+        const result = this.db.prepare(`INSERT INTO heard_calls(camera_id,at,received_at,species,scientific,grp,score,occurrence,model,model_rank,model_label,detection_id,clip,unlikely)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(call.cameraId, call.at, call.receivedAt, call.species, call.scientific, call.grp, call.score,
+            call.occurrence, call.model, call.modelRank, call.modelLabel, call.detectionId, call.clip, call.unlikely ? 1 : 0);
         return Number(result.lastInsertRowid);
     }
 
@@ -857,7 +867,7 @@ export class KestrelStore {
         return {
             id: Number(row.id), cameraId: row.camera_id, at: row.at, receivedAt: row.received_at, species: row.species, scientific: row.scientific,
             grp: row.grp, score: row.score, occurrence: row.occurrence, model: row.model, modelRank: row.model_rank, modelLabel: row.model_label,
-            detectionId: row.detection_id, clip: row.clip, visitId: row.visit_id,
+            detectionId: row.detection_id, clip: row.clip, unlikely: !!row.unlikely, visitId: row.visit_id,
         };
     }
 

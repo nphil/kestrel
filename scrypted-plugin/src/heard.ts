@@ -138,6 +138,8 @@ export interface BirdnetReading {
     model: ModelInfo;
     detectionId: number | null;
     clip: string | null;
+    // BirdNET-Go's own tag: no hit of this detection looked like a real call of the species (its MQTT `unlikely`, left out when false).
+    unlikely: boolean;
 }
 
 // Reads a BirdNET-Go detection. Real shape is BirdNET-Go's MQTTEventDTO (internal/mqtt/dto.go): flat, mostly PascalCase, Date+Time as
@@ -176,6 +178,7 @@ export function readBirdnetMessage(message: Record<string, unknown>, classOf: (s
         // BirdNET-Go's own reference to its detection and clip: Kestrel never fetches or stores the audio itself.
         detectionId: asNumber(message.detectionId ?? message.DetectionID ?? message.detection_id) ?? null,
         clip: typeof clipValue === 'string' && clipValue.trim() ? clipValue.trim() : null,
+        unlikely: message.unlikely === true || message.Unlikely === true,
     };
 }
 
@@ -184,6 +187,7 @@ export function heardCallOf(reading: BirdnetReading, grp: VisitGroup, cameraId: 
     return {
         cameraId, at: reading.at, receivedAt, species: reading.species, scientific: reading.scientific, grp, score: reading.score, occurrence: reading.occurrence,
         model: reading.model.key, modelRank: reading.model.rank, modelLabel: reading.model.label, detectionId: reading.detectionId, clip: reading.clip,
+        unlikely: reading.unlikely,
     };
 }
 
@@ -205,6 +209,10 @@ export interface TierEvidence {
     disagrees: boolean;
     // Nothing that counts has ever recorded this species at home.
     newHere: boolean;
+    // Both BirdNET-Go models (not an unrated source) named this species for the call.
+    agreed: boolean;
+    // BirdNET-Go itself tagged the call as probably not a real one.
+    unlikely: boolean;
 }
 
 export interface TierDecision {
@@ -214,20 +222,27 @@ export interface TierDecision {
 
 // Likely / Possible / Check, in plain rules:
 //  - the models disagree                           -> Check
+//  - BirdNET-Go tagged the call "unlikely"          -> Check, never Likely (it judged the sound itself, whatever the scores say)
 //  - only the second opinion heard it               -> Possible, or Check when the bird would be new or rare here
-//  - a clear call (80%+), or a good one (60%+) heard again, of a bird that is not rare here
-//    (a rare bird has to be heard three times)      -> Likely
+//  - a clear call (80%+), or a good one (60%+) that was heard again or that both models named, of a bird that is not
+//    rare here (a rare bird has to be heard three times; the models agreeing does not make it less rare) -> Likely
 //  - anything else                                  -> Check when the bird would be new or rare here, otherwise Possible
 export function decideTier(evidence: TierEvidence): TierDecision {
     const score = evidence.score ?? 0;
     const heardAgain = evidence.repeats >= 1;
     const clear = score >= SCORE_STRONG;
-    const strong = clear || (score >= SCORE_GOOD && heardAgain);
-    if (evidence.disagrees) return { tier: 'check', why: ['models_disagree'] };
+    const strong = clear || (score >= SCORE_GOOD && (heardAgain || evidence.agreed));
+    if (evidence.disagrees) return { tier: 'check', why: ['models_disagree', ...(evidence.unlikely ? ['birdnet_unlikely' as const] : [])] };
+    if (evidence.unlikely) return { tier: 'check', why: ['birdnet_unlikely'] };
     const worthALook = evidence.newHere || evidence.rare;
     const context: TierWhy[] = [...(evidence.rare ? ['rare_here' as const] : []), ...(evidence.newHere ? ['new_here' as const] : [])];
     if (!evidence.corroborated) return { tier: worthALook ? 'check' : 'possible', why: ['second_opinion_only', ...context] };
-    if (strong && !(evidence.rare && evidence.repeats < 2)) return { tier: 'likely', why: [clear ? 'strong' : 'repeated', ...(clear && heardAgain ? ['repeated' as const] : [])] };
+    if (strong && !(evidence.rare && evidence.repeats < 2)) {
+        const why: TierWhy[] = [clear ? 'strong' : heardAgain ? 'repeated' : 'models_agree'];
+        if (clear && heardAgain) why.push('repeated');
+        if (evidence.agreed && !why.includes('models_agree')) why.push('models_agree');
+        return { tier: 'likely', why };
+    }
     if (worthALook) return { tier: 'check', why: [evidence.rare ? 'rare_here' : 'weak', ...(evidence.rare && !strong ? ['weak' as const] : []), ...(evidence.newHere ? ['new_here' as const] : [])] };
     return { tier: 'possible', why: ['weak'] };
 }
@@ -236,6 +251,20 @@ export function decideTier(evidence: TierEvidence): TierDecision {
 export function isDisagreement(named: Pick<ModelCall, 'species' | 'score'>, other: Pick<ModelCall, 'species' | 'score'>): boolean {
     return named.species !== other.species && Math.max(named.score ?? 0, other.score ?? 0) >= DISAGREE_SCORE;
 }
+
+// One entry of `modelContributions` on BirdNET-Go's detection record: a model that heard the detection's species in its clip. The MQTT
+// message only names the model whose score won, so the Home Assistant integration reads the record (the plugin cannot reach BirdNET-Go's
+// API) and passes the entries on (`recordContributions`).
+export interface ModelContributionInput {
+    modelName?: unknown;
+    modelVersion?: unknown;
+    hitCount?: unknown;
+    maxConfidence?: unknown;
+}
+
+// 'unknown': no such heard visit. 'stale': the visit is no longer about that detection, or a person has decided it. 'unchanged': nothing
+// new in it. 'updated': the models (and perhaps the tier) of the visit changed.
+export type ContributionResult = 'unknown' | 'stale' | 'unchanged' | 'updated';
 
 export type HeardStore = Pick<KestrelStore,
     'recordHeardCall' | 'getHeardCall' | 'heardCallsNear' | 'attachHeardCall' | 'primaryModelRank' | 'noteModelSeen' | 'countHeardCalls'
@@ -292,13 +321,15 @@ function evidenceFor(visit: Visit, models: readonly ModelCall[], primaryRank: nu
         rare: isRareHere(visit.occurrence, visit.commonness),
         disagrees: !!named && !!other && corroborated && isDisagreement(named, other),
         newHere,
+        agreed: new Set(ofSpecies.map(item => item.model).filter(model => model !== 'other')).size >= 2,
+        unlikely: visit.unlikely === true,
     };
 }
 
 // What the dashboards would notice: when it changes the visit is announced again.
 function snapshot(visit: Visit): { signature: string; likely: boolean } {
     const models = (visit.models ?? []).map(item => [item.model, item.species, item.role, item.score === null ? null : Math.round(item.score * 100)]);
-    return { signature: JSON.stringify([visit.tier, visit.tierWhy, visit.review, visit.firstEver, visit.species, models]), likely: visit.tier === 'likely' };
+    return { signature: JSON.stringify([visit.tier, visit.tierWhy, visit.review, visit.firstEver, visit.species, visit.unlikely === true, models]), likely: visit.tier === 'likely' };
 }
 
 export class HeardIngest {
@@ -324,6 +355,31 @@ export class HeardIngest {
         if (id === undefined) return;
         const secondOpinion = call.modelRank < store.primaryModelRank(call.receivedAt - PRIMARY_MODEL_MEMORY_MS);
         this.pending.push({ id, dueAt: call.receivedAt + (secondOpinion ? SECOND_OPINION_SETTLE_MS : SETTLE_MS) });
+    }
+
+    // What BirdNET-Go's record of a detection says about the models that heard it: each one that heard the visit's species is
+    // added as saying so (with its own best score), so a bird the winning model named and the other model heard too counts as
+    // heard by both. Models that did not hear it, and unrated sources, add nothing. Saying it twice changes nothing.
+    recordContributions(visitId: string, detectionId: number, contributions: readonly ModelContributionInput[], now: number): ContributionResult {
+        const { store } = this.ports;
+        const visit = store.getVisit(visitId);
+        if (!visit || visit.kind !== 'heard') return 'unknown';
+        if (visit.audio?.birdnetDetectionId !== detectionId || visit.status !== 'auto' || !visit.tier) return 'stale';
+        const before = snapshot(visit);
+        const models = visit.models ?? [];
+        for (const item of contributions) {
+            const hits = asNumber(item.hitCount);
+            if (hits !== undefined && hits <= 0) continue;
+            const model = modelOf({ modelName: item.modelName, modelVersion: item.modelVersion });
+            if (model.key === 'other') continue;
+            const best = asNumber(item.maxConfidence);
+            recordModelCall(models, { model: model.key, label: model.label, species: visit.species, score: best === undefined ? null : best > 1 ? best / 100 : best, role: 'agree' });
+        }
+        visit.models = models;
+        this.retier(visit, store.primaryModelRank(now - PRIMARY_MODEL_MEMORY_MS));
+        if (snapshot(visit).signature === before.signature) return 'unchanged';
+        this.finish(visit, before);
+        return 'updated';
     }
 
     // Turns every call whose wait is over into a visit (or into evidence on one). The main model's calls go first, and a
@@ -399,6 +455,8 @@ export class HeardIngest {
             .filter(item => item.id !== call.id && !item.visitId && item.model !== call.model);
         const models: ModelCall[] = [asModelCall(call, 'named')];
         for (const item of companions) recordModelCall(models, asModelCall(item, item.species === call.species ? 'agree' : 'other'));
+        // BirdNET-Go keeps the tag only while every hit of a detection carries it: a same-species call of the other model that is not tagged clears it.
+        const unlikely = call.unlikely && companions.every(item => item.species !== call.species || item.unlikely);
         const id = this.ports.newId();
         const newHere = !store.hasSpecies(call.species);
         const visit: Visit = {
@@ -408,6 +466,7 @@ export class HeardIngest {
             suggestions: [], firstEver: false, muted: this.ports.isMuted(call.species), notify: false,
             occurrence: call.occurrence, commonness: this.ports.commonness?.(call.scientific, call.at) ?? null,
             repeats: store.countHeardCalls(call.cameraId, call.species, call.at - REPEAT_WINDOW_MS, call.at, call.id), models,
+            ...(unlikely ? { unlikely: true } : {}),
         };
         const decision = decideTier(evidenceFor(visit, models, primaryRank, newHere));
         visit.tier = decision.tier;
@@ -431,6 +490,8 @@ export class HeardIngest {
         const before = snapshot(visit);
         const models = visit.models ?? [];
         recordModelCall(models, asModelCall(call, 'agree'));
+        // The tag holds only while every call folded into the visit carries it, the way BirdNET-Go merges its own hits.
+        if (visit.unlikely && !call.unlikely) visit.unlikely = false;
         visit.models = models;
         if (call.at > visit.startedAt && call.at - visit.startedAt <= REPEAT_WINDOW_MS) visit.repeats = (visit.repeats ?? 0) + 1;
         this.retier(visit, primaryRank);
@@ -461,6 +522,7 @@ export class HeardIngest {
         visit.species = call.species;
         visit.grp = call.grp;
         visit.score = call.score;
+        visit.unlikely = call.unlikely || undefined;
         visit.audio = call.detectionId !== null || call.clip !== null ? { birdnetDetectionId: call.detectionId, birdnetClip: call.clip } : null;
         visit.occurrence = call.occurrence;
         visit.commonness = this.ports.commonness?.(call.scientific, call.at) ?? null;
@@ -474,10 +536,10 @@ export class HeardIngest {
     }
 
     // A fresh tier from the evidence a visit has now. Evidence only adds up: a Likely visit stays Likely unless the models
-    // now disagree, so a quiet minute never takes a tier away.
+    // now disagree (or BirdNET-Go tags it unlikely, which it can never be and stay Likely), so a quiet minute never takes a tier away.
     private retier(visit: Visit, primaryRank: number): void {
         const evidence = evidenceFor(visit, visit.models ?? [], primaryRank, !this.ports.store.hasSpecies(visit.species));
-        if (visit.tier === 'likely' && !evidence.disagrees) return;
+        if (visit.tier === 'likely' && !evidence.disagrees && !evidence.unlikely) return;
         const previous = visit.tier;
         const decision = decideTier(evidence);
         visit.tier = decision.tier;

@@ -2,7 +2,7 @@
 // Node runs the TypeScript files as they are:  cd dashboard && npm test
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { tierWhyLine, tierWord, visitConfidence } from "../src/vocab.ts";
+import { modelsAgreed, tierWhyLine, tierWord, visitConfidence } from "../src/vocab.ts";
 
 const v3 = (species, score = 0.6) => ({ model: "birdnet_v3", label: "BirdNET v3.0", species, score, role: "named" });
 const perch = (species, role, score = 0.7) => ({ model: "perch_v2", label: "Perch v2", species, score, role });
@@ -75,6 +75,32 @@ test("no reasons, odd reasons and odd data give an empty line", () => {
 
 test("the reason is not shown once a person has decided", () => {
   for (const status of ["confirmed", "corrected", "learned", "not_animal", "unknown"]) assert.equal(tierWhyLine(visit({ status, tierWhy: ["strong"] })), "", status);
+});
+
+test("BirdNET-Go's own doubt has its own plain sentence, after a disagreement when there is one, and is not shown once a person decided", () => {
+  assert.equal(tierWhyLine(visit({ tierWhy: ["birdnet_unlikely"] })), "BirdNET-Go thinks this may not be a real call.");
+  assert.equal(tierWhyLine(visit({ tierWhy: ["models_disagree", "birdnet_unlikely"], models: [v3("Blue Jay"), perch("American Crow", "other")] })), "The two models disagree: v3.0 says Blue Jay, Perch says American Crow. BirdNET-Go thinks this may not be a real call.");
+  for (const status of ["confirmed", "corrected", "learned", "not_animal", "unknown"]) assert.equal(tierWhyLine(visit({ status, tierWhy: ["birdnet_unlikely"] })), "", status);
+});
+
+test("two models agreeing is a chip, not a sentence: 'models_agree' adds nothing to the line", () => {
+  assert.equal(tierWhyLine(visit({ tierWhy: ["models_agree"] })), "");
+  assert.equal(tierWhyLine(visit({ tierWhy: ["strong", "models_agree"] })), "A clear call.");
+});
+
+test("'Both models agreed' needs two different models that named this visit's species", () => {
+  const heard = (models, over = {}) => ({ kind: "heard", species: "Blue Jay", models, ...over });
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), perch("Blue Jay", "agree")])), true);
+  assert.equal(modelsAgreed(heard([perch("Blue Jay", "named"), { model: "birdnet_v3", label: "BirdNET v3.0", species: "blue jay", score: 0.8, role: "agree" }])), true, "the same bird in any letter case");
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), perch("American Crow", "other")])), false, "one model named another bird");
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), v3("Blue Jay", 0.7)])), false, "one model twice is not two models");
+  assert.equal(modelsAgreed(heard([v3("Blue Jay")])), false);
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), { model: "other", label: "Unknown", species: "Blue Jay", score: null, role: "agree" }])), false, "a model nobody can name is not a second opinion");
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), perch("Blue Jay", "agree")], { kind: "seen" })), false, "only heard visits");
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), perch("Blue Jay", "agree")], { species: "American Crow" })), false, "a corrected visit counts what the models said about the species it has now");
+  assert.equal(modelsAgreed(heard([v3("Blue Jay"), perch("Blue Jay", "agree")], { species: "" })), false);
+  for (const models of [undefined, null, "no", [], [null, 3, {}], [{ role: "agree" }, { role: "named" }]]) assert.equal(modelsAgreed(heard(models)), false, JSON.stringify(models));
+  assert.equal(modelsAgreed({}), false);
 });
 
 test("a camera visit shows the classifier's confidence, not the box score", () => {

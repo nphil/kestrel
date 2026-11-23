@@ -44,7 +44,7 @@ BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES = 2
 # Sidebar panel (replaces the Lovelace dashboard to avoid its cold-load race).
 PANEL_URL_PATH = "kestrel"
 PANEL_COMPONENT_NAME = "kestrel-panel"
-PANEL_SIDEBAR_TITLE = "Cameras"
+PANEL_SIDEBAR_TITLE = "Kestrel"
 PANEL_SIDEBAR_ICON = "mdi:cctv"
 
 # Preserve stable, readable entity IDs for the original wildlife cameras. New

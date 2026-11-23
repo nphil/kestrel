@@ -12,8 +12,9 @@
 //                                   a recording of your own at fixtures/local/<visit id>.mp4 comes before all of those: see "Real data" in the README).
 //                                   `reference-info/<species slug>` is JSON, not a file: who took a reference photo (see PHOTO_INFO: two credits, 204, 500).
 //                                   It cannot know the harness's signing epoch: a test's request interceptor does (dev/smoke/lib).
-//                                   `birdnet_spectrogram/<id>` is fixtures/spectrogram.png (514x257, like BirdNET-Go's) after a short wait, as it is drawn when asked;
-//                                   an id that starts with "blank-" is a recording BirdNET-Go could not draw: 204.
+//                                   `birdnet_spectrogram/<id>` is fixtures/spectrogram.png (514x257, like BirdNET-Go's) after a short wait, as it is drawn when asked.
+//                                   The first word of an id says what goes wrong with it: "blank-" is a recording BirdNET-Go could not draw (204 every time), "err-" a server in
+//                                   between that fails (504 every time), "flaky-" is not ready the first time (204) and drawn after that, "slow-" is drawn only after eight seconds.
 //   anything else without a file extension (/kestrel/live, /lovelace/0 ...)  dev/index.html, the single-page fallback.
 import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
@@ -26,6 +27,8 @@ const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
 const MEDIA_FILE = { audio: "call.mp3", "audio-original": "call.mp3", species_sound: "call.mp3", birdnet_spectrogram: "spectrogram.png" };
 /** How long BirdNET-Go takes to draw a spectrogram the first time it is asked for it (the real one needs about a second). */
 const SPECTROGRAM_DRAW_MS = 600;
+/** How long a `slow-` spectrogram takes: BirdNET-Go on slow storage needs many seconds (the real server gives up waiting after ten). */
+const SPECTROGRAM_SLOW_MS = 8_000;
 const ALLOWED_PARAMS = new Set(["authSig", "width", "height"]);
 /** The clips of the fixture visits that show a picture of another shape than the generic 640x360 one (see dev/harness.ts). */
 const CLIPS = new Map([["fixture-visit-4x3", "clip-4x3.mp4"], ["fixture-visit-3x4", "clip-3x4.mp4"]]);
@@ -71,6 +74,21 @@ function deny(response, status, message) {
   response.writeHead(status, { ...HEADERS, "Content-Type": "text/plain; charset=utf-8" }).end(message);
 }
 
+/** How many times each `flaky-` spectrogram has been asked for. */
+const flakyAsks = new Map();
+
+/** `birdnet_spectrogram/<id>`: the picture after the time BirdNET-Go needs to draw it, or what the first word of the id says goes wrong (see the top of this file). */
+function spectrogram(request, response, id) {
+  const trouble = /^(blank|err|flaky|slow)-/.exec(id)?.[1];
+  if (trouble === "blank") return response.writeHead(204, HEADERS).end();
+  if (trouble === "err") return deny(response, 504, "Gateway Timeout");
+  if (trouble === "flaky") {
+    flakyAsks.set(id, (flakyAsks.get(id) ?? 0) + 1);
+    if (flakyAsks.get(id) === 1) return response.writeHead(204, HEADERS).end();
+  }
+  setTimeout(() => { if (!response.destroyed) sendFile(request, response, join(devDir, "fixtures", MEDIA_FILE.birdnet_spectrogram)); }, trouble === "slow" ? SPECTROGRAM_SLOW_MS : SPECTROGRAM_DRAW_MS);
+}
+
 function handle(request, response, options) {
   const url = new URL(request.url ?? "/", "http://localhost");
   // A tool that serves its own pages next to the fixture page (tools/kestrel_bench) answers first: `true` means it did.
@@ -88,11 +106,7 @@ function handle(request, response, options) {
       if (typeof info === "number") return response.writeHead(info, HEADERS).end();
       return response.writeHead(200, { ...HEADERS, "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(info));
     }
-    if (media[1] === "birdnet_spectrogram") {
-      if (media[2].startsWith("blank-")) return response.writeHead(204, HEADERS).end();
-      setTimeout(() => sendFile(request, response, join(devDir, "fixtures", MEDIA_FILE.birdnet_spectrogram)), SPECTROGRAM_DRAW_MS);
-      return;
-    }
+    if (media[1] === "birdnet_spectrogram") return spectrogram(request, response, media[2]);
     return sendFile(request, response, media[1] === "clip" ? clipFile(media[2], options.localDir) : join(devDir, "fixtures", MEDIA_FILE[media[1]] ?? "placeholder.svg"));
   }
   if (path.startsWith("/api/")) return deny(response, 404, "not found");

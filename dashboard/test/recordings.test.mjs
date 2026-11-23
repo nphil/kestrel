@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { forgetExtras, knownExtras, loadExtras, readExtras, readWeather, weatherText } from "../src/recordings.ts";
+import { PICTURE_RETRY_MS, forgetExtras, knownExtras, loadExtras, pictureRetryDelay, readExtras, readWeather, weatherText } from "../src/recordings.ts";
 
 test("readWeather tidies a normal answer", () => {
   const weather = readWeather({ temp: 8.4, unit: "°C", conditions: "  Clear sky ", icon: "mdi:weather-night" });
@@ -91,4 +91,22 @@ test("forgetExtras empties the memory", async () => {
   assert.ok(knownExtras("k"));
   forgetExtras();
   assert.equal(knownExtras("k"), undefined);
+});
+
+test("a picture that is not ready is asked for again after two seconds, then after longer and longer pauses, then given up on", () => {
+  const pauses = [];
+  for (let retries = 0; pictureRetryDelay(retries) !== null; retries += 1) pauses.push(pictureRetryDelay(retries));
+  assert.deepEqual(pauses, [2_000, 15_000, 45_000, 120_000, 300_000]);
+  assert.equal(pictureRetryDelay(PICTURE_RETRY_MS.length), null);
+  assert.equal(pictureRetryDelay(50), null);
+});
+
+test("the pauses only grow, and a sheet left open stops asking within ten minutes", () => {
+  assert.deepEqual([...PICTURE_RETRY_MS], [...PICTURE_RETRY_MS].sort((a, b) => a - b));
+  assert.ok(PICTURE_RETRY_MS[0] <= 5_000, "the first retry comes quickly: BirdNET-Go is usually still drawing the picture when the server stops waiting");
+  assert.ok(PICTURE_RETRY_MS.reduce((total, pause) => total + pause, 0) < 10 * 60_000);
+});
+
+test("a count that makes no sense gives up instead of asking for ever", () => {
+  for (const nonsense of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(pictureRetryDelay(nonsense), null, String(nonsense));
 });

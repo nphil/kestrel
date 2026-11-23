@@ -150,6 +150,22 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    detections, so the sound stays for good; pressing it again lets the normal
    clean-up apply. Calls announced with detection number 0 (see above) have no
    BirdNET-Go detection of their own to lock, so they show no button.
+   **Both models agreed**: BirdNET-Go runs BirdNET v3.0 and Perch together and keeps which of them heard
+   each call. The Home Assistant integration reads that list for every new heard visit and tells the plugin
+   (it never changes BirdNET-Go). When two different models named the visit's species, the visit page and
+   the review list show a small *Both models agreed* chip and the plugin counts it as evidence toward
+   *Likely* (the 60 % floor and the rare-bird rule still apply, and two models naming different animals is
+   still a *Check*). BirdNET-Go's own *unlikely* tag is trusted too: such a call is never *Likely* and goes
+   to *Check* with the reason "BirdNET-Go thinks this may not be a real call." Agreement is a hint, not proof
+   (`audio-eval/results.md` measured it as no better than one model alone).
+   **Corrections reach BirdNET-Go**: when a Home Assistant administrator confirms a heard visit, picks another
+   species or marks it *Not an animal*, Kestrel also tells BirdNET-Go (reviewed *correct*, species changed,
+   or *false positive*). It waits 11 seconds so the 10-second *Undo* can still take it back. This is best
+   effort: if BirdNET-Go is slow or down, the correction in Kestrel stands, one warning is logged and the
+   attempt shows in the integration's diagnostics (`birdnet_reviews`; the models lookup above is
+   `birdnet_models`). Locked detections are never touched, and "also heard" is not sent. BirdNET-Go has no
+   way to clear a review, so an *Undo* after the change was sent puts the earlier answer back where there
+   was one and otherwise leaves BirdNET-Go's verdict as it is (the diagnostics say so).
 5. **Optional: reference sounds and photos** — nothing to set up: *Play reference* uses
    recordings from [iNaturalist](https://www.inaturalist.org). For clearer, quality-rated
    songs and calls, add a free [Xeno-canto](https://xeno-canto.org) API key (shown on
@@ -170,12 +186,18 @@ Details: [`audio-eval/results.md`](audio-eval/results.md).
    sentences of its Wikipedia article (the article of its scientific name, which BirdNET-Go or
    iNaturalist tells Kestrel), credited and linked, under the article's CC BY-SA 4.0 licence. They
    are kept 30 days (a week when there is no article) in `.storage/kestrel.species_descriptions`
-   and asked for when a sheet opens; a slow Wikipedia just leaves the sheet without them for now.
+   and asked for when a sheet opens: the sheet opens at once and its *About* text fills in when Wikipedia
+   answers; a slow or missing article just leaves it out.
    **Weather and spectrogram** on a recording need nothing to set up either, but need BirdNET-Go:
    a heard visit (or a sighting with its call linked) shows the weather when the bird called, in
    your Home Assistant's temperature unit, if BirdNET-Go has a weather source set up, and a
    spectrogram (a picture of the sound, drawn by BirdNET-Go from the saved recording). Kestrel
    keeps neither; it asks BirdNET-Go when a sheet opens and remembers the weather in memory.
+   When BirdNET-Go is slow, or has not drawn a picture yet, the recording shows a quiet
+   *Picture not ready* instead of a broken image and the panel asks again by itself while the
+   picture is on screen (after 2 seconds, then 15, 45, 120 and 300 seconds, about 8 minutes in all, then it
+   stops); Kestrel's own answer to a picture never takes longer than 10 seconds, and opening a
+   sighting's recordings asks the Scrypted plugin once, however many recordings it has.
 6. **Optional: notifications** — an automation on the `event.kestrel_*` entities;
    each event carries `species`, `visit_id`, `notify` and `first_ever`, and the visit
    page is `/kestrel/visit?v=<visit_id>`. An event fires once, when a visit is first
@@ -234,7 +256,7 @@ node --experimental-strip-types tools/kestrel_bench/bench.mjs serve      # then 
   test page. It rebuilds the test page first, so it shows your current dashboard code. Ctrl-C stops it and deletes its
   temp folder (under `$CODY_DATA_SCRATCH`, else the system temp folder).
 - **Heard.** Type a few letters of an animal and pick it. The bench sends a message shaped like BirdNET-Go's MQTT
-  message (BirdNET v3.0, Perch, old 2.4 or none; "the two disagree"; common, rare or unknown occurrence; a clip name)
+  message (BirdNET v3.0, Perch, old 2.4 or none; "the two disagree"; tagged "unlikely"; common, rare or unknown occurrence; a clip name)
   through the plugin's own reader. You see the tier Kestrel gives it (Likely, Possible, Check), repeats and first-ever
   flags. An insect call is dropped, as the real plugin does.
 - **Seen.** An animal walks across a camera, 12 detection events with a moving box (named after the first second,
@@ -243,7 +265,7 @@ node --experimental-strip-types tools/kestrel_bench/bench.mjs serve      # then 
 - **Again, Drop, Reset.** Again sends the same thing as a new moment (a bird heard again soon folds into its visit as a
   repeat). Drop takes back the newest visit. Reset wipes the sandbox.
 - **From a terminal** (a running bench is needed for everything but `search`):
-  `bench.mjs search card`, `bench.mjs hear "great horned owl" --model disagree`, `bench.mjs see coyote --camera 103`,
+  `bench.mjs search card`, `bench.mjs hear "great horned owl" --model disagree`, `bench.mjs hear "winter wren" --unlikely`, `bench.mjs see coyote --camera 103`,
   `bench.mjs again | drop | reset | state`; `--json` gives the raw answer.
 - **Species** come from `classifier/species/atlanta.json` (what a camera can name) merged with
   `tools/kestrel_bench/data/birdnet-go-labels.txt`, a snapshot of the BirdNET-Go add-on's range-filter list (refresh it

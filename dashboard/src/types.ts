@@ -62,7 +62,7 @@ export interface AudioInfo {
 
 /** How sure a heard visit is: a confident call, one kept quietly, one a person should look at. */
 export type Tier = "likely" | "possible" | "check";
-export type TierWhy = "strong" | "repeated" | "models_disagree" | "second_opinion_only" | "weak" | "rare_here" | "new_here";
+export type TierWhy = "strong" | "repeated" | "models_agree" | "models_disagree" | "second_opinion_only" | "weak" | "rare_here" | "new_here" | "birdnet_unlikely";
 /** One listening model's answer for a recording. `named` named the visit's species, `agree` said the same, `other` named a different species. */
 export interface ModelCall {
   model: string;
@@ -103,6 +103,8 @@ export interface Visit {
   repeats?: number;
   /** What each listening model said. */
   models?: ModelCall[];
+  /** BirdNET-Go's own "this may not be a real call" tag, kept while every call of the visit carries it. Such a visit is never Likely. */
+  unlikely?: boolean;
   /** Seen visits: the wildlife classifier's confidence (0..1) in the label, for the saved crop. Null or absent = unknown. */
   labelScore?: number | null;
   /** Seen visits, only on the answer for one visit and only while its clip is ready: what the detector drew around the animal while the clip was recorded. */
@@ -161,6 +163,8 @@ export interface Health {
   gpu: { usedMiB: number; totalMiB: number; util: number };
   cameras: Array<{ id: string | number; checksToday: number; emptyChecksToday: number; visitsToday: number }>;
   storage: { dbMB: number; mediaMB: number; budgetMB: number };
+  /** The camera clips Kestrel keeps for people. They live on the NAS, outside the working space that `storage` measures, and nothing deletes them by itself. */
+  clips?: { stored: { count: number; bytes: number } };
   birdnet: { online: boolean; lastHeardAt: string | number | null } | null;
   birdnetLink?: string | null;
   corrections: { total: number; sinceRetrain: number };

@@ -6,16 +6,16 @@ import { LitElement, html, nothing, type PropertyValues, type TemplateResult } f
 import { keyed } from "lit/directives/keyed.js";
 import { repeat } from "lit/directives/repeat.js";
 import { api, asVisit, cameraArray, cameraPicture, extractLabels, isNotFound, loadPhotoCredit, routePath, routeView, speciesArray, speciesFromLocation, speciesPhoto, speciesPicture, speciesRecord, speciesReferencePhoto, visitAudio, visitAudioOriginal, visitClip, visitIdFromLocation, visitPage, visitSnapshot } from "../api.ts";
-import { ago, clamp, dateTime, formatMiB, sentence, timestamp, when } from "../format.ts";
+import { ago, clamp, dateTime, formatBytes, formatMiB, sentence, timestamp, when } from "../format.ts";
 import { RETRY_MS, isSigned, signatureRejected, signedLinkExpired } from "../recovery.ts";
 import { PANEL_CSS } from "../styles/panel.ts";
 import type { AudioInfo, Camera, CameraDetection, Health, HomeAssistant, KestrelCardConfig, KestrelPush, PhotoCredit, Settings, Species, Visit, VisitSuggestion } from "../types.ts";
 import { heardHero } from "../ui/heard-hero.ts";
 import { photoCaption } from "../ui/photo-credit.ts";
 import { forgetStableUrls, keptLink, sameMedia } from "../urls.ts";
-import { clipFailure } from "../clips.ts";
+import { clipCount, clipFailure } from "../clips.ts";
 import { keepTrack } from "../detections.ts";
-import { GROUP_LABEL, KIND, asKind, couldAlsoBe, evidenceCount, evidenceWord, percentSure, recordingNotes, tierWhyLine, tierWord, visitConfidence } from "../vocab.ts";
+import { GROUP_LABEL, KIND, asKind, couldAlsoBe, evidenceCount, evidenceWord, modelsAgreed, percentSure, recordingNotes, tierWhyLine, tierWord, visitConfidence } from "../vocab.ts";
 import { PERIODS, PERIOD_LABEL, asPeriod, speciesKey, type SpeciesPeriod } from "../period.ts";
 import { emptyWildlife, filterCounts, inPeriod, lastActivity, matchesFilter, recentSighting, rememberFilter, rememberPeriod, rememberedFilter, rememberedPeriod, tileEvidence, type SpeciesFilter } from "../wildlife.ts";
 import "../ui/live-picture.ts";
@@ -1345,6 +1345,7 @@ export class KestrelCameras extends LitElement {
     const noisy = (health?.cameras ?? []).filter((camera) => camera.emptyChecksToday > 0).sort((a, b) => (b.emptyChecksToday / Math.max(1, b.checksToday)) - (a.emptyChecksToday / Math.max(1, a.checksToday))).slice(0, 5);
     const storage = health ? health.storage.dbMB + health.storage.mediaMB : 0;
     const storagePercent = health?.storage.budgetMB ? clamp((storage / health.storage.budgetMB) * 100, 0, 100) : 0;
+    const kept = health?.clips?.stored;
     const gpuPercent = health?.gpu.totalMiB ? clamp((health.gpu.usedMiB / health.gpu.totalMiB) * 100, 0, 100) : 0;
     return html`<section class="insights-view">
       <h2 class="sr-only">AI check-up</h2>
@@ -1352,15 +1353,15 @@ export class KestrelCameras extends LitElement {
       <section class="review-section sheet">
         <div class="card-head"><div><h3>Needs a look</h3><p class="muted">Visits that may need a correction.</p></div><kestrel-lu-chip kind=${this._review.length ? "info" : "neutral"} label=${`${this._review.length} to review`}></kestrel-lu-chip></div>
         ${this._review.length
-          ? this._review.slice(0, 12).map((visit) => { const why = tierWhyLine(visit); return html`<kestrel-lu-row interactive chevron .heading=${visit.species || "Unidentified animal"} .detail=${`${visit.camera.name} · ${ago(visit.startedAt)}`} @pointerdown=${() => this._warmVisit(visit.id)} @click=${() => this._openVisit(visit.id)}>
+          ? this._review.slice(0, 12).map((visit) => { const why = tierWhyLine(visit); const agreed = modelsAgreed(visit); return html`<kestrel-lu-row interactive chevron .heading=${visit.species || "Unidentified animal"} .detail=${`${visit.camera.name} · ${ago(visit.startedAt)}`} @pointerdown=${() => this._warmVisit(visit.id)} @click=${() => this._openVisit(visit.id)}>
               <kestrel-lu-image slot="leading" class="review-thumb" ratio="1" .src=${visitSnapshot(visit) ?? ""} alt=""></kestrel-lu-image>
-            </kestrel-lu-row>${why ? html`<p class="review-why">${why}</p>` : nothing}`; })
+            </kestrel-lu-row>${why || agreed ? html`<div class="review-why">${why ? html`<span>${why}</span>` : nothing}${agreed ? html`<kestrel-lu-chip label="Both models agreed"></kestrel-lu-chip>` : nothing}</div>` : nothing}`; })
           : html`<p class="empty-inline">Nothing needs a review right now.</p>`}
       </section>
       <kestrel-lu-grid kind="custom" .min=${240}>
-        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:brain"}></ha-icon><span>Wildlife detector</span></div><strong>${health?.detector.name ?? "Not available"}</strong><p>${health ? (health.detector.avgMs === null ? health.detector.provider : `${health.detector.provider} · ${health.detector.avgMs} ms average`) : "Waiting for health data"}</p><small>${health?.detector.checksToday ?? 0} checks today</small></article>
+        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:brain"}></ha-icon><span>Wildlife detector</span></div><strong>${health?.detector.name ?? "Not available"}</strong><p>${health ? (health.detector.avgMs === null ? health.detector.provider : `${health.detector.provider} · names an animal in about ${Math.round(health.detector.avgMs)} ms`) : "Waiting for health data"}</p><small>${health?.detector.checksToday ?? 0} checks today</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:expansion-card"}></ha-icon><span>GPU memory</span></div><strong>${health ? `${formatMiB(health.gpu.usedMiB)} / ${formatMiB(health.gpu.totalMiB)}` : "Not available"}</strong><div class="meter"><span style=${`width:${gpuPercent}%`}></span></div><small>${health?.gpu.util ?? 0}% GPU use</small></article>
-        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:database"}></ha-icon><span>Wildlife storage</span></div><strong>${health ? `${storage.toFixed(1)} / ${health.storage.budgetMB} MB` : "Not available"}</strong><div class="meter"><span style=${`width:${storagePercent}%`}></span></div><small>${health ? `${health.storage.dbMB.toFixed(1)} MB database · ${health.storage.mediaMB.toFixed(1)} MB photos and clips` : "Waiting for health data"}</small></article>
+        <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:database"}></ha-icon><span>Wildlife storage</span></div><strong>${health ? `${storage.toFixed(1)} / ${health.storage.budgetMB} MB` : "Not available"}</strong><div class="meter"><span style=${`width:${storagePercent}%`}></span></div><small>${health ? html`${health.storage.dbMB.toFixed(1)} MB database · ${health.storage.mediaMB.toFixed(1)} MB photos and sounds${kept?.count ? html`<br>Not counted here: ${clipCount(kept.count)} kept on the NAS (${formatBytes(kept.bytes)}).` : nothing}` : "Waiting for health data"}</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:check-decagram"}></ha-icon><span>Corrections</span></div><strong>${health?.corrections.sinceRetrain ?? 0}</strong><p>since the last model retrain</p><small>${health?.corrections.total ?? 0} all-time corrections</small></article>
         <article class="health-tile tile"><div class="health-title"><ha-icon .icon=${"mdi:microphone"}></ha-icon><span>BirdNET sound detector</span></div><strong class=${health?.birdnet ? (health.birdnet.online ? "healthy" : "unhealthy") : ""}>${health?.birdnet ? (health.birdnet.online ? "Online" : "Offline") : "Not set up yet"}</strong><p>${health?.birdnet?.lastHeardAt ? `Last heard ${ago(health.birdnet.lastHeardAt)}` : "No recent sound detections"}</p>${health?.birdnetLink ? html`<kestrel-lu-button kind="quiet" label="Open in BirdNET-Go" href=${health.birdnetLink} target="_blank"></kestrel-lu-button>` : nothing}</article>
       </kestrel-lu-grid>
@@ -1393,6 +1394,7 @@ export class KestrelCameras extends LitElement {
     const kind = asKind(visit.kind) ?? "seen";
     const tier = tierWord(visit);
     const why = tierWhyLine(visit);
+    const agreed = modelsAgreed(visit);
     const sure = visitConfidence(visit);
     return html`<article class="visit-view">
       <section class="visit-hero sheet">
@@ -1420,6 +1422,7 @@ export class KestrelCameras extends LitElement {
         <div class="visit-title-row"><div><h2>${visit.species || "Unidentified animal"}</h2><p class="muted">${visit.camera.name} · ${dateTime(visit.startedAt)}</p>${tier && tier !== "Likely" && why ? html`<p class="muted tier-why">${why}</p>` : nothing}</div>${sure === undefined ? nothing : html`<span class="score" role="img" aria-label=${`${Math.round(sure * 100)} percent sure`}>${Math.round(sure * 100)}<small>%</small></span>`}</div>
         <div class="visit-tags">
           ${tier ? html`<kestrel-lu-chip kind=${tier === "Likely" ? "positive" : tier === "Possible" ? "neutral" : "warning"} label=${tier}></kestrel-lu-chip>` : nothing}
+          ${agreed ? html`<kestrel-lu-chip label="Both models agreed"></kestrel-lu-chip>` : nothing}
           <kestrel-lu-chip icon=${KIND[kind].icon} label=${evidenceWord(visit)}></kestrel-lu-chip>
           <kestrel-lu-chip label=${GROUP_LABEL[visit.grp] ?? GROUP_LABEL.unknown}></kestrel-lu-chip>
           <kestrel-lu-chip kind=${confirmed ? "positive" : "neutral"} label=${this._statusLabel(visit.status)}></kestrel-lu-chip>

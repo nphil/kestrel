@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -16,7 +15,7 @@ from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from . import birdnet_availability, range_filter, recording_extras, recording_keep, species_descriptions
+from . import birdnet_availability, birdnet_review, range_filter, recording_extras, recording_keep, species_descriptions
 from .client import KestrelApiError
 from .const import BIRDNET_GO_INGRESS_PATH, DOMAIN, MEDIA_KINDS, MEDIA_URL_TTL_HOURS, SIGNAL_EVENTS
 from .coordinator import KestrelCoordinator
@@ -156,11 +155,17 @@ async def _async_api_call(
     body: Any | None = None,
     postprocess: Callable[[Any], Any] | None = None,
     async_postprocess: Callable[[Any], Awaitable[Any]] | None = None,
+    on_result: Callable[[Any], None] | None = None,
 ) -> None:
     try:
         result = await _coordinator(hass).client.async_request(
             method, path, params=params, json=body
         )
+        if on_result is not None:
+            try:  # the raw answer, before media paths are signed; a failure here never changes what the panel gets
+                on_result(result)
+            except Exception:
+                _LOGGER.warning("Kestrel after-request hook failed", exc_info=True)
         previews = hass.data.get(DOMAIN, {}).get("audio")
         if previews is not None:
             await previews.async_prefetch(result)
@@ -237,6 +242,7 @@ async def ws_visit_correct(
         "POST",
         f"visits/{quote(msg['visit_id'], safe='')}/correct",
         body={"species": msg["species"]},
+        on_result=birdnet_review.review_hook(hass, connection, "correct", msg["species"]),
     )
 
 
@@ -259,6 +265,7 @@ async def ws_visit_confirm(
         "POST",
         f"visits/{quote(msg['visit_id'], safe='')}/confirm",
         body=body,
+        on_result=birdnet_review.review_hook(hass, connection, "confirm"),
     )
 
 
@@ -275,6 +282,7 @@ async def ws_visit_undo(
         msg,
         "POST",
         f"visits/{quote(msg['visit_id'], safe='')}/undo",
+        on_result=birdnet_review.review_hook(hass, connection, "undo"),
     )
 
 
@@ -304,12 +312,13 @@ async def ws_species_detail(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
     """A species' sheet. The numbers are the plugin's; the few words about the species (`description`, from Wikipedia, with
-    `descriptionSource` to credit it) and its scientific name are added here. A description that has to be looked up first is
-    waited for a few seconds, then left out (`null`) and there the next time."""
+    `descriptionSource` to credit it) and its scientific name are added here, but only what is already known: the sheet never
+    waits for Wikipedia. When the words are not kept yet their lookup is started in the background and `descriptionPending`
+    is true: the sheet then asks `kestrel/species/description` for them a moment later."""
 
-    async def describe(result: Any) -> Any:
+    def describe(result: Any) -> Any:
         descriptions = hass.data.get(DOMAIN, {}).get("species_descriptions")
-        entry = await descriptions.async_describe(msg["species"]) if descriptions is not None else None
+        entry = descriptions.describe_now(msg["species"]) if descriptions is not None else None
         if not isinstance(result, dict):
             return result
         return {
@@ -317,10 +326,43 @@ async def ws_species_detail(
             "scientific": result.get("scientific") or (entry.scientific if entry is not None else None),
             "description": entry.text if entry is not None else None,
             "descriptionSource": entry.source() if entry is not None else None,
+            "descriptionPending": entry is None and descriptions is not None and descriptions.pending(msg["species"]),
         }
 
     await _async_api_call(
-        hass, connection, msg, "GET", f"species/{quote(msg['species'], safe='')}", async_postprocess=describe
+        hass, connection, msg, "GET", f"species/{quote(msg['species'], safe='')}", postprocess=describe
+    )
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "kestrel/species/description", vol.Required("species"): vol.All(str, vol.Length(min=1, max=100))}
+)
+@websocket_api.async_response
+async def ws_species_description(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """The words a sheet that opened with `descriptionPending` is waiting for: `{species, scientific, description,
+    descriptionSource}`; the last two are null when there is none (no article, or Wikipedia could not be asked just now).
+    Waits for the lookup that is already running, for a while at most (species_descriptions.ASK_WAIT_S)."""
+    descriptions = hass.data.get(DOMAIN, {}).get("species_descriptions")
+    if descriptions is None:
+        connection.send_error(msg["id"], "not_ready", "Species descriptions are not set up")
+        return
+    try:
+        entry = await descriptions.async_describe(msg["species"])
+    except Exception:
+        _LOGGER.exception("Kestrel species description request failed")
+        connection.send_error(msg["id"], "unknown_error", "Kestrel request failed")
+        return
+    connection.send_result(
+        msg["id"],
+        {
+            "species": msg["species"],
+            "scientific": (entry.scientific if entry is not None else None)
+            or species_descriptions.scientific_name(hass, msg["species"]),
+            "description": entry.text if entry is not None else None,
+            "descriptionSource": entry.source() if entry is not None else None,
+        },
     )
 
 
@@ -591,16 +633,6 @@ async def ws_recording_keep_set(
     connection.send_result(msg["id"], {**state, "canChange": True})
 
 
-async def _async_visit_or_none(client: Any, visit_id: str) -> Any:
-    """The plugin's visit, or None when it has no such visit (a visit that was deleted since the panel listed it)."""
-    try:
-        return await client.async_request("GET", f"visits/{quote(visit_id, safe='')}")
-    except KestrelApiError as err:
-        if err.status == 404:
-            return None
-        raise
-
-
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "kestrel/recordings",
@@ -612,14 +644,15 @@ async def ws_recordings(hass: HomeAssistant, connection: websocket_api.ActiveCon
     """The weather and the spectrogram of the recordings of up to 20 visits (heard visits, or sightings with a call linked):
     `{items: {<visit id>: {weather, spectrogram}}}`, an entry for every id asked about, both null when there is nothing to show.
     `weather` is {temp, unit, conditions, icon} in Home Assistant's unit system; `spectrogram` is a signed link to a picture
-    (an answer of "no content" means BirdNET-Go has not drawn it, or cannot). Asked for when a sheet opens, not with the list."""
+    (an answer of "no content" means BirdNET-Go has not drawn it yet, or cannot). Asked for when a sheet opens, not with the list.
+    The visits come from the plugin in ONE request (`POST visits/lookup`); an id it has no visit for (deleted since the panel
+    listed it) is simply missing from its answer and gets no extras."""
     ids = list(dict.fromkeys(msg["visit_ids"]))
     try:
-        client = _coordinator(hass).client
-        found = await asyncio.gather(*(_async_visit_or_none(client, visit_id) for visit_id in ids))
-        extras = await recording_extras.async_extras(
-            hass, {visit_id: visit for visit_id, visit in zip(ids, found) if visit is not None}
-        )
+        answer = await _coordinator(hass).client.async_request("POST", "visits/lookup", json={"ids": ids})
+        found = answer.get("items") if isinstance(answer, dict) else None
+        found = found if isinstance(found, dict) else {}
+        extras = await recording_extras.async_extras(hass, {visit_id: found[visit_id] for visit_id in ids if found.get(visit_id) is not None})
     except KestrelApiError as err:
         connection.send_error(msg["id"], err.code, str(err))
         return
@@ -683,6 +716,7 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         ws_review,
         ws_species,
         ws_species_detail,
+        ws_species_description,
         ws_highlights,
         ws_species_reference,
         ws_labels,

@@ -108,6 +108,7 @@ iframe.phone { width: 390px; max-width: 100%; }
             <option value="unknown">BirdNET-Go did not say</option>
           </select>
         </label>
+        <label class="row" style="display:flex;align-items:center"><input id="unlikely" type="checkbox"> <span>BirdNET-Go says it may not be a real call</span></label>
         <label>Which microphone <select id="hearCamera"></select></label>
         <button id="hear" class="primary">Hear it</button>
       </div>
@@ -244,7 +245,7 @@ $("modeSee").onclick = () => setMode("see");
 $("hearConfidence").oninput = () => { $("hearConfidenceText").textContent = `${$("hearConfidence").value}%`; };
 $("seeConfidence").oninput = () => { $("seeConfidenceText").textContent = `${$("seeConfidence").value}%`; };
 
-$("hear").onclick = () => act("hear", { species: picked.scientific, model: $("model").value, confidence: Number($("hearConfidence").value) / 100, occurrence: $("occurrence").value, camera: $("hearCamera").value });
+$("hear").onclick = () => act("hear", { species: picked.scientific, model: $("model").value, confidence: Number($("hearConfidence").value) / 100, occurrence: $("occurrence").value, camera: $("hearCamera").value, unlikely: $("unlikely").checked });
 $("see").onclick = () => act("see", { species: picked.scientific, camera: $("seeCamera").value, confidence: Number($("seeConfidence").value) / 100, second: $("second").checked });
 $("again").onclick = () => act("again", {});
 $("drop").onclick = () => act("drop", {});

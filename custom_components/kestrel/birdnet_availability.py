@@ -22,11 +22,13 @@ that fails. Three things decide it, in order:
      detection announced with id 0 (BirdNET-Go's de-duplication gave its
      database row to the same species heard on the other camera moments
      earlier, but the clip WAS saved) -- by its clip name;
-  2. async_confirm_audio(): for the rest, the websocket layer awaits the
-     real check (bounded) before signing, so audio_available_now() is a
-     cache hit by then. A recording whose existence is still unknown (the
-     check timed out, BirdNET-Go unreachable) gets no link this time and is
-     checked again on the next request.
+  2. async_confirm_audio(): for the rest, the websocket layer waits a moment
+     (_AUDIO_CHECK_WAIT_S) for the real check before signing, so
+     audio_available_now() is usually a cache hit by then. A recording whose
+     existence is still unknown (the check is slow, BirdNET-Go unreachable)
+     gets no link this time. Its check is not dropped when the wait ends: it
+     carries on in the background and fills the cache, so the next request
+     finds the answer (a BirdNET-Go that could not be reached is asked again).
 (The detection ids that cannot exist, see detection_id_of, never get a link
 by id.)
 
@@ -40,8 +42,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine, Hashable
 from datetime import datetime, timedelta
+from typing import Any
 from urllib.parse import quote
 
 import aiohttp
@@ -58,8 +61,10 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 _AUDIO_NEGATIVE_TTL = timedelta(minutes=BIRDNET_AUDIO_NEGATIVE_CACHE_MINUTES)
 _AUDIO_CACHE = "birdnet_audio_availability"
-_AUDIO_PENDING = "birdnet_audio_pending"
-_AUDIO_CHECK_WAIT_S = 6.0  # a page of 50 recordings answers in well under a second; this is for a BirdNET-Go that is slow
+_AUDIO_KIND = "birdnet_audio_check"  # names the checks running and the slots they share (see start_or_join)
+# How long a request waits for the checks of the recordings it shows. A page of 50 recordings answers in well under a second (the cached ones
+# not at all); this is only for a BirdNET-Go that is slow, and the checks it did not finish go on without the request (see async_confirm_audio).
+_AUDIO_CHECK_WAIT_S = 1.5
 _AUDIO_CHECK_PARALLEL = 8
 # BirdNET-Go's clip names are "<year>/<month>/<species>_<score>p_<UTC time>.<extension>" (checked live: all 1025 heard
 # visits). The name is put into a URL and sent to BirdNET-Go, so only that shape is accepted: ASCII letters, digits,
@@ -133,11 +138,46 @@ def _recording_ids(value: object, found: dict[str, None]) -> None:
                 _recording_ids(item, found)
 
 
+def start_or_join(
+    hass: HomeAssistant,
+    kind: str,
+    key: Hashable,
+    job: Callable[[], Coroutine[Any, Any, None]],
+    *,
+    parallel: int,
+) -> asyncio.Future[None]:
+    """The BirdNET-Go lookup of `key` (one of the lookups of `kind`) that is already running, or a new one started now.
+
+    A lookup is a background task, so a caller that stops waiting for it (its answer has gone out, the browser left) cannot cut it short: it
+    runs to its end and leaves what it learned in a cache for the next request. Asking for a lookup that is running joins it instead of asking
+    BirdNET-Go again, and at most `parallel` lookups of one kind run at the same moment.
+    """
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    running: dict[Hashable, asyncio.Future[None]] = domain_data.setdefault(f"{kind}_running", {})
+    if (lookup := running.get(key)) is not None:
+        return lookup
+    if (slots := domain_data.get(f"{kind}_slots")) is None:
+        slots = domain_data[f"{kind}_slots"] = asyncio.Semaphore(parallel)
+
+    async def run() -> None:
+        async with slots:
+            await job()
+
+    lookup = hass.async_create_background_task(run(), f"kestrel {kind} {key}")
+    running[key] = lookup
+    lookup.add_done_callback(lambda _: running.pop(key, None))
+    return lookup
+
+
+def _start_audio_check(hass: HomeAssistant, media_id: str) -> asyncio.Future[None]:
+    return start_or_join(hass, _AUDIO_KIND, media_id, lambda: _async_run_check(hass, media_id), parallel=_AUDIO_CHECK_PARALLEL)
+
+
 async def async_confirm_audio(hass: HomeAssistant, payload: object) -> None:
     """Look up, once and in parallel, every recording in `payload` whose existence is not cached yet.
 
-    Waits at most _AUDIO_CHECK_WAIT_S. What did not answer in time stays unknown (and so gets no link) while its
-    check is dropped; the next request asks again.
+    Waits at most _AUDIO_CHECK_WAIT_S. A recording that has not answered by then stays unknown (and so gets no link this time), but its
+    check is NOT dropped: it carries on in the background and writes its verdict into the cache, so the next request finds it there.
     """
     ids: dict[str, None] = {}  # media ids
     _recording_ids(payload, ids)
@@ -151,87 +191,38 @@ async def async_confirm_audio(hass: HomeAssistant, payload: object) -> None:
     ]
     if not unknown:
         return
-    limit = asyncio.Semaphore(_AUDIO_CHECK_PARALLEL)
-
-    async def check(media_id: str) -> None:
-        async with limit:
-            await _async_run_check(hass, _AUDIO_CACHE, _AUDIO_PENDING, media_id, lambda: _check_audio(hass, media_id))
-
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(*(check(media_id) for media_id in unknown), return_exceptions=True),
-            _AUDIO_CHECK_WAIT_S,
-        )
-    except TimeoutError:
-        _LOGGER.debug("Kestrel BirdNET-Go recording checks still running after %ss", _AUDIO_CHECK_WAIT_S)
+    _, slow = await asyncio.wait([_start_audio_check(hass, media_id) for media_id in unknown], timeout=_AUDIO_CHECK_WAIT_S)
+    if slow:
+        _LOGGER.debug("Kestrel BirdNET-Go: %d recording checks still running after %ss, left to finish in the background", len(slow), _AUDIO_CHECK_WAIT_S)
 
 
 def audio_available_now(hass: HomeAssistant, media_id: str) -> bool | None:
-    """Cached heard-visit audio-clip verdict (`media_id`: see the module docstring); schedules a check if unknown.
+    """Cached heard-visit audio-clip verdict (`media_id`: see the module docstring); starts a check if unknown.
 
     Positive never expires (a saved clip is not deleted); negative is
     short-lived, since a clip can land a few seconds after its MQTT message.
     Returns True only for a recording known to exist.
     """
-    return _available_now(
-        hass,
-        cache_key=_AUDIO_CACHE,
-        pending_key=_AUDIO_PENDING,
-        item_key=media_id,
-        positive_ttl=None,
-        negative_ttl=_AUDIO_NEGATIVE_TTL,
-        checker=lambda: _check_audio(hass, media_id),
-        task_name=f"kestrel birdnet audio check {media_id}",
-    )
-
-
-def _available_now(
-    hass: HomeAssistant,
-    *,
-    cache_key: str,
-    pending_key: str,
-    item_key: str,
-    positive_ttl: timedelta | None,
-    negative_ttl: timedelta,
-    checker: Callable[[], Awaitable[bool | None]],
-    task_name: str,
-) -> bool | None:
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    cache: dict[str, tuple[bool, datetime]] = domain_data.setdefault(cache_key, {})
-    cached = cache.get(item_key)
+    cache: dict[str, tuple[bool, datetime]] = hass.data.setdefault(DOMAIN, {}).setdefault(_AUDIO_CACHE, {})
+    cached = cache.get(media_id)
     if cached is not None:
         available, checked_at = cached
-        ttl = positive_ttl if available else negative_ttl
-        if ttl is None or dt_util.utcnow() - checked_at < ttl:
+        if available or dt_util.utcnow() - checked_at < _AUDIO_NEGATIVE_TTL:
             return available
-        cache.pop(item_key, None)
-
-    pending: set[str] = domain_data.setdefault(pending_key, set())
-    if item_key not in pending:
-        pending.add(item_key)
-        hass.async_create_task(
-            _async_run_check(hass, cache_key, pending_key, item_key, checker), task_name
-        )
+        cache.pop(media_id, None)
+    _start_audio_check(hass, media_id)
     return None
 
 
-async def _async_run_check(
-    hass: HomeAssistant,
-    cache_key: str,
-    pending_key: str,
-    item_key: str,
-    checker: Callable[[], Awaitable[bool | None]],
-) -> None:
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    pending: set[str] = domain_data.setdefault(pending_key, set())
+async def _async_run_check(hass: HomeAssistant, media_id: str) -> None:
+    """Find out whether a recording exists and remember the verdict. No verdict (BirdNET-Go did not answer) leaves the cache as it is."""
     try:
-        available = await checker()
-        if available is None:
-            return  # not a verdict (still resolving, or a transient failure): retry later
-        cache: dict[str, tuple[bool, datetime]] = domain_data.setdefault(cache_key, {})
-        cache[item_key] = (available, dt_util.utcnow())
-    finally:
-        pending.discard(item_key)
+        available = await _check_audio(hass, media_id)
+    except Exception:  # a check that breaks is "no verdict yet", like a network failure; it must not take anything else down
+        _LOGGER.warning("Kestrel BirdNET-Go check of recording %s failed", media_id, exc_info=True)
+        return
+    if available is not None:
+        hass.data.setdefault(DOMAIN, {}).setdefault(_AUDIO_CACHE, {})[media_id] = (available, dt_util.utcnow())
 
 
 async def _probe(

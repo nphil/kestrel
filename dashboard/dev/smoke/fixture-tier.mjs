@@ -4,15 +4,16 @@
 //   taskset -c 0-4,8-12 nice -n 15 node dev/smoke/fixture-tier.mjs [--size 390x844] [--theme flat-light]
 // Needs `node dev/build.mjs` first. Screenshots go to /tmp/kestrel-tier (OUT=... changes it). The visits come from dev/harness.ts (fx-tier-*, fx-seen-labelscore).
 //   (1) the visit page of the Check visit: the "Check this one" chip, the models-disagree sentence under the title, 62% sure
-//   (2) Likely: a chip and no sentence; Possible: a chip and its sentence
+//   (2) Likely: a chip and no sentence; Possible: a chip and its sentence; BirdNET-Go's "unlikely" tag: a Check with its own sentence; "Both models agreed": a chip only when two models named the bird
 //   (3) a camera visit: 99% (the classifier), not the box's 84%, and no tier chip
-//   (4) the review list: the row of the Check visit carries the sentence
+//   (4) the review list: the row of the Check visit carries the sentence; a rare bird both models named carries the "Both models agreed" chip under its sentence
 //   (5) the species sheet: the Possible recording is marked, the Likely one is not
 // Every step also checks that the page does not scroll sideways.
 process.env.OUT ??= "/tmp/kestrel-tier";
 const { runSmoke } = await import("./lib/fixture.mjs");
 
 const SAME = "The two models disagree: v3.0 says Blue Jay, Perch says American Crow.";
+const UNLIKELY = "BirdNET-Go thinks this may not be a real call.";
 
 /** What the visit page says about the evidence: the chips, the sentence under the title and the big number. */
 const readVisit = (deep) => {
@@ -31,6 +32,7 @@ await runSmoke("fixture-tier", async (fx) => {
     return fx.poll(async () => { const v = await fx.ev(readVisit); return v && v.chips.length ? v : null; }, { timeout: 12000 });
   };
   const tierChip = (v) => v.chips.find((chip) => ["Likely", "Possible", "Check this one"].includes(chip.label));
+  const agreedChip = (v) => v.chips.find((chip) => chip.label === "Both models agreed");
 
   // ---- (1) the Check visit -------------------------------------------------------------------------------------------------------------
   let v = await openVisit("fx-tier-check");
@@ -39,6 +41,7 @@ await runSmoke("fixture-tier", async (fx) => {
   await fx.check("(1) the sentence under the title names both models and both birds", v.why === SAME, v.why);
   await fx.check("(1) the big number is the call's own 62%", v.score === "62%" && v.aria === "62 percent sure", `${v.score} / ${v.aria}`);
   await fx.check("(1) the page does not scroll sideways", v.pageOverflow <= 0, `${v.pageOverflow}px`);
+  await fx.check("(1) two models that disagree: no 'Both models agreed' chip", !agreedChip(v), JSON.stringify(v.chips));
   await fx.check("(1) no jargon on the page", !/tier|model score|occurrence|undefined|NaN/i.test((await fx.page.evaluate(() => window.__panelRoot().querySelector(".visit-summary")?.textContent ?? "")).replace(/models disagree/i, "")), "none of: tier, model score, occurrence, undefined, NaN");
   await fx.settle(400);
   await fx.shot("visit-check");
@@ -47,10 +50,16 @@ await runSmoke("fixture-tier", async (fx) => {
   v = await openVisit("fx-tier-likely");
   await fx.check("(2) Likely: a positive chip and no sentence", tierChip(v)?.label === "Likely" && tierChip(v).kind === "positive" && v.why === "", `${JSON.stringify(tierChip(v))} / "${v.why}"`);
   await fx.check("(2) Likely: 94% sure, no sideways scroll", v.score === "94%" && v.pageOverflow <= 0, `${v.score}; ${v.pageOverflow}px`);
+  await fx.check("(2) Likely, named by two models: a plain 'Both models agreed' chip next to it", !!agreedChip(v) && agreedChip(v).kind !== "warning", JSON.stringify(v.chips));
   await fx.shot("visit-likely");
   v = await openVisit("fx-tier-possible");
   await fx.check("(2) Possible: a neutral chip and 'A faint call, heard once.'", tierChip(v)?.label === "Possible" && tierChip(v).kind === "neutral" && v.why === "A faint call, heard once.", `${JSON.stringify(tierChip(v))} / "${v.why}"`);
   await fx.shot("visit-possible");
+  await fx.check("(2) Possible, heard by one model: no 'Both models agreed' chip", !agreedChip(v), JSON.stringify(v.chips));
+  v = await openVisit("fx-tier-unlikely");
+  await fx.check("(2) BirdNET-Go's 'unlikely' tag: a warning 'Check this one' chip and its own plain sentence", tierChip(v)?.label === "Check this one" && tierChip(v).kind === "warning" && v.why === UNLIKELY, `${JSON.stringify(tierChip(v))} / "${v.why}"`);
+  await fx.check("(2) the unlikely visit has no 'Both models agreed' chip", !agreedChip(v), JSON.stringify(v.chips));
+  await fx.shot("visit-unlikely");
 
   // ---- (3) a camera visit ---------------------------------------------------------------------------------------------------------------
   v = await openVisit("fx-seen-labelscore");
@@ -63,13 +72,16 @@ await runSmoke("fixture-tier", async (fx) => {
   // ---- (4) the review list ---------------------------------------------------------------------------------------------------------------
   await fx.open("/kestrel/insights");
   const rows = await fx.poll(async () => {
-    const found = await fx.ev((deep) => deep(window.__panelRoot(), ".review-section kestrel-lu-row").filter((el) => window.__shown(el)).map((el) => ({ heading: el.heading, detail: el.detail, why: el.nextElementSibling?.classList.contains("review-why") ? el.nextElementSibling.textContent.trim() : "", whyLeft: el.nextElementSibling?.classList.contains("review-why") ? Math.round(el.nextElementSibling.getBoundingClientRect().left) : null, whyShown: el.nextElementSibling?.classList.contains("review-why") ? window.__shown(el.nextElementSibling) : null })));
+    const found = await fx.ev((deep) => deep(window.__panelRoot(), ".review-section kestrel-lu-row").filter((el) => window.__shown(el)).map((el) => ({ heading: el.heading, detail: el.detail, why: el.nextElementSibling?.classList.contains("review-why") ? el.nextElementSibling.textContent.trim() : "", chip: el.nextElementSibling?.classList.contains("review-why") ? (el.nextElementSibling.querySelector("kestrel-lu-chip")?.label ?? "") : "", whyLeft: el.nextElementSibling?.classList.contains("review-why") ? Math.round(el.nextElementSibling.getBoundingClientRect().left) : null, whyShown: el.nextElementSibling?.classList.contains("review-why") ? window.__shown(el.nextElementSibling) : null })));
     return found.length ? found : null;
   }, { timeout: 12000 });
   const checkRow = rows?.find((row) => row.why === SAME);
   await fx.check("(4) the Check visit's row has camera and time, and the sentence in full under it", !!checkRow && /^Back Door · [^·]+$/.test(checkRow.detail) && checkRow.whyShown === true, JSON.stringify(checkRow ?? rows));
   await fx.check("(4) the second-opinion row says who heard it, in two sentences", !!rows?.some((row) => row.why === "Only Perch heard this one; v3.0 did not. A bird not heard here before."), JSON.stringify(rows?.map((row) => row.why)));
   await fx.check("(4) the old row (no tier) has just camera and time and no sentence", !!rows?.some((row) => /^Backyard · [^·]+$/.test(row.detail) && row.why === ""), JSON.stringify(rows?.map((row) => row.detail)));
+  await fx.check("(4) the unlikely row says BirdNET-Go doubts it, with no chip", !!rows?.some((row) => row.heading === "Winter Wren" && row.why === UNLIKELY && row.chip === ""), JSON.stringify(rows?.map((row) => [row.heading, row.why, row.chip])));
+  await fx.check("(4) a rare bird both models named has the 'Both models agreed' chip under its sentence", !!rows?.some((row) => row.heading === "Golden-crowned Kinglet" && row.why === "An unusual bird for this time of year, heard only once." && row.chip === "Both models agreed"), JSON.stringify(rows?.map((row) => [row.heading, row.why, row.chip])));
+  await fx.check("(4) the row where the models disagree has no such chip", rows?.find((row) => row.why === SAME)?.chip === "", JSON.stringify(rows?.map((row) => [row.why, row.chip])));
   await fx.page.evaluate(() => window.__deep(window.__panelRoot(), ".review-section")[0]?.scrollIntoView({ block: "center" }));
   await fx.settle(400);
   await fx.check("(4) the page does not scroll sideways", (await fx.page.evaluate(() => document.documentElement.scrollWidth - innerWidth)) <= 0);

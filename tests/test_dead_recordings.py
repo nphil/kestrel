@@ -53,11 +53,15 @@ def seen(visit_id: str, detection_id: int, clip: object = CLIP) -> dict:
     }
 
 
-class Stalled(FakeResponse):
-    """BirdNET-Go accepted the connection and never answers."""
+class Held(FakeResponse):
+    """BirdNET-Go is slow: it answers only once the test sets `gate`."""
 
-    async def __aenter__(self) -> "Stalled":
-        await asyncio.Event().wait()
+    def __init__(self, gate: asyncio.Event, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.gate = gate
+
+    async def __aenter__(self) -> "Held":
+        await self.gate.wait()
         return self
 
 
@@ -169,13 +173,20 @@ class AvailabilityIsCheckedBeforeSigningTests(RecordingTestCase):
         [second] = await self.visits()
         self.assertEqual(second["audio"], link("birdnet_audio", 360))
 
-    async def test_a_slow_birdnet_go_delays_the_answer_by_a_bounded_time(self) -> None:
-        self.birdnet(360, Stalled(206))
+    async def test_a_slow_birdnet_go_delays_the_answer_by_a_bounded_time_and_its_check_carries_on_for_the_next_request(self) -> None:
+        gate = asyncio.Event()
+        self.birdnet(360, Held(gate, 206))
         self.plugin_visits.append(heard("h1", 360))
-        self.addCleanup(lambda: [task.cancel() for task in self.hass._tasks])  # the background retry the real probe times out itself
         with mock.patch.object(websocket_module.birdnet_availability, "_AUDIO_CHECK_WAIT_S", 0.05):
             [item] = await asyncio.wait_for(self.visits(), 2)
-        self.assertIsNone(item["audio"])
+        self.assertIsNone(item["audio"], "not known to exist yet: no link this time")
+        gate.set()  # BirdNET-Go answers after all
+        availability = websocket_module.birdnet_availability
+        (check,) = self.hass.data[DOMAIN][f"{availability._AUDIO_KIND}_running"].values()
+        await asyncio.wait_for(check, 2)
+        [later] = await self.visits()
+        self.assertEqual(later["audio"], link("birdnet_audio", 360), "the check was not cancelled: the next request finds its verdict")
+        self.assertEqual(len(self.asked_birdnet()), 1, "and BirdNET-Go was asked once, not again for the second request")
 
     async def test_a_negative_verdict_is_asked_again_after_it_expires(self) -> None:
         self.birdnet(360, FakeResponse(404), FakeResponse(206))

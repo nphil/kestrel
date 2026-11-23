@@ -17,6 +17,8 @@ from homeassistant.helpers.typing import ConfigType
 
 from .announced import AnnouncedVisits
 from .audio import AudioPreviews
+from .birdnet_models import BirdnetModels
+from .birdnet_review import BirdnetReviews
 from .client import KestrelClient
 from .const import (
     CONF_API_KEY,
@@ -98,6 +100,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
     descriptions = SpeciesDescriptions(hass)
     await descriptions.async_load()
     domain_data["species_descriptions"] = descriptions
+    reviews = BirdnetReviews(hass)
+    domain_data["birdnet_reviews"] = reviews
+    models = BirdnetModels(hass, client)
+    domain_data["birdnet_models"] = models
+    models.async_start()
 
     module_url = domain_data.get("frontend_module_url")
     if module_url and not domain_data.get("panel_registered"):
@@ -123,6 +130,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> b
         await reference.async_stop()
         await photos.async_stop()
         await descriptions.async_stop()
+        await reviews.async_stop()
+        await models.async_stop()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_on_shutdown))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -146,6 +155,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: KestrelConfigEntry) -> 
     descriptions = hass.data.get(DOMAIN, {}).pop("species_descriptions", None)
     if descriptions is not None:
         await descriptions.async_stop()
+    reviews = hass.data.get(DOMAIN, {}).pop("birdnet_reviews", None)
+    if reviews is not None:
+        await reviews.async_stop()
+    models = hass.data.get(DOMAIN, {}).pop("birdnet_models", None)
+    if models is not None:
+        await models.async_stop()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         domain_data = hass.data.get(DOMAIN, {})

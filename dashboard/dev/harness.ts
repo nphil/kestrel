@@ -89,6 +89,9 @@ const tieredVisits: Visit[] = [
   heardTier("fx-tier-possible", "Blue Jay", 103, 7, 0.46, { tier: "possible", tierWhy: ["weak"], repeats: 0, occurrence: 0.3, models: [call("birdnet_v3", "BirdNET v3.0", "Blue Jay", 0.46, "named")] }),
   heardTier("fx-tier-check", "Blue Jay", 103, 12, 0.62, { tier: "check", tierWhy: ["models_disagree"], repeats: 0, occurrence: 0.41, models: [call("birdnet_v3", "BirdNET v3.0", "Blue Jay", 0.62, "named"), call("perch_v2", "Perch v2", "American Crow", 0.71, "other")] }),
   heardTier("fx-tier-second", "Eastern Screech-Owl", 88, 25, 0.58, { tier: "check", tierWhy: ["second_opinion_only", "new_here"], repeats: 0, occurrence: 0.05, models: [call("perch_v2", "Perch v2", "Eastern Screech-Owl", 0.58, "named")] }),
+  // BirdNET-Go's `unlikely` tag, and two models that agreed on a bird that is rare here (still a Check): Winter Wren and Golden-crowned Kinglet are in no species list, so these touch no other fixture.
+  heardTier("fx-tier-unlikely", "Winter Wren", 88, 30, 0.91, { tier: "check", tierWhy: ["birdnet_unlikely"], unlikely: true, repeats: 0, occurrence: 0.35, models: [call("birdnet_v3", "BirdNET v3.0", "Winter Wren", 0.91, "named")] }),
+  heardTier("fx-tier-agreed-rare", "Golden-crowned Kinglet", 88, 35, 0.72, { tier: "check", tierWhy: ["rare_here"], repeats: 0, occurrence: 0.04, models: [call("birdnet_v3", "BirdNET v3.0", "Golden-crowned Kinglet", 0.72, "named"), call("perch_v2", "Perch v2", "Golden-crowned Kinglet", 0.66, "agree")] }),
   { ...createVisit(), id: "fx-seen-labelscore", camera: { id: 104, name: "Front Door" }, startedAt: now - 40 * 60_000, species: "Eastern Gray Squirrel", grp: "mammal", score: 0.84, labelScore: 0.99, heard: null, firstEver: false, clip: { state: "none" }, snapshot: media("snapshot", "fx-seen-labelscore"), crop: media("crop", "fx-seen-labelscore") },
   // "Could also be": what the audio service's second listen says (dev/smoke/fixture-alternatives.mjs). Hermit Thrush is in no species list, so these touch no other fixture.
   heardTier("fx-alts-thrush", "Hermit Thrush", 103, 3, 0.58, { audioInfo: { state: "ready", segment: { start: 3.2, end: 8.1 }, cleaned: false, method: "trim", alternatives: [
@@ -194,7 +197,7 @@ async function refreshBench(): Promise<void> {
     benchSpecies = state.species.map((item) => ({ ...item, first: iso(item.first), last: iso(item.last) }));
   } catch { /* no bench running: the page shows its fixtures only */ }
 }
-const health: Health = { detector: { name: "EVA Wildlife", provider: "ONNX", avgMs: 38, checksToday: 124 }, gpu: { usedMiB: 3900, totalMiB: 23040, util: 22 }, cameras: [{ id: 88, checksToday: 80, emptyChecksToday: 11, visitsToday: 4 }, { id: 103, checksToday: 26, emptyChecksToday: 5, visitsToday: 2 }, { id: 104, checksToday: 18, emptyChecksToday: 2, visitsToday: 1 }], storage: { dbMB: 41.4, mediaMB: 98.2, budgetMB: 300 }, birdnet: { online: true, lastHeardAt: new Date(now - 11 * 60_000).toISOString() }, corrections: { total: 18, sinceRetrain: 4 } };
+const health: Health = { detector: { name: "EVA Wildlife", provider: "ONNX", avgMs: 38, checksToday: 124 }, gpu: { usedMiB: 3900, totalMiB: 23040, util: 22 }, cameras: [{ id: 88, checksToday: 80, emptyChecksToday: 11, visitsToday: 4 }, { id: 103, checksToday: 26, emptyChecksToday: 5, visitsToday: 2 }, { id: 104, checksToday: 18, emptyChecksToday: 2, visitsToday: 1 }], storage: { dbMB: 41.4, mediaMB: 98.2, budgetMB: 300 }, clips: { stored: { count: 312, bytes: 1_400_000_000 } }, birdnet: { online: true, lastHeardAt: new Date(now - 11 * 60_000).toISOString() }, corrections: { total: 18, sinceRetrain: 4 } };
 
 // ---- reference recordings: what `kestrel/species/reference` answers (Xeno-canto, or iNaturalist when there is no key) ------------------------------
 // The panel never talks to those sites: every clip is a signed media link (`species_sound`), which dev/serve.mjs answers with dev/fixtures/call.mp3.
@@ -225,7 +228,7 @@ function referenceAnswer(name: string): ReferenceSounds {
 // in sessionStorage for this tab, and are removed from the address, so the panel's own addresses stay exactly /kestrel/<view>[?s=|?v=] and a
 // reload keeps the theme and the signing epoch (the server did not restart because the page did).
 const SETTINGS_KEY = "kestrel-harness";
-const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep", "bench", "quiet", "cards", "fail"];
+const SETTING_NAMES = ["theme", "epoch", "toolbar", "sidebar", "kiosk", "safe", "latency", "admin", "clipfail", "clipdelay", "clip", "keep", "bench", "quiet", "cards", "fail", "about", "spectrogram"];
 const settings0: Record<string, string> = (() => {
   try { return JSON.parse(window.sessionStorage.getItem(SETTINGS_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
 })();
@@ -256,9 +259,15 @@ function signed<T>(value: T): T {
 }
 
 // ---- the wildlife features (dev/wildlife-fixtures.ts): periods, a species' facts, highlights, the weather and spectrogram of recordings ----------------
-// Harness settings: `quiet=1` is a day nothing has come yet ("Today" is empty), `fail=period,highlights,recordings` makes those questions fail, `cards=1` shows the two Kestrel cards at /kestrel/cards.
+// Harness settings: `quiet=1` is a day nothing has come yet ("Today" is empty), `fail=period,highlights,recordings` makes those questions fail, `cards=1` shows the two Kestrel cards at /kestrel/cards,
+// `spectrogram=trouble` makes the recordings' pictures go wrong in turn (not ready the first time, a failing server, slow to draw, never drawn: see recordingsAnswer).
 const wildlife = (): WildlifeFixtures => ({ visits: [visit, ...generatedVisits], storied: new Set(species.map((item) => item.species)), scientific: (name) => SCIENTIFIC[name] ?? null, quiet: setting("quiet") === "1" });
 const fails = (what: string): boolean => (setting("fail") ?? "").split(",").includes(what);
+// The sheet's answer never waits for Wikipedia (as on the server): the first time a species is opened it says `descriptionPending` and the words come from
+// `kestrel/species/description` about two seconds later, which is when the loading state in the About block shows. After that the words are "kept" and come with
+// the sheet at once. `about=now` skips the waiting (the words are always there at once); `fail=description` makes the late answer fail.
+const ABOUT_DELAY_MS = 2_000;
+const describedSpecies = new Set<string>();
 const speciesList = (): Species[] => [...benchSpecies, ...species.filter((item) => !benchSpecies.some((own) => own.species === item.species))];
 
 function answer(message: Record<string, unknown>): unknown {
@@ -301,14 +310,24 @@ function answer(message: Record<string, unknown>): unknown {
       if (fails("period") && message.period && message.period !== "all") throw new Error("Kestrel could not count that period");
       result = speciesAnswer(speciesList(), message.period, wildlife());
     }
-    else if (type === "kestrel/species/detail") result = detailAnswer(benchSpecies.find((item) => item.species === message.species) ?? species.find((item) => item.species === message.species) ?? species[0], wildlife());
+    else if (type === "kestrel/species/detail") {
+      const sheet = detailAnswer(benchSpecies.find((item) => item.species === message.species) ?? species.find((item) => item.species === message.species) ?? species[0], wildlife());
+      result = setting("about") === "now" || describedSpecies.has(String(message.species)) ? sheet : { ...sheet, description: null, descriptionSource: null, descriptionPending: true };
+    }
+    else if (type === "kestrel/species/description") {
+      if (fails("description")) throw new Error("Kestrel could not look that up");
+      const name = String(message.species ?? "");
+      const sheet = detailAnswer(benchSpecies.find((item) => item.species === name) ?? species.find((item) => item.species === name) ?? species[0], wildlife());
+      describedSpecies.add(name);
+      result = { species: name, scientific: sheet.scientific, description: sheet.description, descriptionSource: sheet.descriptionSource };
+    }
     else if (type === "kestrel/highlights") {
       if (fails("highlights")) throw new Error("Kestrel could not look that up");
       result = highlightsAnswer(speciesList(), message.period, message.kind, wildlife());
     }
     else if (type === "kestrel/recordings") {
       if (fails("recordings")) throw new Error("Kestrel could not look that up");
-      result = recordingsAnswer(message.visit_ids, media);
+      result = recordingsAnswer(message.visit_ids, media, setting("spectrogram") === "trouble");
     }
     else if (type === "kestrel/species/reference") result = referenceAnswer(String(message.species ?? ""));
     else if (type === "kestrel/labels") result = species.map((item) => item.species).concat(["House Finch", "Blue Jay", "Common Raccoon"]);
@@ -355,7 +374,7 @@ function answer(message: Record<string, unknown>): unknown {
   return result;
 }
 
-const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/reference", "kestrel/highlights", "kestrel/recordings", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/clips/storage", "kestrel/clips/delete"];
+const WS_TYPES = ["kestrel/cameras", "kestrel/visits", "kestrel/visit", "kestrel/visit/correct", "kestrel/visit/confirm", "kestrel/visit/undo", "kestrel/review", "kestrel/species", "kestrel/species/detail", "kestrel/species/description", "kestrel/species/reference", "kestrel/highlights", "kestrel/recordings", "kestrel/labels", "kestrel/health", "kestrel/settings/get", "kestrel/settings/set", "kestrel/range_filter/get", "kestrel/range_filter/set", "kestrel/recording/keep/get", "kestrel/recording/keep/set", "kestrel/clips/storage", "kestrel/clips/delete"];
 let ha: MiniHa;
 let readyTimer: number | undefined;
 
@@ -456,7 +475,7 @@ window.__emit = pushEvent;
 if (location.pathname === "/" || location.pathname === "/dev/" || location.pathname === "/dev/index.html") history.replaceState(history.state, "", `${PANEL_PREFIX}/live${location.search}${location.hash}`);
 
 const calls: Array<{ type: string; message: Record<string, unknown>; at: number; epoch: number; answeredAt: number | null }> = [];
-ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, message, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0)); await refreshBench(); await adopt(message); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement(setting("cards") === "1" ? "kestrel-cards-page" : "kestrel-panel") });
+ha = mountHa({ theme: themeFromQuery(setting("theme")), sidebar: sidebarFromQuery(), kiosk: setting("kiosk") === "1", safe: safeFromQuery(), setup: (mock) => { for (const type of WS_TYPES) mock.onWS(type, async (message) => { const call = { type, message, at: Date.now(), epoch, answeredAt: null as number | null }; calls.push(call); await delay(LATENCY_MS + (type === "kestrel/clips/delete" ? Number(setting("clipdelay") ?? 0) : 0) + (type === "kestrel/species/description" ? ABOUT_DELAY_MS : 0)); await refreshBench(); await adopt(message); const reply = signed(answer(message)); call.answeredAt = Date.now(); return reply; }); }, create: () => document.createElement(setting("cards") === "1" ? "kestrel-cards-page" : "kestrel-panel") });
 if (setting("admin") === "0") ha.mock.update({ user: { is_admin: false, name: "Guest" } });
 
 let restartTimer: number | undefined;

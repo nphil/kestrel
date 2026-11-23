@@ -1,8 +1,9 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import type { FFmpegInput, HttpRequest, HttpRequestHandler, HttpResponse, Setting, Settings, SettingValue, VideoClips, VideoRecorder } from '@scrypted/sdk';
 import { ScryptedDeviceBase, ScryptedInterface, ScryptedMimeTypes } from '@scrypted/sdk';
 import mqtt, { type MqttClient } from 'mqtt';
@@ -10,7 +11,9 @@ import { isConfidentAlignment, isPlausibleOffset, measureAlignment } from './ali
 import { ChangeGate } from './changes';
 import { CLIP_STORE_DIR, ClipKeeper, cutClip, decodeGrayFrames, keptClipFile, parseClipDelete, parseOlderThan, removeStalePartials, stopRunningCuts, videoDurationMs } from './clipfiles';
 import { ClipResolver, backfillClips, backfillSince, nvrClipStart, nvrClipWindow, pollPendingClips, type ClipVisit, type FoundClip, type NvrCut } from './clips';
+import { GpuProbe, RollingAverage } from './healthprobes';
 import { HeardIngest, heardCallOf, readBirdnetMessage } from './heard';
+import type { ContributionResult, ModelContributionInput } from './heard';
 import { chooseLearnedLabel, embeddingFromBuffer, type LearningExample } from './learning';
 import { linkSeenAndHeard } from './link';
 import { LIVE_CAPTURE_DEADLINE_MS, LIVE_CAPTURE_TIMEOUT_MS, LivePictureCache, etagMatches, type LivePicture } from './live';
@@ -24,6 +27,7 @@ import { sdk } from './sdkFix';
 import { SPECIES_GROUPS } from './species-groups';
 import { GENUS_CLASS, SPECIES_CLASS, type TaxonomicClass } from './taxonomy';
 import { TrackRecorder, detectionOffsetMs, normalizeBoxes, visitPayload } from './track';
+import type { VisitPayload } from './track';
 
 const CAMERA_SETTING = 'cameras';
 const DEFAULT_CAMERAS = ['88', '103', '104', '106'];
@@ -48,6 +52,9 @@ const NVR_REQUEST_TIMEOUT_MS = 60_000;
 const CLIP_POLL_MS = 5_000;
 const MEDIA_BUDGET_BYTES = 300 * 1024 * 1024;
 const MAX_LONG_POLLS = 100;
+// How many visits one `visits/lookup` may ask for, and how many models one `visits/<id>/models` may carry.
+const MAX_LOOKUP_IDS = 50;
+const MAX_CONTRIBUTIONS = 8;
 const DETECTOR_SESSION_IDLE_MS = 3_000;
 // "Usual" suggestions come from visits a person confirmed, which are rarer than model output, so they look back further.
 const USUAL_SUGGESTIONS_WINDOW_MS = 90 * 24 * 60 * 60_000;
@@ -65,14 +72,14 @@ const SETTINGS: Setting[] = [
 ];
 
 type Detection = { className?: string; label?: string | null; score?: number | null; labelScore?: number | null; id?: string; boundingBox?: number[] };
-type DetectionEvent = { detections?: Detection[]; detectionId?: string; inputDimensions?: [number, number]; timestamp?: number; durationMs?: number; processingMs?: number };
+type DetectionEvent = { detections?: Detection[]; detectionId?: string; inputDimensions?: [number, number]; timestamp?: number };
 // health/drops1h describe the camera device's own Online state (Scrypted's aggregate online
 // flag, tracked in real time -- see setupOnlineListeners/handleOnlineChange below), NOT the
 // health of any individual RTSP/rebroadcast stream under it. A stream (e.g. the NVR recording
 // stream) can be restarting repeatedly while Online stays true, because another stream on the
 // same camera (e.g. the low-res analysis stream) still has data -- that is not visible here.
 type CameraInfo = { id: string; name: string; nvrCardId: string | null; online: boolean; health: 'ok' | 'unstable' | 'offline'; drops1h: number; wildlife: boolean; picture: string; lastDetection: { species: string; at: number; visitId: string; kind: VisitKind; grp: VisitGroup } | null };
-type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[]; durationTotal: number; durationSamples: number };
+type CameraRuntime = { lastDetectionAt: number | null; lastErrorAt: number | null; wasOnline?: boolean; drops: number[] };
 type PendingDetection = { key: string; cameraId: string; detectionId?: string; startedAt: number; score: number | null; labelScore?: number | null; label?: string; detectionLabel?: string; box?: number[]; capture: Promise<{ snapshot: Buffer; crop: Buffer }>; timer?: NodeJS.Timeout };
 type DetectorSession = { sawObject: boolean; timer: NodeJS.Timeout };
 type DeviceWithSettings = { name?: string; interfaces?: string[]; mixins?: string[]; getSettings?: () => Promise<Setting[]> };
@@ -231,6 +238,11 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     }, { deadlineMs: LIVE_CAPTURE_DEADLINE_MS });
     private onlineListeners = new Map<string, { removeListener(): void }>();
     private cameraRuntime = new Map<string, CameraRuntime>();
+    // How long the wildlife classifier took to answer the last 50 times Kestrel asked it how sure it was of a label (see labelScoreFor). That is the
+    // one timing of the detector Kestrel can see: Scrypted's detection events carry no processing time.
+    private classifierTimes = new RollingAverage(50);
+    // nvidia-smi, asked at most every 20 s and never in a way that holds up the plugin (see healthprobes.ts).
+    private gpu = new GpuProbe(async () => (await promisify(execFile)('nvidia-smi', ['--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits'], { timeout: 2_000, encoding: 'utf8' })).stdout);
     private eventWaiters = new Set<() => void>();
     private clipTimer?: NodeJS.Timeout;
     private healthTimer?: NodeJS.Timeout;
@@ -382,7 +394,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 if (!device || !device.interfaces?.includes(ScryptedInterface.VideoCamera)) continue;
                 const nvrCardId = device.mixins?.includes('130') ? id : null;
                 cameras.set(id, { id, name: device.name || `Camera ${id}`, nvrCardId });
-                if (!this.cameraRuntime.has(id)) this.cameraRuntime.set(id, { lastDetectionAt: null, lastErrorAt: null, drops: [], durationTotal: 0, durationSamples: 0 });
+                if (!this.cameraRuntime.has(id)) this.cameraRuntime.set(id, { lastDetectionAt: null, lastErrorAt: null, drops: [] });
                 const listener = sdk.systemManager.listenDevice(id, ScryptedInterface.ObjectDetector, (_source, _details, data) => {
                     void this.onDetection(id, data as DetectionEvent).catch(error => {
                         const runtime = this.runtime(id);
@@ -440,7 +452,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
     private runtime(cameraId: string): CameraRuntime {
         let runtime = this.cameraRuntime.get(cameraId);
         if (!runtime) {
-            runtime = { lastDetectionAt: null, lastErrorAt: null, drops: [], durationTotal: 0, durationSamples: 0 };
+            runtime = { lastDetectionAt: null, lastErrorAt: null, drops: [] };
             this.cameraRuntime.set(cameraId, runtime);
         }
         const hourAgo = Date.now() - 60 * 60 * 1000;
@@ -455,11 +467,6 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         const startedAt = normalizedTime(asNumber(event.timestamp) ?? Date.now());
         const sawObject = event.detections.some(detection => !!detection.className && detection.className !== 'motion');
         this.recordDetectorSession(cameraId, event.detections.length > 0, sawObject);
-        const duration = asNumber(event.processingMs ?? event.durationMs);
-        if (duration !== undefined && duration >= 0) {
-            runtime.durationTotal += duration;
-            runtime.durationSamples++;
-        }
         const animals = event.detections.filter(detection => detection.className === 'animal');
         if (!animals.length) return;
         // The boxes are kept for the visit this animal is (or becomes). The open visit is looked up first: `touch` below widens its window.
@@ -641,7 +648,10 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
         if (typeof pending.labelScore === 'number') return pending.labelScore;
         if (label === UNIDENTIFIED_ANIMAL) return null;
         try {
-            const guess = (await classifyCrop(crop, LABEL_SCORE_TIMEOUT_MS)).find(item => item.className === label);
+            const asked = performance.now();
+            const guesses = await classifyCrop(crop, LABEL_SCORE_TIMEOUT_MS);
+            this.classifierTimes.add(performance.now() - asked);
+            const guess = guesses.find(item => item.className === label);
             return guess ? guess.score : null;
         } catch (error) {
             this.console.warn(`Could not ask the classifier how sure it is on camera ${pending.cameraId}: ${String(error)}`);
@@ -1083,18 +1093,23 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
 
     private async health(): Promise<Record<string, unknown>> {
         const detector = sdk.systemManager.getDeviceById('248') as unknown as DeviceWithSettings;
-        const detectorSettings = await detector.getSettings?.().catch(() => [] as Setting[]) ?? [];
-        const provider = detectorSettings.find(setting => setting.key === 'provider' || setting.key === 'executionProvider')?.value;
         const lastHeardAt = Number(this.db.getSetting('birdnetLastHeardAt', '0')) || null;
         const stats = this.db.correctionStats();
         const now = Date.now();
         const counterItems = [...this.cameras.keys()].map(id => ({ id, ...this.db.cameraDailyStats(id, now) }));
-        const gpu = this.gpuStats();
-        const mediaMB = await this.directorySize(this.mediaDirs?.root ?? this.baseDir) / (1024 * 1024);
-        const databaseFiles = await Promise.all([this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`].map(file => stat(file).catch(() => undefined)));
+        // What waits on something else (the detector, nvidia-smi, the disk) is asked together, not one after the other.
+        const [detectorSettings, gpu, mediaBytes, databaseFiles] = await Promise.all([
+            detector.getSettings?.().catch(() => [] as Setting[]) ?? [],
+            this.gpu.stats(),
+            this.directorySize(this.mediaDirs?.root ?? this.baseDir),
+            Promise.all([this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`].map(file => stat(file).catch(() => undefined))),
+        ]);
+        const provider = detectorSettings.find(setting => setting.key === 'provider' || setting.key === 'executionProvider')?.value;
+        const mediaMB = mediaBytes / (1024 * 1024);
         const dbMB = databaseFiles.reduce((total, file) => total + (file?.size ?? 0), 0) / (1024 * 1024);
+        const answerMs = this.classifierTimes.average();
         return {
-            detector: { name: detector.name || 'Wildlife Classifier', provider: provider ? String(provider) : 'ONNX', avgMs: this.averageDetectorMs(), checksToday: counterItems.reduce((sum, item) => sum + item.checksToday, 0) },
+            detector: { name: detector.name || 'Wildlife Classifier', provider: provider ? String(provider) : 'ONNX', avgMs: answerMs === null ? null : Number(answerMs.toFixed(1)), checksToday: counterItems.reduce((sum, item) => sum + item.checksToday, 0) },
             gpu,
             cameras: counterItems,
             storage: { dbMB: Number(dbMB.toFixed(2)), mediaMB: Number(mediaMB.toFixed(2)), budgetMB: 300 },
@@ -1102,28 +1117,6 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             birdnet: lastHeardAt === null ? null : { online: now - lastHeardAt <= 30 * 60_000, lastHeardAt, ignoredToday: this.db.birdnetIgnoredToday(now) },
             corrections: { total: stats.total, sinceRetrain: stats.sinceRetrain },
         };
-    }
-
-    private averageDetectorMs(): number | null {
-        let total = 0;
-        let samples = 0;
-        for (const id of this.cameras.keys()) {
-            const runtime = this.runtime(id);
-            total += runtime.durationTotal;
-            samples += runtime.durationSamples;
-        }
-        return samples ? Number((total / samples).toFixed(1)) : null;
-    }
-
-    private gpuStats(): { usedMiB: number | null; totalMiB: number | null; util: number | null } {
-        try {
-            const output = execFileSync('nvidia-smi', ['--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits'], { timeout: 2_000, encoding: 'utf8' }).trim().split(/\r?\n/)[0];
-            const [used, total, util] = output.split(',').map(value => Number(value.trim()));
-            if (![used, total, util].every(Number.isFinite)) return { usedMiB: null, totalMiB: null, util: null };
-            return { usedMiB: used, totalMiB: total, util };
-        } catch {
-            return { usedMiB: null, totalMiB: null, util: null };
-        }
     }
 
     private async directorySize(directory: string): Promise<number> {
@@ -1169,6 +1162,35 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
             this.console.log(`Kestrel purged ${result.removed} heard visit(s) before ${before}`);
         }
         return result;
+    }
+
+    // Several visits in one call (the integration opens a sighting's recordings with up to 20 of them): `{ids: [...]}` answers
+    // `{items: {<id>: visit}}`. An id that is not a visit is left out, never an error.
+    private lookupVisits(body: Record<string, unknown>): { items: Record<string, VisitPayload> } {
+        const { ids } = body;
+        if (!Array.isArray(ids) || ids.length < 1 || ids.length > MAX_LOOKUP_IDS || ids.some(id => typeof id !== 'string' || !id || id.length > 100))
+            throw Object.assign(new Error(`ids must be a list of 1 to ${MAX_LOOKUP_IDS} visit ids`), { status: 400 });
+        const items: Record<string, VisitPayload> = {};
+        for (const id of new Set(ids as string[])) {
+            const visit = this.db.getVisit(id);
+            if (visit) items[id] = visitPayload(visit, this.db);
+        }
+        return { items };
+    }
+
+    // `POST visits/<id>/models {detectionId, contributions: [{modelName, modelVersion, hitCount, maxConfidence}]}`: what BirdNET-Go's record of
+    // a detection says each model heard (heard.ts `recordContributions`). The integration reads that record, since the plugin cannot reach
+    // BirdNET-Go's API; the answer says whether the visit changed.
+    private recordModels(id: string, body: Record<string, unknown>): { result: ContributionResult } {
+        const detectionId = asNumber(body.detectionId);
+        const { contributions } = body;
+        if (detectionId === undefined || !Number.isInteger(detectionId) || detectionId <= 0)
+            throw Object.assign(new Error('detectionId must be a BirdNET-Go detection id'), { status: 400 });
+        if (!Array.isArray(contributions) || contributions.length > MAX_CONTRIBUTIONS || contributions.some(item => !item || typeof item !== 'object' || Array.isArray(item)))
+            throw Object.assign(new Error(`contributions must be a list of at most ${MAX_CONTRIBUTIONS} models`), { status: 400 });
+        const result = this.heard?.recordContributions(id, detectionId, contributions as ModelContributionInput[], Date.now()) ?? 'unknown';
+        if (result === 'unknown') throw Object.assign(new Error('Visit not found'), { status: 404 });
+        return { result };
     }
 
     // `timeoutMs` is how long to hold the request open when nothing is pending (callers pass
@@ -1353,6 +1375,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                 jsonReply(response, 200, { retrainedAt: at, sinceRetrain: 0 }); return;
             }
             if (method === 'POST' && route === 'visits/purge') { jsonReply(response, 200, this.purgeVisits(parseJsonBody(request.body))); return; }
+            if (method === 'POST' && route === 'visits/lookup') { jsonReply(response, 200, this.lookupVisits(parseJsonBody(request.body))); return; }
             if (parts[0] === 'visits' && parts[1] && parts.length === 2 && method === 'GET') {
                 const visit = this.db.getVisit(parts[1]);
                 jsonReply(response, visit ? 200 : 404, visit ? visitPayload(visit, this.db) : { error: 'Visit not found' }); return;
@@ -1369,6 +1392,7 @@ class Kestrel extends ScryptedDeviceBase implements Settings, HttpRequestHandler
                     jsonReply(response, 200, visitPayload(await this.confirmVisit(id, body.also_heard === true), this.db)); return;
                 }
                 if (parts[2] === 'undo') { jsonReply(response, 200, visitPayload(this.undoVisit(id), this.db)); return; }
+                if (parts[2] === 'models') { jsonReply(response, 200, this.recordModels(id, parseJsonBody(request.body))); return; }
             }
             jsonReply(response, 404, { error: 'Not found' });
         } catch (error) {

@@ -51,6 +51,23 @@ test("v3.0 and Perch naming different birds make one visit named by v3.0, flagge
   assert.match(result.text, /Check/);
 }));
 
+test("a confident call BirdNET-Go tags unlikely is a Check visit that says why and waits on the review list; a later call that is not tagged clears it", () => withSandbox((sandbox) => {
+  const result = sandbox.hear({ species: "northern cardinal", model: "v3", confidence: 0.95, unlikely: true });
+  const [visit] = heardVisits(sandbox);
+  assert.deepEqual([visit.tier, visit.tierWhy, visit.review, visit.notify, visit.firstEver, visit.unlikely], ["check", ["birdnet_unlikely"], true, false, false, true]);
+  assert.equal(sandbox.store.listReview().length, 1, "it is on the review list");
+  assert.match(result.text, /Check/);
+  assert.match(result.text, /tagged unlikely by BirdNET-Go/);
+  assert.equal(result.visits[0].unlikely, true, "the bench's own summary shows the tag");
+  sandbox.again();
+  assert.equal(heardVisits(sandbox)[0].unlikely, true, "the same call again keeps the tag, and the visit its place in the queue");
+  assert.equal(heardVisits(sandbox)[0].tier, "check");
+  sandbox.hear({ species: "northern cardinal", model: "v3", confidence: 0.95 });
+  const [after] = heardVisits(sandbox);
+  assert.equal(heardVisits(sandbox).length, 1, "still one visit");
+  assert.deepEqual([after.tier, after.review, after.unlikely], ["likely", false, false]);
+}));
+
 test("Perch alone for a species Kestrel has never had is only a Check; a rare bird at one call is not Likely", () => withSandbox((sandbox) => {
   sandbox.hear({ species: "summer tanager", model: "perch", confidence: 0.9 });
   assert.equal(heardVisits(sandbox)[0].tier, "check");
@@ -161,6 +178,10 @@ test("the HTTP side: state, search, actions, the harness feed, and a POST that i
   assert.equal(feed.visits.length, 1);
   assert.equal(feed.species[0].species, "Northern Cardinal");
   assert.equal(benchState(sandbox).canAgain, true);
+  const tagged = await call("POST", "/bench/api/hear", { body: { species: "blue jay", unlikely: true } });
+  assert.equal(tagged.status, 200);
+  const taggedVisit = JSON.parse((await call("GET", "/dev/fixtures/local/bench.json")).body).visits.find((visit) => visit.species === "Blue Jay");
+  assert.deepEqual([taggedVisit.tier, taggedVisit.tierWhy, taggedVisit.unlikely], ["check", ["birdnet_unlikely"], true], "the HTTP side passes the tag on");
 }));
 
 test("closing deletes the temp folder, and closing twice is fine", () => {

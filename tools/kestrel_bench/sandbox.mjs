@@ -119,8 +119,9 @@ export class Sandbox {
    * what the plugin drops, hand the rest to the heard ingest. Then it lets the 6 to 9 second wait for the other model run out at once.
    *   model "v3" | "perch" | "v24" | "none" | "disagree" (v3.0 says `species`, Perch says `other`)     style "nested" | "flat"
    *   occurrence "common" | "uncommon" | "rare" | "unknown" or a number 0-1     detectionId  a number (default: counts up) or 0
+   *   unlikely true: BirdNET-Go tagged what it sent as probably not a real call (its `unlikely` field, which it leaves out otherwise)
    */
-  hear({ species, model = "v3", confidence = 0.9, occurrence = "common", camera = CAMERAS[0].id, style = "nested", other, detectionId }) {
+  hear({ species, model = "v3", confidence = 0.9, occurrence = "common", camera = CAMERAS[0].id, style = "nested", other, detectionId, unlikely = false }) {
     const entry = this.#entry(species);
     const cam = this.#cameraOrThrow(camera);
     const chance = typeof occurrence === "number" || occurrence === null ? occurrence : OCCURRENCE[occurrence];
@@ -138,7 +139,7 @@ export class Sandbox {
     let dropped = 0;
     for (const send of sends) {
       const id = detectionId ?? this.#heardDetectionId();
-      const message = birdnetMessage({ commonName: heardName(send.entry), scientificName: send.entry.scientific, confidence: send.confidence, at: at + (send.later ?? 0), source: cam.name, model: send.model, style, occurrence: chance, detectionId: id });
+      const message = birdnetMessage({ commonName: heardName(send.entry), scientificName: send.entry.scientific, confidence: send.confidence, at: at + (send.later ?? 0), source: cam.name, model: send.model, style, occurrence: chance, detectionId: id, unlikely });
       messages.push(message);
       receivedAt = Date.now() + (send.later ?? 0);
       if (!this.#receive(JSON.parse(JSON.stringify(message)), cam, receivedAt)) dropped++;
@@ -147,9 +148,9 @@ export class Sandbox {
     this.ingest.flush(receivedAt + SECOND_OPINION_SETTLE_MS + 1000);
     this.ingest.flush(receivedAt + 3 * SECOND_OPINION_SETTLE_MS);
     this.sent = messages.length === 1 ? messages[0] : messages;
-    this.last = { action: "hear", args: { species: entry, model, confidence, occurrence, camera: cam.id, style, other, detectionId } };
+    this.last = { action: "hear", args: { species: entry, model, confidence, occurrence, camera: cam.id, style, other, detectionId, unlikely } };
     const changed = this.#changesSince(from, this.#visitsOfCallsAfter(callsBefore));
-    return this.#report("heard", entry, changed, { dropped, messages: messages.length, text: this.#heardText(entry, model, confidence, changed, dropped) });
+    return this.#report("heard", entry, changed, { dropped, messages: messages.length, text: this.#heardText(entry, model, confidence, changed, dropped, unlikely) });
   }
 
   #heardDetectionId() {
@@ -267,9 +268,9 @@ export class Sandbox {
     if (this.log.length > 40) this.log.shift();
   }
 
-  #heardText(entry, model, confidence, changed, dropped) {
+  #heardText(entry, model, confidence, changed, dropped, unlikely = false) {
     const name = heardName(entry);
-    const how = `${model === "disagree" ? "BirdNET v3.0 and Perch (naming another bird)" : { v3: "BirdNET v3.0", perch: "Perch", v24: "BirdNET v2.4", none: "an unknown model" }[model] ?? model} at ${pct(confidence)}`;
+    const how = `${model === "disagree" ? "BirdNET v3.0 and Perch (naming another bird)" : { v3: "BirdNET v3.0", perch: "Perch", v24: "BirdNET v2.4", none: "an unknown model" }[model] ?? model} at ${pct(confidence)}${unlikely ? ", tagged unlikely by BirdNET-Go" : ""}`;
     if (dropped && !changed.length) return `Heard ${name} (${how}): the plugin ignores this kind of call (insects), so nothing was made.`;
     const visit = changed.map((item) => this.summary(item.id)).find((item) => item && item.kind === "heard");
     if (!visit) return `Heard ${name} (${how}): it is still waiting to count. Send it again to see a repeat.`;
@@ -285,6 +286,7 @@ export class Sandbox {
     return {
       id, kind: visit.kind, species: visit.species, camera: visit.camera.name, tier: visit.tier ?? null, tierWhy: visit.tierWhy ?? [], firstEver: visit.firstEver,
       notify: visit.notify, review: !!visit.review, repeats: visit.repeats ?? 0, score: visit.score, suggestions: visit.suggestions.map((item) => item.species),
+      unlikely: visit.unlikely === true,
       frames: visit.kind === "seen" ? this.store.getTrack(id).frames.length : undefined,
     };
   }

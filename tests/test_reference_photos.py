@@ -539,6 +539,129 @@ class PureTests(unittest.TestCase):
             self.assertFalse(photos.image_url_ok(source, url), (source, url))
 
 
+# ---- slow sources never hold anyone up -------------------------------------------------------------------------------
+
+
+class StalledResponse(FakeResponse):
+    """A server that accepted the connection and then says nothing (what a hung add-on or a stuck website looks like)."""
+
+    async def __aenter__(self) -> "StalledResponse":
+        await asyncio.Event().wait()
+        return self
+
+
+class PatienceTests(PhotoTestCase):
+    def quick(self, **limits: float) -> None:
+        """Shrinks the time limits so a stalled source is given up on within a blink."""
+        for name, value in limits.items():
+            patcher = mock.patch.object(photos, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def resolved(self, service: photos.ReferencePhotos) -> photos.Entry | None:
+        return await asyncio.wait_for(service.async_resolve("Carolina Wren"), 5)  # a broken limit fails here, it does not hang
+
+    async def test_a_birdnet_go_that_never_answers_gets_its_budget_and_the_other_sources_are_asked_alongside_it(self) -> None:
+        self.quick(BIRDNET_BUDGET_S=0.2, BIRDNET_GRACE_S=0.02)
+        self.session.route("GET", BN_INFO, StalledResponse())
+        self.route_taxon(SCIENTIFIC, "Carolina Wren", inat_photo())
+        self.route_inat_files()
+        entry = await self.resolved(self.service())
+        self.assertEqual((entry.photo.source, entry.exact), ("inaturalist", False), "BirdNET-Go could not say: asked again within the hour")
+
+    async def test_birdnet_gos_retries_run_alongside_the_other_sources_and_its_picture_still_wins(self) -> None:
+        self.quick(BIRDNET_WAIT_S=0.05, BIRDNET_GRACE_S=0.01)
+        self.session.route("GET", BN_INFO, FakeResponse(202), FakeResponse(202), FakeResponse(200, {}))
+        self.route_taxon(SCIENTIFIC, "Carolina Wren", inat_photo())
+        self.route_inat_files()
+        entry = await self.resolved(self.service())
+        self.assertEqual(entry.photo.source, "birdnet-go")
+        urls = [url for _, url, _ in self.session.calls]
+        self.assertEqual(urls.count(BN_INFO), 3)
+        self.assertLess(urls.index(TAXA), len(urls) - 1 - urls[::-1].index(BN_INFO), "iNaturalist was asked before BirdNET-Go's last try")
+
+    async def test_a_birdnet_go_that_says_no_at_once_is_not_waited_for(self) -> None:
+        self.quick(BIRDNET_GRACE_S=30)  # would be felt if the others waited out the grace
+        self.session.route("GET", BN_INFO, FakeResponse(404))
+        self.route_taxon(SCIENTIFIC, "Carolina Wren", inat_photo())
+        self.route_inat_files()
+        entry = await self.resolved(self.service())
+        self.assertEqual((entry.photo.source, entry.exact), ("inaturalist", True))
+
+    async def test_a_source_that_never_answers_gets_its_time_and_the_next_one_is_asked(self) -> None:
+        self.quick(SOURCE_TIMEOUT_S=0.05)
+        self.session.route("GET", BN_INFO, FakeResponse(404))
+        self.session.route("GET", TAXA, StalledResponse())
+        self.route_wren_article()
+        entry = await self.resolved(self.service())
+        self.assertEqual((entry.photo.source, entry.exact), ("wikipedia", False), "iNaturalist could not be asked: this is asked again within the hour")
+
+    async def test_a_name_birdnet_go_does_not_list_is_not_asked_about_twice_when_iNaturalist_stalls(self) -> None:
+        self.quick(SOURCE_TIMEOUT_S=0.05)
+        self.hass.data[DOMAIN]["birdnet_species_map"] = {}
+        self.session.route("GET", TAXA, StalledResponse())
+        self.session.route("GET", wiki("Raccoon"), FakeResponse(200, summary(title="Raccoon", description="Species of mammal")))
+        self.session.route("GET", photos.COMMONS_API, FakeResponse(200, COMMONS))
+        entry = await asyncio.wait_for(self.service().async_resolve("Raccoon"), 5)
+        self.assertEqual((entry.photo.source, entry.exact), ("wikipedia", False))
+        self.assertEqual(len(self.calls(TAXA)), 1, "one stalled try, not two")
+
+    async def test_when_every_source_stalls_it_is_no_picture_right_now_and_not_no_photo(self) -> None:
+        self.quick(SOURCE_TIMEOUT_S=0.05, BIRDNET_BUDGET_S=0.05, BIRDNET_GRACE_S=0.01)
+        for address in (BN_INFO, TAXA, wiki("Thryothorus_ludovicianus"), wiki("Carolina_wren")):
+            self.session.route("GET", address, StalledResponse())
+        service = self.service()
+        self.assertIsNone(await self.resolved(service))
+        self.assertTrue(service.offer("Carolina Wren"), "not 'no photo': the link is still offered")
+        self.assertNotIn("carolina wren", service._entries)
+
+    async def test_a_request_waits_only_so_long_for_a_slow_lookup_which_goes_on_and_is_kept_for_the_next_ask(self) -> None:
+        release = asyncio.Event()
+
+        async def slow(name: str) -> photos.Entry:
+            await release.wait()
+            return photos.Entry(name, SCIENTIFIC, self.clock, True, photos.Photo("birdnet-go", "", "", "", "", ""))
+
+        service = self.service()
+        self.quick(PHOTO_WAIT_S=0.02)
+        with mock.patch.object(service, "_find", slow):
+            self.assertIsNone(await service.async_image("Carolina Wren"), "no picture right now ...")
+            self.assertIsNone(await service.async_info("Carolina Wren"))
+            self.assertEqual(self.session.calls, [])
+            release.set()
+            entry = await service.async_resolve("Carolina Wren")
+        self.assertEqual(entry.photo.source, "birdnet-go", "... but the lookup went on, and nobody started a second one")
+        self.assertEqual((await service.async_image("Carolina Wren")).stream, BN_IMAGE)
+
+    async def test_a_download_slower_than_the_wait_carries_on_and_the_picture_is_there_for_the_next_view(self) -> None:
+        self.route_taxon(SCIENTIFIC, "Carolina Wren", inat_photo())
+        self.route_inat_files()
+        service = self.service()
+        address = (await service.async_resolve("Carolina Wren")).photo.image
+        gate = asyncio.Event()
+        real = photos.fetch_file
+
+        async def slow_fetch(*args: object, **kwargs: object) -> bytes:
+            await gate.wait()
+            return await real(*args, **kwargs)
+
+        self.session.route("GET", address, picture())
+        self.quick(PHOTO_WAIT_S=0.02)
+        with mock.patch.object(photos, "fetch_file", slow_fetch):
+            self.assertIsNone(await service.async_image("Carolina Wren"), "still downloading: no picture right now")
+            gate.set()
+            await asyncio.gather(*list(service._downloads.values()))
+        self.assertEqual((await service.async_image("Carolina Wren")).path.read_bytes(), JPEG)
+
+    async def test_a_birdnet_go_that_stalls_when_asked_who_took_the_picture_is_just_no_credit(self) -> None:
+        self.session.route("GET", BN_INFO, FakeResponse(200, {}))
+        service = self.service()
+        self.assertEqual((await self.resolved(service)).photo.source, "birdnet-go")
+        self.quick(SOURCE_TIMEOUT_S=0.02)
+        self.session.route("GET", BN_INFO, StalledResponse())
+        self.assertIsNone(await asyncio.wait_for(service.async_info("Carolina Wren"), 5))
+
+
 # ---- the links and the media route -----------------------------------------------------------------------------------
 
 

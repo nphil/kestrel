@@ -315,15 +315,77 @@ class ServiceTests(DescriptionTestCase):
         self.assertEqual(self.asked(wiki("Thryothorus_ludovicianus")), 1)
         self.assertTrue(all(entry is found[0] and entry.text == LEAD for entry in found))
 
-    async def test_a_sheet_waits_a_few_seconds_but_the_lookup_goes_on_and_is_kept(self) -> None:
+    async def test_a_late_request_waits_a_while_but_the_lookup_goes_on_and_is_kept(self) -> None:
         gate = asyncio.Event()
         self.session.route("GET", wiki("Thryothorus_ludovicianus"), Gated(gate, 200, summary()))
         service = self.service()
         with mock.patch.object(descriptions, "ASK_WAIT_S", 0.05):
-            self.assertIsNone(await service.async_describe("Carolina Wren"), "the sheet opens without it")
+            self.assertIsNone(await service.async_describe("Carolina Wren"), "not back in time")
+        self.assertIsNone(await service.async_describe("Carolina Wren", wait=0.01), "an explicit wait is used instead")
         gate.set()
         self.assertEqual((await service.async_describe("Carolina Wren")).text, LEAD, "and has it the next time")
         self.assertEqual(self.asked(wiki("Thryothorus_ludovicianus")), 1)
+
+    async def test_describe_now_gives_what_is_kept_at_once_and_starts_no_lookup(self) -> None:
+        self.route_wren()
+        service = self.service()
+        kept = await service.async_describe("Carolina Wren")
+        self.session.calls.clear()
+        self.assertIs(service.describe_now("carolina  wren"), kept)
+        self.assertFalse(service.pending("Carolina Wren"))
+        await asyncio.sleep(0)
+        self.assertEqual(self.session.calls, [])
+
+    async def test_describe_now_starts_one_lookup_in_the_background_and_says_it_is_pending(self) -> None:
+        gate = asyncio.Event()
+        self.session.route("GET", wiki("Thryothorus_ludovicianus"), Gated(gate, 200, summary()))
+        service = self.service()
+        self.assertFalse(service.pending("Carolina Wren"), "nothing is on its way yet")
+        answers = [service.describe_now(name) for name in ("Carolina Wren", "carolina wren", " Carolina  Wren ")]
+        self.assertEqual(answers, [None, None, None], "nobody is waited for")
+        self.assertTrue(service.pending("Carolina Wren"))
+        await asyncio.sleep(0)
+        asker = asyncio.ensure_future(service.async_describe("Carolina Wren"))  # the late request joins the same lookup
+        await asyncio.sleep(0)
+        gate.set()
+        late = await asker
+        self.assertEqual(late.text, LEAD)
+        self.assertEqual(self.asked(wiki("Thryothorus_ludovicianus")), 1, "one lookup for everyone")
+        self.assertFalse(service.pending("Carolina Wren"), "the answer is final")
+        self.assertIs(service.describe_now("Carolina Wren"), late)
+
+    async def test_describe_now_leaves_a_species_with_no_article_final_and_a_failed_lookup_to_rest_for_a_minute(self) -> None:
+        self.session.route("GET", wiki("Thryothorus_ludovicianus"), FakeResponse(404))
+        self.session.route("GET", wiki("Carolina_Wren"), FakeResponse(404))
+        service = self.service()
+        self.assertIsNone(service.describe_now("Carolina Wren"))
+        self.assertEqual((await service.async_describe("Carolina Wren")).text, None, "no article is an answer")
+        self.assertFalse(service.pending("Carolina Wren"))
+        self.assertIsNone(service.describe_now("Carolina Wren").text)
+
+        self.session.route("GET", wiki("Thryothorus_ludovicianus"), FakeResponse(500))
+        self.session.route("GET", wiki("Carolina_Wren"), aiohttp.ClientError("down"))
+        other = self.service()
+        self.assertIsNone(other.describe_now("Carolina Wren"))
+        self.assertIsNone(await other.async_describe("Carolina Wren"), "could not be asked, so no answer")
+        self.session.calls.clear()
+        self.clock += 59
+        self.assertIsNone(other.describe_now("Carolina Wren"))
+        self.assertFalse(other.pending("Carolina Wren"), "nothing is on its way during the rest")
+        await asyncio.sleep(0)
+        self.assertEqual(self.session.calls, [], "within the minute nobody is bothered again")
+        self.clock += 2
+        self.route_wren()
+        self.assertIsNone(other.describe_now("Carolina Wren"))
+        self.assertTrue(other.pending("Carolina Wren"), "after the minute it is asked again")
+        self.assertEqual((await other.async_describe("Carolina Wren")).text, LEAD)
+
+    async def test_describe_now_ignores_an_unusable_name(self) -> None:
+        service = self.service()
+        for name in ("", "   "):
+            self.assertIsNone(service.describe_now(name))
+            self.assertFalse(service.pending(name))
+        self.assertEqual(self.session.calls, [])
 
     async def test_an_unusable_name_is_never_looked_up(self) -> None:
         service = self.service()
@@ -474,19 +536,61 @@ class HighlightsTests(WebsocketTestCase):
 class SpeciesSheetTests(WebsocketTestCase):
     SHEET = {"species": "Carolina Wren", "hasPhoto": True, "perDay": [0] * 30, "newToHome": False, "description": None, "descriptionSource": None, "visits": [], "next": None}
 
-    async def test_the_sheet_gets_its_description_with_the_credit_and_the_scientific_name(self) -> None:
+    async def test_a_sheet_with_a_kept_description_has_it_at_once_with_the_credit_and_the_scientific_name(self) -> None:
         self.plugin["species/Carolina%20Wren"] = copy.deepcopy(self.SHEET)
         self.route_wren()
-        self.service()
+        await self.service().async_describe("Carolina Wren")
+        self.session.calls.clear()
         result = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
         self.assertEqual(
-            (result["description"], result["descriptionSource"], result["scientific"]),
-            (LEAD, {"name": "Wikipedia", "url": ARTICLE, "licence": "CC BY-SA 4.0", "licenceUrl": LICENCE_URL}, SCIENTIFIC),
+            (result["description"], result["descriptionSource"], result["scientific"], result["descriptionPending"]),
+            (LEAD, {"name": "Wikipedia", "url": ARTICLE, "licence": "CC BY-SA 4.0", "licenceUrl": LICENCE_URL}, SCIENTIFIC, False),
         )
         self.assertEqual({key: result[key] for key in ("perDay", "newToHome", "visits", "next")}, {key: self.SHEET[key] for key in ("perDay", "newToHome", "visits", "next")})
         self.assertEqual(self.requests, [("GET", "species/Carolina%20Wren", None)])
+        await asyncio.sleep(0)
+        self.assertEqual(self.session.calls, [], "nothing is looked up again")
 
-    async def test_a_species_only_iNaturalist_can_name_gets_its_name_and_description_on_its_sheet(self) -> None:
+    async def test_a_sheet_never_waits_for_wikipedia_and_the_words_follow_on_their_own_request(self) -> None:
+        gate = asyncio.Event()
+        self.plugin["species/Carolina%20Wren"] = copy.deepcopy(self.SHEET)
+        self.session.route("GET", wiki("Thryothorus_ludovicianus"), Gated(gate, 200, summary()))  # Wikipedia is stuck
+        self.service()
+        result = await asyncio.wait_for(
+            self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren"), 1
+        )
+        self.assertEqual(
+            (result["description"], result["descriptionSource"], result["scientific"], result["descriptionPending"]),
+            (None, None, SCIENTIFIC, True),
+            "the numbers are there at once and the sheet is told words are coming",
+        )
+        self.assertEqual(result["perDay"], self.SHEET["perDay"])
+
+        # opening it again while the lookup is still running starts nothing new and is still "pending"
+        again = await asyncio.wait_for(
+            self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren"), 1
+        )
+        self.assertTrue(again["descriptionPending"])
+
+        late = asyncio.ensure_future(
+            self.call(websocket_module.ws_species_description, type="kestrel/species/description", species="Carolina Wren")
+        )
+        await asyncio.sleep(0.01)
+        self.assertFalse(late.done(), "the late request waits for the lookup")
+        gate.set()
+        self.assertEqual(
+            await asyncio.wait_for(late, 1),
+            {
+                "species": "Carolina Wren", "scientific": SCIENTIFIC, "description": LEAD,
+                "descriptionSource": {"name": "Wikipedia", "url": ARTICLE, "licence": "CC BY-SA 4.0", "licenceUrl": LICENCE_URL},
+            },
+        )
+        self.assertEqual(self.asked(wiki("Thryothorus_ludovicianus")), 1, "one lookup for all of it")
+
+        final = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
+        self.assertEqual((final["description"], final["descriptionPending"]), (LEAD, False))
+
+    async def test_a_species_only_iNaturalist_can_name_gets_its_name_and_description_a_moment_after_the_sheet_opens(self) -> None:
         self.hass.data[DOMAIN]["birdnet_species_map"] = {}
         self.plugin["species/Common%20Raccoon"] = {**self.SHEET, "species": "Common Raccoon", "hasPhoto": False}
         self.session.route("GET", TAXA, FakeResponse(200, taxon("Procyon lotor", "Common Raccoon")))
@@ -494,21 +598,65 @@ class SpeciesSheetTests(WebsocketTestCase):
             description="Species of mammal", extract=RACCOON, content_urls={"desktop": {"page": "https://en.wikipedia.org/wiki/Raccoon"}},
         )))
         self.service()
-        result = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Common Raccoon")
-        self.assertEqual((result["scientific"], result["description"]), ("Procyon lotor", RACCOON))
+        opened = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Common Raccoon")
+        self.assertEqual((opened["scientific"], opened["description"], opened["descriptionPending"]), (None, None, True))
+        late = await self.call(websocket_module.ws_species_description, type="kestrel/species/description", species="Common Raccoon")
+        self.assertEqual((late["scientific"], late["description"]), ("Procyon lotor", RACCOON))
+        again = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Common Raccoon")
+        self.assertEqual((again["scientific"], again["description"], again["descriptionPending"]), ("Procyon lotor", RACCOON, False))
 
-    async def test_a_sheet_opens_without_a_description_when_there_is_none_or_wikipedia_cannot_be_asked(self) -> None:
+    async def test_a_sheet_ends_without_a_description_when_there_is_none_or_wikipedia_cannot_be_asked(self) -> None:
         self.plugin["species/Carolina%20Wren"] = copy.deepcopy(self.SHEET)
         self.session.route("GET", wiki("Thryothorus_ludovicianus"), FakeResponse(503))
         self.session.route("GET", wiki("Carolina_Wren"), FakeResponse(503))
         self.service()
-        result = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
-        self.assertEqual((result["description"], result["descriptionSource"], result["scientific"]), (None, None, SCIENTIFIC))
+        opened = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
+        self.assertEqual((opened["description"], opened["descriptionPending"]), (None, True))
+        late = await self.call(websocket_module.ws_species_description, type="kestrel/species/description", species="Carolina Wren")
+        self.assertEqual(late, {"species": "Carolina Wren", "scientific": SCIENTIFIC, "description": None, "descriptionSource": None})
         self.assertEqual((len(self.connection.results), self.connection.errors), (1, []))
+        resting = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
+        self.assertEqual((resting["description"], resting["descriptionPending"]), (None, False), "nothing is coming during the rest")
 
         del self.hass.data[DOMAIN]["species_descriptions"]  # the service is not running at all
         result = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
-        self.assertEqual((result["description"], result["descriptionSource"]), (None, None))
+        self.assertEqual((result["description"], result["descriptionSource"], result["descriptionPending"]), (None, None, False))
+        await self.call(websocket_module.ws_species_description, type="kestrel/species/description", species="Carolina Wren")
+        self.assertEqual(self.connection.errors, [("not_ready", "Species descriptions are not set up")])
+
+    async def test_a_species_with_no_article_is_final_at_once_on_the_next_sheet(self) -> None:
+        self.plugin["species/Carolina%20Wren"] = copy.deepcopy(self.SHEET)
+        self.session.route("GET", wiki("Thryothorus_ludovicianus"), FakeResponse(404))
+        self.session.route("GET", wiki("Carolina_Wren"), FakeResponse(404))
+        self.service()
+        await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
+        await self.call(websocket_module.ws_species_description, type="kestrel/species/description", species="Carolina Wren")
+        result = await self.call(websocket_module.ws_species_detail, type="kestrel/species/detail", species="Carolina Wren")
+        self.assertEqual((result["description"], result["descriptionPending"]), (None, False))
+
+    async def test_the_late_request_gives_up_cleanly_when_the_lookup_is_too_slow(self) -> None:
+        self.session.route("GET", wiki("Thryothorus_ludovicianus"), Gated(asyncio.Event(), 200, summary()))  # never answers
+        self.service()
+        with mock.patch.object(descriptions, "ASK_WAIT_S", 0.05):
+            late = await self.call(websocket_module.ws_species_description, type="kestrel/species/description", species="Carolina Wren")
+        self.assertEqual(late, {"species": "Carolina Wren", "scientific": SCIENTIFIC, "description": None, "descriptionSource": None})
+        self.assertEqual(self.connection.errors, [])
+
+    def test_the_late_request_takes_a_species_name_of_a_sensible_length_only(self) -> None:
+        schema = websocket_module.ws_species_description.ws_schema
+        self.assertEqual(schema({"id": 1, "type": "kestrel/species/description", "species": "Carolina Wren"})["species"], "Carolina Wren")
+        for bad in ("", "x" * 101, 5, None):
+            with self.assertRaises(vol.Invalid, msg=bad):
+                schema({"id": 1, "type": "kestrel/species/description", "species": bad})
+        with self.assertRaises(vol.Invalid):
+            schema({"id": 1, "type": "kestrel/species/description"})
+
+    def test_the_command_is_registered(self) -> None:
+        registered: list[object] = []
+        hass = HomeAssistant()
+        with mock.patch.object(websocket_module.websocket_api, "async_register_command", lambda _hass, handler: registered.append(handler)):
+            websocket_module.async_setup_websocket_api(hass)
+        self.assertIn(websocket_module.ws_species_description, registered)
 
     async def test_a_species_the_plugin_does_not_know_is_not_found(self) -> None:
         self.plugin["species/Unicorn"] = KestrelApiError("Not found", status=404)

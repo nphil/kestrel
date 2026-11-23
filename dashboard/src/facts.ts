@@ -20,6 +20,8 @@ export interface SpeciesFacts {
   scientific: string | null;
   description: string | null;
   credit: DescriptionCredit | null;
+  /** True while the server is still fetching the description in the background: the sheet opened without it and asks again a moment later. */
+  descriptionPending: boolean;
 }
 
 /** Shown under a description whose answer did not name its source: a Wikipedia summary, which is what Home Assistant asks for. */
@@ -79,7 +81,26 @@ export function speciesFacts(raw: unknown): SpeciesFacts {
     scientific: text(get("scientific")).slice(0, 80) || null,
     description: description || null,
     credit: description && Object.keys(source).length ? { name: text(source.name) || DEFAULT_CREDIT.name, url: https(source.url), licence: text(source.licence), licenceUrl: https(source.licenceUrl) } : null,
+    descriptionPending: get("descriptionPending") === true && !description,
   };
+}
+
+/** The facts once the late answer (`kestrel/species/description`) is in: the description with its credit, and the scientific name it found when the sheet
+ * had none, are added, and the waiting is over. An answer with no description (or an odd one) simply ends the waiting. */
+export function withLateDescription(facts: SpeciesFacts, raw: unknown): SpeciesFacts {
+  const late = speciesFacts(raw);
+  return { ...facts, scientific: facts.scientific ?? late.scientific, description: late.description ?? facts.description, credit: late.description ? late.credit : facts.credit, descriptionPending: false };
+}
+
+/** The same facts with the waiting over: the late answer could not be had, so the sheet goes on without a description (no error shown). */
+export function withoutPending(facts: SpeciesFacts): SpeciesFacts {
+  return facts.descriptionPending ? { ...facts, descriptionPending: false } : facts;
+}
+
+/** What the About block shows: the text, a quiet loading state while the server is still fetching it, or nothing at all. */
+export function aboutState(facts: Pick<SpeciesFacts, "description" | "descriptionPending"> | null): "text" | "loading" | "none" {
+  if (facts?.description) return "text";
+  return facts?.descriptionPending ? "loading" : "none";
 }
 
 /** YYYY-MM-DD of a moment in this device's own calendar. */

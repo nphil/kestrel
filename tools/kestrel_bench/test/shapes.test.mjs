@@ -68,8 +68,19 @@ test("the call the ingest keeps carries the reading's model, score, occurrence, 
   const call = heardCallOf(reading, reading.grp, "88", AT + 500);
   assert.deepEqual({ ...call }, {
     cameraId: "88", at: AT, receivedAt: AT + 500, species: "Pileated Woodpecker", scientific: "Dryocopus pileatus", grp: "bird", score: 0.87, occurrence: OCCURRENCE.common,
-    model: "perch_v2", modelRank: 2, modelLabel: "Perch v2", detectionId: 4412, clip: "dryocopus_pileatus_87p_20261114T140309Z.opus",
+    model: "perch_v2", modelRank: 2, modelLabel: "Perch v2", detectionId: 4412, clip: "dryocopus_pileatus_87p_20261114T140309Z.opus", unlikely: false,
   });
+});
+
+test("BirdNET-Go's unlikely tag is left out of a message unless asked for (BirdNET-Go leaves it out when false), and the plugin's reader and the call it keeps carry it", () => {
+  const plain = birdnetMessage(base);
+  assert.equal("unlikely" in plain, false);
+  const tagged = birdnetMessage({ ...base, unlikely: true });
+  assert.equal(tagged.unlikely, true);
+  const reading = readBirdnetMessage(tagged, classOf, 0);
+  assert.equal(reading.unlikely, true);
+  assert.equal(readBirdnetMessage(plain, classOf, 0).unlikely, false);
+  assert.equal(heardCallOf(reading, reading.grp, "88", AT).unlikely, true);
 });
 
 test("the plugin sorts animals the way the bench's species groups say: a mammal, a frog, a bird, and an insect that is dropped", () => {

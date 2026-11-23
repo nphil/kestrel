@@ -411,6 +411,43 @@ test('heard calls: a repeat delivery is kept once, repeats are counted per micro
     }
 });
 
+test('heard calls keep BirdNET-Go\'s unlikely tag; a database from before the tag gains the column once, with every old call untagged', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kestrel-unlikely-test-'));
+    const path = join(directory, 'kestrel.sqlite');
+    const now = Date.parse('2026-11-23T04:00:00Z');
+    const call = (species, at, extra = {}) => ({
+        cameraId: '88', at, receivedAt: at + 15_000, species, scientific: null, grp: 'bird', score: 0.8, occurrence: 0.4,
+        model: 'birdnet_v3', modelRank: 3, modelLabel: 'BirdNET v3.0', detectionId: 1, clip: null, unlikely: false, ...extra,
+    });
+    try {
+        const first = new KestrelStore(path);
+        const tagged = first.recordHeardCall(call('Blue Jay', now, { unlikely: true }));
+        const plain = first.recordHeardCall(call('Blue Jay', now - 1_000));
+        const notSaid = first.recordHeardCall({ ...call('American Crow', now - 2_000), unlikely: undefined });
+        assert.deepEqual([tagged, plain, notSaid].map(id => first.getHeardCall(id).unlikely), [true, false, false]);
+        first.close();
+        // The database as it was before the tag: the column taken away again.
+        const old = new DatabaseSync(path);
+        old.exec('ALTER TABLE heard_calls DROP COLUMN unlikely');
+        assert.equal(old.prepare('PRAGMA table_info(heard_calls)').all().some(column => column.name === 'unlikely'), false);
+        old.close();
+        for (let opening = 0; opening < 2; opening++) {
+            const store = new KestrelStore(path);
+            try {
+                const columns = store.db.prepare('PRAGMA table_info(heard_calls)').all().map(column => column.name);
+                assert.equal(columns.filter(name => name === 'unlikely').length, 1, `the column exists once (opening ${opening + 1})`);
+                assert.deepEqual([tagged, plain, notSaid].map(id => store.getHeardCall(id).unlikely), [false, false, false], 'a call from before the tag was never tagged');
+                if (opening === 0) {
+                    const later = store.recordHeardCall(call('Northern Cardinal', now, { unlikely: true }));
+                    assert.equal(store.getHeardCall(later).unlikely, true);
+                } else {
+                    assert.equal(store.heardCallsNear('88', now, now).find(item => item.species === 'Northern Cardinal').unlikely, true, 'and it is still tagged after the next start');
+                }
+            } finally { store.close(); }
+        }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 // --- The boxes the detector drew during a visit (track.ts feeds them) ----------------------------------------------------------------------------
 
 const box = (extra = {}) => ({ x: 0.453, y: 0.769, w: 0.064, h: 0.132, className: 'animal', score: 0.82, id: 'w1', ...extra });

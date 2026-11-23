@@ -1,11 +1,12 @@
 import { BASE_CSS, renderIcon, type AudioListRow, type LuCloseDetail, type RailItem } from "lucent-ha";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { api, loadPhotoCredit, speciesPicture, visitAudio, visitAudioOriginal, visitPage, visitSnapshot } from "../api.ts";
-import { DEFAULT_CREDIT, dayBars, dayCaption, dayChartLabel, factRows, newChip, speciesFacts, type FactRow, type SpeciesFacts } from "../facts.ts";
+import { DEFAULT_CREDIT, aboutState, dayBars, dayCaption, dayChartLabel, factRows, newChip, speciesFacts, withLateDescription, withoutPending, type FactRow, type SpeciesFacts } from "../facts.ts";
 import { pluralize, sentence, timestamp, when } from "../format.ts";
 import { forgetExtras } from "../recordings.ts";
 import type { Camera, HomeAssistant, PhotoCredit, Species, Visit, VisitKind } from "../types.ts";
 import { pathOf, sameMedia } from "../urls.ts";
+import { Lru } from "../lru.ts";
 import { BARS_CSS, barChart } from "../ui/bars.ts";
 import { descriptionCredit } from "../ui/description-credit.ts";
 import { HEARD_HERO_CSS, heardHero } from "../ui/heard-hero.ts";
@@ -28,14 +29,14 @@ const NOUN: Record<VisitKind, [string, string]> = { seen: ["video", "videos"], h
 const EMPTY: Record<VisitKind, string> = { seen: "Not seen on camera yet", heard: "Not heard yet" };
 const KINDS: VisitKind[] = ["seen", "heard"];
 
-/** Sections seen this session, so reopening a species (or coming back to it with Back) shows its lists at
+/** Sections seen this session (the 12 looked at most recently), so reopening a species (or coming back to it with Back) shows its lists at
  * once and refreshes them behind the scenes. Signed media links last 12 hours; this keeps them for 30 minutes. */
-const CACHE = new Map<string, { at: number; sections: Sections }>();
 const CACHE_MAX = 12;
+const CACHE = new Lru<string, { at: number; sections: Sections }>(CACHE_MAX);
 const CACHE_TTL_MS = 30 * 60_000;
 
 /** What the sheet's own answer adds to the list's fields (`speciesFacts`: the days, first and last, the surest ID, the description), kept the same way. */
-const FACTS = new Map<string, { at: number; facts: SpeciesFacts }>();
+const FACTS = new Lru<string, { at: number; facts: SpeciesFacts }>(CACHE_MAX);
 
 const fresh = (): Sections => ({ seen: { items: [], next: null, state: "loading" }, heard: { items: [], next: null, state: "loading" } });
 const startedMs = (visit: Visit): number => timestamp(visit.startedAt) ?? 0;
@@ -55,9 +56,7 @@ export function forgetSheetCache(): void {
 }
 
 function remember(name: string, sections: Sections): void {
-  CACHE.delete(name);
   CACHE.set(name, { at: Date.now(), sections });
-  while (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value as string);
 }
 
 /** A species' evidence: what the cameras caught and what the microphone heard, each in its own section.
@@ -256,13 +255,30 @@ export class KestrelSpeciesSheet extends LitElement {
     try {
       const facts = speciesFacts(await api.speciesDetail(hass, name));
       if (request !== this._factsRequest || name !== this.species?.species) return;
-      FACTS.delete(name);
       FACTS.set(name, { at: Date.now(), facts });
-      while (FACTS.size > CACHE_MAX) FACTS.delete(FACTS.keys().next().value as string);
       this._facts = facts;
+      if (facts.descriptionPending) void this._fillDescription(name, request);
     } catch {
-      // nothing to show for them
+      // nothing to show for them; but a "still loading" mark kept from an earlier visit must not stay on for ever
+      if (request === this._factsRequest && name === this.species?.species && this._facts) this._facts = withoutPending(this._facts);
     }
+  }
+
+  /** The sheet opened without its description (the server was still fetching it): asks for it now and fills it in. The answer is dropped when the sheet has moved
+   * on (another species, closed, asked for again) since asking. When it cannot be had the loading state just goes away; there is no error to show for an extra. */
+  private async _fillDescription(name: string, request: number): Promise<void> {
+    const hass = this.hass;
+    if (!hass) return;
+    let late: unknown = null;
+    try {
+      late = await api.speciesDescription(hass, name);
+    } catch {
+      // handled below like an answer with nothing in it
+    }
+    if (request !== this._factsRequest || name !== this.species?.species || !this._facts) return;
+    const facts = late === null ? withoutPending(this._facts) : withLateDescription(this._facts, late);
+    FACTS.set(name, { at: Date.now(), facts });
+    this._facts = facts;
   }
 
   private _onClose(event: CustomEvent<LuCloseDetail>): void {
@@ -324,8 +340,11 @@ export class KestrelSpeciesSheet extends LitElement {
   /** A few sentences from Wikipedia, with who wrote them and under which licence. */
   private _renderAbout() {
     const facts = this._facts;
-    if (!facts?.description) return nothing;
-    return html`<section class="block"><h3>About</h3><p class="blurb">${facts.description}</p>${descriptionCredit(facts.credit ?? DEFAULT_CREDIT)}</section>`;
+    const state = aboutState(facts);
+    if (state === "none") return nothing;
+    // While the words are on their way: three quiet lines (the toolkit's text skeleton, static) where the paragraph will be.
+    if (state === "loading") return html`<section class="block" aria-busy="true"><h3>About</h3><kestrel-lu-state kind="loading" variant="text" count="3" heading="Loading the description"></kestrel-lu-state></section>`;
+    return html`<section class="block"><h3>About</h3><p class="blurb">${facts?.description}</p>${descriptionCredit(facts?.credit ?? DEFAULT_CREDIT)}</section>`;
   }
 
   /** First and last time, and the surest ID: small cells under the photo. The surest ID is the one that opens something (that visit). */

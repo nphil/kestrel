@@ -76,3 +76,12 @@ export function loadExtras(ask: (ids: string[]) => Promise<unknown>, ids: readon
   }
   return Promise.all(waiting).then(() => undefined);
 }
+
+/** How long a picture that was not ready waits before it is asked for again, counted from the try that failed. BirdNET-Go carries on drawing after the server stops
+ * waiting, so the first pause is short; the later ones are for a recording that takes long to prepare. Added up it is about eight minutes, then the picture is given up on. */
+export const PICTURE_RETRY_MS: readonly number[] = [2_000, 15_000, 45_000, 120_000, 300_000];
+
+/** The pause before the next try, `retries` being how many times the picture has been asked for again so far; `null` when it is time to give up. */
+export function pictureRetryDelay(retries: number): number | null {
+  return PICTURE_RETRY_MS[retries] ?? null;
+}

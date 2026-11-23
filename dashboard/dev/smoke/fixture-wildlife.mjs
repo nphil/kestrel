@@ -36,7 +36,7 @@ runSmoke("fixture-wildlife", async (fx) => {
   // ---- the species sheet ----------------------------------------------------------------------------------------------------------------------------------
   await page.locator('button.species-tile[aria-label^="Northern Cardinal."]').first().click();
   await fx.poll(() => fx.panel.speciesOpen(), { timeout: 8000 });
-  await fx.settle(1800);
+  await fx.settle(3800); // the About text follows the sheet by about two seconds (the harness fakes a slow Wikipedia)
   const sheet = await fx.ev((deep) => {
     const root = deep(window.__panelRoot(), "kestrel-species-sheet")[0]?.shadowRoot;
     return {

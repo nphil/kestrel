@@ -1,5 +1,6 @@
 import { readDetections } from "./detections.ts";
 import { pathOf, stableUrl } from "./urls.ts";
+import { Lru } from "./lru.ts";
 import { keptRecording } from "./keep.ts";
 import type { KindChoice } from "./highlights.ts";
 import type { SpeciesPeriod } from "./period.ts";
@@ -21,6 +22,8 @@ export const api = {
   /** `period` narrows the list (and its counts) to a stretch of time; without one, or with "all", the answer is the whole list as it always was. */
   species: (hass: HomeAssistant, period?: SpeciesPeriod) => callWS<Species[] | { items: Species[] }>(hass, "kestrel/species", period && period !== "all" ? { period } : {}),
   speciesDetail: (hass: HomeAssistant, name: string) => callWS<SpeciesDetail | Species>(hass, "kestrel/species/detail", { species: name }),
+  /** The few words about a species that the sheet's own answer did not have yet (`descriptionPending`); the server waits for its lookup. The raw answer: `withLateDescription()` makes it safe to use. */
+  speciesDescription: (hass: HomeAssistant, species: string) => callWS<unknown>(hass, "kestrel/species/description", { species }),
   // The server's raw answer: `referenceSounds()` makes it safe to use.
   speciesReference: (hass: HomeAssistant, species: string) => callWS<unknown>(hass, "kestrel/species/reference", { species }),
   /** The weather and spectrogram of up to twenty recordings at once, by visit id; the raw answer: `readExtras()` makes it safe to use. */
@@ -192,21 +195,29 @@ export function photoInfo(value: unknown): PhotoCredit | null {
   return info.source || info.credit || info.licence ? info : null;
 }
 
-const credits = new Map<string, PhotoCredit>();
+/** Who took a photo is kept for the photos looked at lately, so a tab left open for days does not grow with every species it has met. */
+const credits = new Lru<string, PhotoCredit>(200);
 
-/** Asks once per photo (kept by path, whatever the signature) who took it. Never throws: 204, an error or an answer that cannot be read is null,
- * and only a credit is kept, so a photo the server did not know yet is asked about again next time. */
+/** The server answers from what it already knows or after a quick lookup; one that takes longer is not worth holding the caption for. */
+const CREDIT_TIMEOUT_MS = 8_000;
+
+/** Asks once per photo (kept by path, whatever the signature) who took it. Never throws: 204, an error, an answer that cannot be read or one that
+ * takes more than 8 seconds is null, and only a credit is kept, so a photo the server did not know yet is asked about again next time. */
 export async function loadPhotoCredit(url: string): Promise<PhotoCredit | null> {
   const key = pathOf(url);
   const kept = credits.get(key);
   if (kept) return kept;
+  const stop = new AbortController();
+  const timer = setTimeout(() => stop.abort(), CREDIT_TIMEOUT_MS);
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: stop.signal });
     const info = response.status === 200 ? photoInfo(await response.json()) : null;
     if (info) credits.set(key, info);
     return info;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
-    HeardIngest, PAIR_WINDOW_MS, SECOND_OPINION_SETTLE_MS, SETTLE_MS, decideTier, isDisagreement, isRareHere, modelOf, occurrenceOf,
+    HeardIngest, PAIR_WINDOW_MS, SECOND_OPINION_SETTLE_MS, SETTLE_MS, decideTier, isDisagreement, isRareHere, modelOf, occurrenceOf, readBirdnetMessage,
 } from '../src/heard.ts';
 import { linkSeenAndHeard } from '../src/link.ts';
 import { KestrelStore } from '../src/store.ts';
@@ -18,8 +18,8 @@ const MODELS = {
 };
 const CAMERAS = { 88: 'Backyard Camera', 103: 'Back Door Camera' };
 
-function heardCall(species, score, at, { model = 'v3', occurrence = 0.5, camera = '88', received = at + 15_000, scientific = null, grp = 'bird' } = {}) {
-    return { cameraId: camera, at, receivedAt: received, species, scientific, grp, score, occurrence, ...MODELS[model], detectionId: at % 100_000, clip: `${species}.opus` };
+function heardCall(species, score, at, { model = 'v3', occurrence = 0.5, camera = '88', received = at + 15_000, scientific = null, grp = 'bird', unlikely = false } = {}) {
+    return { cameraId: camera, at, receivedAt: received, species, scientific, grp, score, occurrence, ...MODELS[model], detectionId: at % 100_000, clip: `${species}.opus`, unlikely };
 }
 
 async function withHarness(run, { cooldownMs = 10 * 60_000, usual = () => [], muted = [], commonness } = {}) {
@@ -96,7 +96,7 @@ test('the models disagree only when they name different birds and one of them is
 
 // --- the tier rules -------------------------------------------------------------------------------
 
-const evidence = (overrides = {}) => ({ score: 0.9, corroborated: true, repeats: 0, rare: false, disagrees: false, newHere: false, ...overrides });
+const evidence = (overrides = {}) => ({ score: 0.9, corroborated: true, repeats: 0, rare: false, disagrees: false, newHere: false, agreed: false, unlikely: false, ...overrides });
 
 test('the tier follows the plain rules: clear call, good call heard again, weak call, rare bird, second opinion, disagreement', () => {
     const rows = [
@@ -121,6 +121,43 @@ test('the tier follows the plain rules: clear call, good call heard again, weak 
     ];
     for (const [overrides, tier, why] of rows)
         assert.deepEqual(decideTier(evidence(overrides)), { tier, why }, JSON.stringify(overrides));
+});
+
+test('BirdNET-Go\'s unlikely tag makes a call Check and never Likely; both models agreeing counts as hearing it again, and moves none of the other rules', () => {
+    const rows = [
+        [{ unlikely: true }, 'check', ['birdnet_unlikely']],
+        [{ unlikely: true, score: 0.99, repeats: 4 }, 'check', ['birdnet_unlikely']],
+        [{ unlikely: true, agreed: true }, 'check', ['birdnet_unlikely']],
+        [{ unlikely: true, corroborated: false }, 'check', ['birdnet_unlikely']],
+        [{ unlikely: true, score: 0.3 }, 'check', ['birdnet_unlikely']],
+        [{ unlikely: true, disagrees: true }, 'check', ['models_disagree', 'birdnet_unlikely']],
+        [{ agreed: true }, 'likely', ['strong', 'models_agree']],
+        [{ agreed: true, score: 0.65 }, 'likely', ['models_agree']],
+        [{ agreed: true, score: 0.6 }, 'likely', ['models_agree']],
+        [{ agreed: true, score: 0.65, repeats: 1 }, 'likely', ['repeated', 'models_agree']],
+        [{ agreed: true, score: 0.65, newHere: true }, 'likely', ['models_agree']],
+        [{ agreed: true, score: 0.59 }, 'possible', ['weak']],
+        [{ agreed: true, score: 0.55, repeats: 3 }, 'possible', ['weak']],
+        [{ agreed: true, score: null }, 'possible', ['weak']],
+        [{ agreed: true, score: 0.65, rare: true }, 'check', ['rare_here']],
+        [{ agreed: true, score: 0.65, rare: true, repeats: 1 }, 'check', ['rare_here']],
+        [{ agreed: true, rare: true }, 'check', ['rare_here']],
+        [{ agreed: true, score: 0.65, rare: true, repeats: 2 }, 'likely', ['repeated', 'models_agree']],
+        [{ agreed: true, disagrees: true }, 'check', ['models_disagree']],
+        [{ agreed: true, corroborated: false }, 'possible', ['second_opinion_only']],
+        [{ agreed: false, score: 0.65 }, 'possible', ['weak']],
+    ];
+    for (const [overrides, tier, why] of rows)
+        assert.deepEqual(decideTier(evidence(overrides)), { tier, why }, JSON.stringify(overrides));
+});
+
+test('BirdNET-Go\'s unlikely flag is read from the message (only a real true counts), and is absent from a normal one', () => {
+    const message = { CommonName: 'Blue Jay', Confidence: 0.9, detectionId: 12, sourceName: 'Backyard Camera', Model: { Name: 'BirdNET', Version: '3.0' } };
+    const read = extra => readBirdnetMessage({ ...message, ...extra }, () => undefined, T);
+    assert.equal(read({}).unlikely, false);
+    assert.equal(read({ unlikely: true }).unlikely, true);
+    assert.equal(read({ Unlikely: true }).unlikely, true);
+    for (const value of [false, 'true', 1, null, 'yes']) assert.equal(read({ unlikely: value }).unlikely, false, JSON.stringify(value));
 });
 
 // --- one visit from two models --------------------------------------------------------------------
@@ -497,4 +534,234 @@ test('real BirdNET-Go 20260823 messages (captured 2026-10-03) carry the model as
     assert.equal(occurrenceOf(perch), 0.5629528760910034);
     assert.equal(modelOf(v3).key, 'birdnet_v3');
     assert.equal(occurrenceOf(v3), 0.066);
+});
+
+// --- BirdNET-Go's unlikely tag, through the ingest ---------------------------------------------------
+
+test('a clear call BirdNET-Go tagged unlikely is kept as a Check visit for a person to look at: not counted, not announced as news, in the review list', async () => {
+    await withHarness(({ store, hear, settle, visits, events }) => {
+        hear(heardCall('Blue Jay', 0.95, T, { unlikely: true }));
+        settle();
+        const [visit] = visits();
+        assert.equal(visit.unlikely, true);
+        assert.equal(visit.tier, 'check');
+        assert.deepEqual(visit.tierWhy, ['birdnet_unlikely']);
+        assert.equal(visit.review, true);
+        assert.equal(visit.notify, false);
+        assert.equal(visit.firstEver, false);
+        assert.deepEqual(store.listReview().map(item => item.id), [visit.id]);
+        assert.equal(store.speciesList().length, 0, 'a call BirdNET-Go doubts adds nothing to the species list');
+        assert.deepEqual(events, [['visit_new', visit.id]]);
+        assert.equal(store.getVisit(visit.id).unlikely, true, 'and it is still there after being read back from the database');
+    });
+});
+
+test('the unlikely tag stays while every call of the visit has it and clears when a later call of the bird is not tagged, the way BirdNET-Go merges its own hits', async () => {
+    await withHarness(({ hear, ingest, visits, events }) => {
+        const first = heardCall('Scarlet Tanager', 0.9, T, { unlikely: true });
+        hear(first);
+        ingest.flush(first.receivedAt + SETTLE_MS);
+        const again = heardCall('Scarlet Tanager', 0.9, T + 20_000, { unlikely: true });
+        hear(again);
+        ingest.flush(again.receivedAt + SETTLE_MS);
+        let [visit] = visits();
+        assert.equal(visits().length, 1, 'the same bird inside the cooldown is the same visit');
+        assert.equal(visit.repeats, 1);
+        assert.equal(visit.unlikely, true, 'every call of it is tagged');
+        assert.equal(visit.tier, 'check');
+        assert.deepEqual(visit.tierWhy, ['birdnet_unlikely']);
+        assert.deepEqual(events, [['visit_new', 'visit-1']], 'a tagged repeat is saved quietly');
+        const plain = heardCall('Scarlet Tanager', 0.9, T + 40_000);
+        hear(plain);
+        ingest.flush(plain.receivedAt + SETTLE_MS);
+        [visit] = visits();
+        assert.equal(visit.unlikely, false, 'a call BirdNET-Go did not tag clears it');
+        assert.equal(visit.tier, 'likely');
+        assert.deepEqual(visit.tierWhy, ['strong', 'repeated']);
+        assert.equal(visit.review, false, 'it left the review queue by itself');
+        assert.deepEqual(events, [['visit_new', 'visit-1'], ['visit_updated', 'visit-1']]);
+    });
+});
+
+test('a Likely visit is not taken back by a later tagged call (the tag only holds while every call has it), and one tagged call of a never-tagged bird makes no visit Check', async () => {
+    await withHarness(({ hear, ingest, visits, events }) => {
+        const first = heardCall('Eastern Towhee', 0.9, T);
+        hear(first);
+        ingest.flush(first.receivedAt + SETTLE_MS);
+        const tagged = heardCall('Eastern Towhee', 0.9, T + 20_000, { unlikely: true });
+        hear(tagged);
+        ingest.flush(tagged.receivedAt + SETTLE_MS);
+        const [visit] = visits();
+        assert.notEqual(visit.unlikely, true);
+        assert.equal(visit.tier, 'likely');
+        assert.deepEqual(events, [['visit_new', 'visit-1']]);
+    });
+});
+
+test('when the other model\'s call of the same bird is not tagged, the visit is not tagged either; when both are, it is', async () => {
+    for (const [perchTagged, expected] of [[false, 'likely'], [true, 'check']]) {
+        await withHarness(({ store, hear, settle, visits }) => {
+            v3IsRunning(store);
+            knownSpecies(store, 'Wood Thrush');
+            hear(heardCall('Wood Thrush', 0.9, T, { model: 'v3', unlikely: true }), heardCall('Wood Thrush', 0.8, T + 1_000, { model: 'perch', unlikely: perchTagged }));
+            settle();
+            const [visit] = visits().filter(item => item.tier);
+            assert.equal(visit.tier, expected, `perch tagged: ${perchTagged}`);
+            assert.equal(visit.unlikely === true, perchTagged);
+        });
+    }
+});
+
+test('a call of a visit that was kept before the tag existed has no tag, and a retarget takes the tag of the call that renamed it', async () => {
+    await withHarness(({ store, hear, ingest, visits }) => {
+        v3IsRunning(store);
+        const perch = heardCall('Fish Crow', 0.7, T, { model: 'perch', received: T + 15_000, unlikely: true });
+        hear(perch);
+        ingest.flush(perch.receivedAt + SECOND_OPINION_SETTLE_MS);
+        assert.equal(visits().find(visit => visit.tier).unlikely, true);
+        const v3 = heardCall('American Crow', 0.85, T + 1_000, { model: 'v3', received: perch.receivedAt + SECOND_OPINION_SETTLE_MS + 3_000 });
+        hear(v3);
+        ingest.flush(v3.receivedAt + SETTLE_MS);
+        const [visit] = visits().filter(item => item.tier);
+        assert.equal(visit.species, 'American Crow');
+        assert.notEqual(visit.unlikely, true, 'v3.0\'s own call was not tagged');
+        assert.deepEqual(visit.tierWhy, ['models_disagree']);
+    });
+});
+
+// --- both models agreeing -----------------------------------------------------------------------------
+
+test('both models naming the same bird is Likely from a 60% call; the 60% floor, the rare-bird rule and the disagreement rule are unchanged', async () => {
+    const heardBy = async (calls, { known = true, occurrence = 0.5 } = {}) => {
+        let visit;
+        await withHarness(({ store, hear, settle, visits }) => {
+            v3IsRunning(store);
+            if (known) knownSpecies(store, 'Wood Thrush');
+            hear(...calls.map(([score, model, species = 'Wood Thrush']) => heardCall(species, score, T + (model === 'perch' ? 1_000 : 0), { model, occurrence })));
+            settle();
+            visit = visits().find(item => item.tier);
+        });
+        return visit;
+    };
+    const both = await heardBy([[0.65, 'v3'], [0.72, 'perch']]);
+    assert.equal(both.tier, 'likely');
+    assert.deepEqual(both.tierWhy, ['models_agree']);
+    assert.deepEqual(both.models.map(item => [item.model, item.species, item.role]), [['birdnet_v3', 'Wood Thrush', 'named'], ['perch_v2', 'Wood Thrush', 'agree']]);
+    assert.equal(both.repeats, 0);
+    assert.equal(both.review, false);
+    const alone = await heardBy([[0.65, 'v3']]);
+    assert.equal(alone.tier, 'possible', 'the same call heard by v3.0 alone is only Possible');
+    assert.deepEqual(alone.tierWhy, ['weak']);
+    const faint = await heardBy([[0.55, 'v3'], [0.9, 'perch']]);
+    assert.equal(faint.tier, 'possible', 'the main model\'s own score decides: under 60% is under 60%, whatever the other model says');
+    const rare = await heardBy([[0.65, 'v3'], [0.72, 'perch']], { occurrence: 0.05 });
+    assert.equal(rare.tier, 'check', 'a rare bird still needs three calls');
+    assert.deepEqual(rare.tierWhy, ['rare_here']);
+    const disagree = await heardBy([[0.8, 'v3'], [0.7, 'perch', 'American Crow']]);
+    assert.equal(disagree.tier, 'check');
+    assert.deepEqual(disagree.tierWhy, ['models_disagree']);
+});
+
+// --- what BirdNET-Go's record of a detection says each model heard ----------------------------------------
+
+const contributions = (v3 = { hitCount: 3, maxConfidence: 0.71 }, perch = { hitCount: 3, maxConfidence: 0.93 }) => [
+    { modelName: 'BirdNET', modelVersion: '3.0', modelType: 'birdnet', ...v3 },
+    { modelName: 'Perch', modelVersion: 'V2', ...perch },
+];
+
+test('a Perch call v3.0 also heard (BirdNET-Go\'s detection record says so) becomes "both models agreed": announced once, saying it again changes nothing', async () => {
+    await withHarness(({ store, hear, settle, visits, ingest, events }) => {
+        v3IsRunning(store);
+        knownSpecies(store, 'Killdeer');
+        const call = heardCall('Killdeer', 0.93, T, { model: 'perch' });
+        hear(call);
+        settle();
+        let [visit] = visits().filter(item => item.tier);
+        assert.equal(visit.tier, 'possible', 'by the message alone only the second opinion heard it');
+        assert.deepEqual(visit.tierWhy, ['second_opinion_only']);
+        events.length = 0;
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, contributions(), T + 60_000), 'updated');
+        [visit] = visits().filter(item => item.tier);
+        assert.deepEqual(visit.models.map(item => [item.model, item.species, item.role, item.score]), [['perch_v2', 'Killdeer', 'named', 0.93], ['birdnet_v3', 'Killdeer', 'agree', 0.71]]);
+        assert.equal(visit.tier, 'likely', 'v3.0\'s own 71% plus Perch agreeing');
+        assert.deepEqual(visit.tierWhy, ['models_agree']);
+        assert.equal(visit.review, false);
+        assert.deepEqual(events, [['visit_updated', visit.id]]);
+        assert.equal(store.getVisit(visit.id).tier, 'likely', 'and it is saved');
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, contributions(), T + 61_000), 'unchanged');
+        assert.deepEqual(events, [['visit_updated', visit.id]], 'nothing more is announced');
+        assert.equal(store.getVisit(visit.id).models.length, 2);
+    });
+});
+
+test('model contributions: a model that did not hear it, an unrated source and a score on a 0-100 scale are all handled; a faint v3.0 hit does not make a Likely call', async () => {
+    await withHarness(({ store, hear, settle, visits, ingest }) => {
+        v3IsRunning(store);
+        knownSpecies(store, 'Killdeer');
+        const call = heardCall('Killdeer', 0.93, T, { model: 'perch' });
+        hear(call);
+        settle();
+        const [visit] = visits().filter(item => item.tier);
+        const silent = [{ modelName: 'BirdNET', modelVersion: '3.0', hitCount: 0, maxConfidence: 0 }, { modelName: 'Perch', modelVersion: 'V2', hitCount: 2, maxConfidence: 0.93 }];
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, silent, T + 60_000), 'unchanged', 'a model that ran but did not hear it adds nothing');
+        const unrated = [{ modelName: 'Some Custom Model', modelVersion: '1', hitCount: 4, maxConfidence: 0.9 }];
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, unrated, T + 60_000), 'unchanged', 'an unrated source is no model agreeing');
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, [{ modelName: 'BirdNET', modelVersion: '3.0', hitCount: 1, maxConfidence: 41 }], T + 60_000), 'updated');
+        const after = store.getVisit(visit.id);
+        assert.equal(after.models.find(item => item.model === 'birdnet_v3').score, 0.41, '41 on a 0-100 scale is 41%');
+        assert.equal(after.tier, 'possible', 'v3.0 at 41% is not a good call, so agreeing alone does not make it Likely');
+        assert.deepEqual(after.tierWhy, ['weak']);
+    });
+});
+
+test('model contributions leave alone a visit that is about another detection, one a person decided, and anything that is not a heard visit; unknown ids are reported', async () => {
+    await withHarness(({ store, hear, settle, visits, ingest }) => {
+        v3IsRunning(store);
+        knownSpecies(store, 'Killdeer');
+        const call = heardCall('Killdeer', 0.93, T, { model: 'perch' });
+        hear(call);
+        settle();
+        const [visit] = visits().filter(item => item.tier);
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId + 1, contributions(), T + 60_000), 'stale', 'the visit is about a different detection');
+        assert.equal(ingest.recordContributions('no-such-visit', call.detectionId, contributions(), T + 60_000), 'unknown');
+        assert.equal(ingest.recordContributions('known-Killdeer', 0, contributions(), T + 60_000), 'stale', 'a visit without a BirdNET-Go detection');
+        assert.equal(store.getVisit(visit.id).models.length, 1, 'nothing was added');
+        store.saveVisit({ ...store.getVisit(visit.id), status: 'confirmed' });
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, contributions(), T + 60_000), 'stale', 'a person already decided it');
+        assert.equal(store.getVisit(visit.id).models.length, 1);
+        assert.equal(store.getVisit(visit.id).status, 'confirmed');
+    });
+    await withHarness(({ store, ingest }) => {
+        savedSighting(store, 'seen-raccoon', 'Common Raccoon');
+        assert.equal(ingest.recordContributions('seen-raccoon', 1, contributions(), T), 'unknown', 'a camera sighting has no models to hear');
+    });
+});
+
+test('model contributions never relax the rare-bird rule, and never lift an unlikely call out of Check', async () => {
+    await withHarness(({ store, hear, settle, visits, ingest }) => {
+        v3IsRunning(store);
+        knownSpecies(store, 'Killdeer');
+        const call = heardCall('Killdeer', 0.93, T, { model: 'perch', occurrence: 0.05 });
+        hear(call);
+        settle();
+        const [visit] = visits().filter(item => item.tier);
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, contributions(), T + 60_000), 'updated');
+        const after = store.getVisit(visit.id);
+        assert.equal(after.tier, 'check', 'a bird that is rare here still needs more than one call');
+        assert.ok(after.tierWhy.includes('rare_here'));
+    });
+    await withHarness(({ store, hear, settle, visits, ingest }) => {
+        v3IsRunning(store);
+        knownSpecies(store, 'Killdeer');
+        const call = heardCall('Killdeer', 0.93, T, { model: 'perch', unlikely: true });
+        hear(call);
+        settle();
+        const [visit] = visits().filter(item => item.tier);
+        assert.deepEqual(visit.tierWhy, ['birdnet_unlikely']);
+        assert.equal(ingest.recordContributions(visit.id, call.detectionId, contributions(), T + 60_000), 'updated', 'the models are recorded');
+        const after = store.getVisit(visit.id);
+        assert.deepEqual(after.models.map(item => item.model), ['perch_v2', 'birdnet_v3']);
+        assert.equal(after.tier, 'check');
+        assert.deepEqual(after.tierWhy, ['birdnet_unlikely']);
+    });
 });
