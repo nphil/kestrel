@@ -23,8 +23,8 @@ async def test_setup_creates_one_device_and_the_entities(hass: HomeAssistant, se
 
     entities = er.async_entries_for_config_entry(er.async_get(hass), setup_kestrel.entry_id)
     domains = sorted(entity.domain for entity in entities)
-    # One connection sensor, one heard-animal event, and an event + image per camera.
-    assert domains == ["binary_sensor", "event", "event", "event", "image", "image"]
+    # A connection sensor, the BirdNET-Go link sensor, one heard-animal event, and an event + image per camera.
+    assert domains == ["binary_sensor", "binary_sensor", "event", "event", "event", "image", "image"]
     assert {entity.device_id for entity in entities} == {devices[0].id}
     assert hass.states.get("binary_sensor.kestrel_connection").state == "on"
 

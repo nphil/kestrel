@@ -67,7 +67,24 @@
     "binary_sensor": {
       "connection": {
         "name": "Connection"
+      },
+      "birdnet_link": {
+        "name": "BirdNET-Go link"
       }
+    }
+  },
+  "issues": {
+    "birdnet_link_unreachable": {
+      "title": "Kestrel cannot reach BirdNET-Go",
+      "description": "Kestrel has not been able to reach the BirdNET-Go app for at least 15 minutes, so heard birds, recordings and corrections are not working. Check that the BirdNET-Go app is started (Settings > Apps). If it stopped after an update, start it again or restore the backup taken before the update.\n\nWhat failed: {detail}"
+    },
+    "birdnet_link_api_changed": {
+      "title": "BirdNET-Go no longer answers the way Kestrel expects",
+      "description": "BirdNET-Go is running, but for at least 15 minutes it has answered Kestrel's requests differently from before. This usually means a BirdNET-Go update changed its API. Heard-bird recordings, model details or corrections may not work until Kestrel is updated for it, or the BirdNET-Go update is rolled back from the backup taken before it.\n\nWhat failed: {detail}"
+    },
+    "birdnet_link_not_reaching_kestrel": {
+      "title": "BirdNET-Go detections are not reaching Kestrel",
+      "description": "BirdNET-Go keeps detecting birds, but the Kestrel plugin has not received them over MQTT. New heard birds will not appear in Kestrel. Check BirdNET-Go's MQTT settings (Settings > Integrations > MQTT: broker, topic `birdnet`), which an update may have reset."
     }
   }
 }

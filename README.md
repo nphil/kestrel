@@ -52,6 +52,11 @@ for those.
   the same mix-up, and the retrain tool can teach the model itself.
 - **AI check-up** — a review queue for unsure calls, cameras that trigger AI checks
   with nothing found, detector / GPU / storage health, and BirdNET status.
+- **BirdNET-Go link check** — every 5 minutes Kestrel checks that BirdNET-Go still
+  answers its API the way Kestrel expects and that its detections still reach the
+  plugin over MQTT. `binary_sensor.kestrel_birdnet_go_link` turns on when something
+  broke, and after 15 minutes a Home Assistant repair names what (unreachable, API
+  changed after an update, or detections not arriving). A quiet night is not a problem.
 - **Notifications** — one per visit, with the snapshot, deep-linked to the visit.
 
 Built in the **Lucent** design language on the shared
